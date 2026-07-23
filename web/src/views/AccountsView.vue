@@ -26,6 +26,7 @@ import { api, jsonBody } from "../api";
 import type { Channel, Credential, Provider, QuotaSnapshot, QuotaWindow } from "../types";
 
 interface SourceOption {
+  [key: string]: unknown;
   label: string;
   value: string;
   type: "channel" | "provider";

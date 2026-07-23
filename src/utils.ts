@@ -33,10 +33,12 @@ export function base64UrlEncode(data: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-export function base64UrlDecode(value: string): Uint8Array {
+export function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
   const binary = atob(padded);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }
 
 export function base64Encode(data: Uint8Array): string {
@@ -45,13 +47,16 @@ export function base64Encode(data: Uint8Array): string {
   return btoa(binary);
 }
 
-export function base64Decode(value: string): Uint8Array {
+export function base64Decode(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }
 
 export async function sha256Hex(value: string | Uint8Array): Promise<string> {
-  const bytes = typeof value === "string" ? encoder.encode(value) : value;
+  const source = typeof value === "string" ? encoder.encode(value) : value;
+  const bytes: Uint8Array<ArrayBuffer> = new Uint8Array(source);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

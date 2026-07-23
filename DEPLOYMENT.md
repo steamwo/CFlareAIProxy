@@ -34,16 +34,42 @@ Build command: pnpm run build
 Deploy command: node scripts/deploy.mjs
 ```
 
-必需 Secrets：
+管理员登录 Secret：
 
 ```text
-MASTER_KEY
-ADMIN_TOKEN
-ADMIN_USERNAME
-ADMIN_PASSWORD
+ADMIN_USERNAME   # 可选，默认 admin
+ADMIN_PASSWORD   # 必须由部署者设置为强密码
 ```
 
-`deploy.mjs` 会确保 Queue 存在，执行 `wrangler deploy`，并应用远程 D1 migrations。D1 与 KV 使用 Wrangler 自动资源配置，不要在模板中填写假的资源 ID。
+部署脚本会在 `ADMIN_TOKEN` 或 `MASTER_KEY` 缺失时安全生成一次，并通过临时 `--secrets-file` 随部署上传；已有值会被保留，不会在后续部署中轮换。生成值不会打印到日志，临时文件会在命令结束后删除。
+
+`deploy.mjs` 会确保 Queue 存在，执行 `wrangler deploy`，应用远程 D1 migrations，并查询 `providers` 表验证远程 schema。D1 与 KV 使用 Wrangler 自动资源配置，不要在模板中填写假的资源 ID。
+
+## 部署后检查
+
+访问：
+
+```text
+https://你的-worker地址/health
+```
+
+正常响应应包含：
+
+```json
+{
+  "status": "ok",
+  "database": "ok"
+}
+```
+
+如果可以登录，但后台接口返回 `DATABASE_NOT_INITIALIZED`，说明远程 D1 migrations 没有应用。使用与部署相同的 Cloudflare 账号执行：
+
+```bash
+pnpm exec wrangler d1 migrations apply DB --remote --yes
+pnpm exec wrangler d1 execute DB --remote --yes --command "SELECT COUNT(*) FROM providers"
+```
+
+如果 `/health` 返回 `database: "error"`，检查 Worker 的 Bindings 中是否存在名为 `DB` 的 D1 binding，并重新运行 `node scripts/deploy.mjs`。
 
 ## 代理
 
