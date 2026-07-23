@@ -6,72 +6,10 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply-brand-rename:
-    if: github.event_name == 'pull_request' && github.head_ref == 'agent/rename-cflareapi-brand'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref }}
-          fetch-depth: 1
-          show-progress: false
-      - name: Apply exact legacy brand replacements outside workflows
-        shell: bash
-        run: |
-          python <<'PY'
-          from pathlib import Path
-          import json
-
-          old = ("CFlare" + "API").encode()
-          new = b"CFlareAIProxy"
-          report = json.loads(Path(".rename-report.json").read_text(encoding="utf-8"))
-          changed = []
-          for name in report["content_matches"]:
-              if name.startswith(".github/workflows/"):
-                  continue
-              path = Path(name)
-              data = path.read_bytes()
-              updated = data.replace(old, new)
-              if updated != data:
-                  path.write_bytes(updated)
-                  changed.append(name)
-          print(f"Updated {len(changed)} project files")
-          for name in changed:
-              print(f"  {name}")
-          PY
-
-          python <<'PY'
-          from pathlib import Path
-          import json
-          import sys
-
-          old = ("CFlare" + "API").encode()
-          report = json.loads(Path(".rename-report.json").read_text(encoding="utf-8"))
-          failures = []
-          for name in report["content_matches"]:
-              if name.startswith(".github/workflows/"):
-                  continue
-              path = Path(name)
-              if old in path.read_bytes():
-                  failures.append(name)
-          if failures:
-              print("Legacy brand references remain:", file=sys.stderr)
-              print("\n".join(failures), file=sys.stderr)
-              raise SystemExit(1)
-          PY
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- ':!.github/workflows/*' ':!.rename-report.json'
-          git commit -m "Rename CFlareAPI to CFlareAIProxy"
-          git push origin HEAD:${GITHUB_HEAD_REF}
-
   check:
-    needs: apply-brand-rename
-    if: always() && (needs.apply-brand-rename.result == 'success' || needs.apply-brand-rename.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
