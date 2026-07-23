@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env, PoolCandidate, PoolLease, PoolStrategy } from "./types";
 
 interface PoolStat {
+  [key: string]: SqlStorageValue;
   credential_id: string;
   inflight: number;
   cooldown_until: number;
@@ -52,7 +53,7 @@ export class AccountPool extends DurableObject<Env> {
     });
   }
 
-  async fetch(request: Request): Promise<Response> {
+  override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     try {
       if (request.method === "POST" && url.pathname === "/acquire") {

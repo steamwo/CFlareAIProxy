@@ -1,16 +1,67 @@
 name: Check CFlareAPI
+
 on:
   pull_request:
   push:
     branches: [main]
+
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install --no-audit --no-fund
-      - run: npm run check
-      - run: npm run config:check
+          node-version: 22.13.0
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check configuration
+        id: config
+        continue-on-error: true
+        run: node scripts/check-config.mjs
+      - name: Check web assets
+        id: web
+        continue-on-error: true
+        run: node scripts/check-web.mjs
+      - name: Typecheck worker and web
+        id: types
+        continue-on-error: true
+        run: pnpm run typecheck
+      - name: Run tests
+        id: tests
+        continue-on-error: true
+        run: pnpm exec vitest run --reporter=json --outputFile=vitest-results.json
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-results
+          path: vitest-results.json
+          if-no-files-found: ignore
+      - name: Build production web bundle
+        id: build
+        continue-on-error: true
+        run: pnpm run build:web
+      - name: Wrangler dry run
+        id: wrangler
+        continue-on-error: true
+        run: pnpm run config:check
+      - name: Enforce validation results
+        if: always()
+        run: |
+          if [ "${{ steps.config.outcome }}" != "success" ] \
+            || [ "${{ steps.web.outcome }}" != "success" ] \
+            || [ "${{ steps.types.outcome }}" != "success" ] \
+            || [ "${{ steps.tests.outcome }}" != "success" ] \
+            || [ "${{ steps.build.outcome }}" != "success" ] \
+            || [ "${{ steps.wrangler.outcome }}" != "success" ]; then
+            exit 1
+          fi
