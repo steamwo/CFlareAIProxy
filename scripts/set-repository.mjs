@@ -10,6 +10,6 @@ if (!repository || !/^https:\/\/(github\.com|gitlab\.com)\//i.test(repository)) 
 }
 const path = join(root, "README.md");
 const current = readFileSync(path, "utf8");
-const next = current.replaceAll("https://github.com/YOUR_ACCOUNT/CFlareAPI", repository);
+const next = current.replaceAll("https://github.com/YOUR_ACCOUNT/CFlareAIProxy", repository);
 writeFileSync(path, next);
 console.log(`✓ README 的一键部署地址已更新为 ${repository}`);

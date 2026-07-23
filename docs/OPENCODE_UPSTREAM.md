@@ -2,13 +2,13 @@
 
 ## 定位
 
-这里的 OpenCode 指 **OpenCode Zen AI Gateway 作为 CFlareAPI 的内置上游渠道**。
+这里的 OpenCode 指 **OpenCode Zen AI Gateway 作为 CFlareAIProxy 的内置上游渠道**。
 
 它与管理台“客户端集成”页面生成的 `opencode.json` 是两个方向：
 
 ```text
-OpenCode Zen 上游：CFlareAPI → OpenCode Zen
-OpenCode 客户端接入：OpenCode 客户端 → CFlareAPI
+OpenCode Zen 上游：CFlareAIProxy → OpenCode Zen
+OpenCode 客户端接入：OpenCode 客户端 → CFlareAIProxy
 ```
 
 ## 官方端点差异
@@ -23,7 +23,7 @@ Zen 的模型并不全部使用 Chat Completions：
 | 其他 | `/zen/v1/chat/completions` |
 | 模型目录 | `/zen/v1/models` |
 
-因此，CFlareAPI 使用单独的 `opencode` adapter，而不是简单复用普通 OpenAI-compatible 转发器。
+因此，CFlareAIProxy 使用单独的 `opencode` adapter，而不是简单复用普通 OpenAI-compatible 转发器。
 
 ## 转换行为
 
@@ -101,11 +101,11 @@ chat
 Authorization: Bearer <ZEN_API_KEY>
 ```
 
-CFlareAPI 将凭据加密存入 D1。
+CFlareAIProxy 将凭据加密存入 D1。
 
 ## 已知边界
 
 - Zen 的模型与协议可能随服务更新，应以实时 `/models` 和官方 Zen 文档为准。
 - 匿名资格以实时目录中的 `big-pickle` / `*-free` 标识为准；付费模型绝不在无 Key 时尝试。
 - 某些模型可能有专属 beta header 或参数；可以通过供应商 headers/options 覆盖。
-- CFlareAPI 不伪造 Zen 余额；若没有稳定公开额度 API，只显示从响应头或已配置端点得到的数据。
+- CFlareAIProxy 不伪造 Zen 余额；若没有稳定公开额度 API，只显示从响应头或已配置端点得到的数据。

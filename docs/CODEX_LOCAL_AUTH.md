@@ -45,7 +45,7 @@ pnpm run oauth:loopback -- --provider codex --gateway http://127.0.0.1:8787
   ↓
 用户电脑完成 PKCE code→token
   ↓
-本地助手将最终 Token 上传给 CFlareAPI
+本地助手将最终 Token 上传给 CFlareAIProxy
   ↓
 Worker 使用 MASTER_KEY 加密写入 D1
 ```
@@ -120,7 +120,7 @@ pnpm run codex:watch
 pnpm run codex:watch -- --interval 15
 ```
 
-官方 Codex CLI 刷新或轮换 access/refresh token 后，变化会同步到 CFlareAPI。
+官方 Codex CLI 刷新或轮换 access/refresh token 后，变化会同步到 CFlareAIProxy。
 
 ## 本地刷新
 

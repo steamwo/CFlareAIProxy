@@ -3,8 +3,8 @@ import { base64UrlDecode, base64UrlEncode, parseJson, timingSafeEqualText } from
 
 describe("utils", () => {
   it("round-trips base64url", () => {
-    const input = new TextEncoder().encode("CFlareAPI ✓");
-    expect(new TextDecoder().decode(base64UrlDecode(base64UrlEncode(input)))).toBe("CFlareAPI ✓");
+    const input = new TextEncoder().encode("CFlareAIProxy ✓");
+    expect(new TextDecoder().decode(base64UrlDecode(base64UrlEncode(input)))).toBe("CFlareAIProxy ✓");
   });
   it("uses safe JSON fallback", () => expect(parseJson("{bad", { ok: true })).toEqual({ ok: true }));
   it("compares text without early length exit", () => {

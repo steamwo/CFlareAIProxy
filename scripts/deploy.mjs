@@ -89,7 +89,7 @@ try {
       "d1", "execute", "DB", "--remote", "--yes", "--json",
       "--command", "SELECT COUNT(*) AS provider_count FROM providers",
     ]);
-    console.log("✓ CFlareAPI 部署、密钥初始化和数据库迁移完成");
+    console.log("✓ CFlareAIProxy 部署、密钥初始化和数据库迁移完成");
   }
 } finally {
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });

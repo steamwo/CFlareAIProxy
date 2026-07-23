@@ -1,6 +1,6 @@
-# CFlareAPI Proxy Bridge
+# CFlareAIProxy Proxy Bridge
 
-CFlareAPI 供应商级代理桥接服务。Cloudflare Worker 将签名后的 HTTP 请求发送到 Bridge，Bridge 再通过指定的 HTTP、HTTPS 或 SOCKS 代理访问供应商，并把响应流原样转回 Worker。
+CFlareAIProxy 供应商级代理桥接服务。Cloudflare Worker 将签名后的 HTTP 请求发送到 Bridge，Bridge 再通过指定的 HTTP、HTTPS 或 SOCKS 代理访问供应商，并把响应流原样转回 Worker。
 
 ## 支持的代理 URL
 
