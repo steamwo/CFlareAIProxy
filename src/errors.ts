@@ -27,6 +27,14 @@ export function normalizeGatewayError(error: unknown): GatewayError {
       "configuration_error",
     );
   }
+  if (/\bno such column\b|\bhas no column named\b/i.test(message)) {
+    return new GatewayError(
+      503,
+      "DATABASE_MIGRATION_REQUIRED",
+      "The remote D1 database schema is outdated. Apply all pending remote migrations and retry.",
+      "configuration_error",
+    );
+  }
   if (
     /Cannot read properties of (?:undefined|null).*\bprepare\b/i.test(message)
     || /\bD1\b.*\bbinding\b.*(?:missing|not found|undefined)/i.test(message)
