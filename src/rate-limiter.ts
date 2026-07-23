@@ -30,7 +30,7 @@ export class RateLimiter extends DurableObject<Env> {
     });
   }
 
-  async fetch(request: Request): Promise<Response> {
+  override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/acquire") {
       const payload = await request.json() as AcquirePayload;
