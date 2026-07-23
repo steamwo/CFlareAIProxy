@@ -21,7 +21,17 @@ jobs:
         with:
           node-version: 22.13.0
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run check
-      - run: pnpm run build
-      - run: pnpm run config:check
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check configuration
+        run: node scripts/check-config.mjs
+      - name: Check web assets
+        run: node scripts/check-web.mjs
+      - name: Typecheck worker and web
+        run: pnpm run typecheck
+      - name: Run tests
+        run: pnpm run test
+      - name: Build production web bundle
+        run: pnpm run build:web
+      - name: Wrangler dry run
+        run: pnpm run config:check
