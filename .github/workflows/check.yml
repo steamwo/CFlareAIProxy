@@ -9,27 +9,57 @@ permissions:
   contents: write
 
 jobs:
-  scan-brand:
+  apply-brand-rename:
     if: github.event_name == 'pull_request' && github.head_ref == 'agent/rename-cflareapi-brand'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-          fetch-depth: 1
+          fetch-depth: 0
           show-progress: false
-      - name: Generate legacy brand report
+      - name: Apply exact legacy brand replacements
         shell: bash
         run: |
-          if [ -f .rename-report.json ]; then
-            echo "Report already exists"
-            exit 0
-          fi
-
           python <<'PY'
           from pathlib import Path
           import json
+
+          old = ("CFlare" + "API").encode()
+          new = b"CFlareAIProxy"
+          report = json.loads(Path(".rename-report.json").read_text(encoding="utf-8"))
+          skip = {
+              ".github/workflows/check.yml",
+              ".github/workflows/rename-cflareapi-brand.yml",
+          }
+          changed = []
+          for name in report["content_matches"]:
+              if name in skip:
+                  continue
+              path = Path(name)
+              data = path.read_bytes()
+              updated = data.replace(old, new)
+              if updated != data:
+                  path.write_bytes(updated)
+                  changed.append(name)
+          print(f"Updated {len(changed)} project files")
+          for name in changed:
+              print(f"  {name}")
+          PY
+
+          git show origin/main:.github/workflows/check.yml > .github/workflows/check.yml
+          python <<'PY'
+          from pathlib import Path
+          path = Path(".github/workflows/check.yml")
+          path.write_bytes(path.read_bytes().replace(("CFlare" + "API").encode(), b"CFlareAIProxy"))
+          PY
+
+          rm -f .github/workflows/rename-cflareapi-brand.yml .rename-report.json
+
+          python <<'PY'
+          from pathlib import Path
           import subprocess
+          import sys
 
           old_text = "CFlare" + "API"
           old = old_text.encode()
@@ -37,40 +67,30 @@ jobs:
               ["git", "ls-files", "-z"], stdout=subprocess.PIPE, check=True
           )
           paths = [Path(value.decode()) for value in result.stdout.split(b"\0") if value]
-          report = {
-              "path_matches": [],
-              "content_matches": [],
-              "binary_matches": [],
-          }
+          failures = []
           for path in paths:
               if old_text in str(path):
-                  report["path_matches"].append(str(path))
+                  failures.append(f"path: {path}")
               if not path.is_file():
                   continue
               data = path.read_bytes()
-              if old not in data:
-                  continue
-              target = "binary_matches" if b"\0" in data else "content_matches"
-              report[target].append(str(path))
-
-          for values in report.values():
-              values.sort()
-          Path(".rename-report.json").write_text(
-              json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-              encoding="utf-8",
-          )
-          print(json.dumps(report, ensure_ascii=False, indent=2))
+              if b"\0" not in data and old in data:
+                  failures.append(f"content: {path}")
+          if failures:
+              print("Legacy brand references remain:", file=sys.stderr)
+              print("\n".join(failures), file=sys.stderr)
+              raise SystemExit(1)
           PY
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .rename-report.json
-          git commit -m "Report legacy CFlareAPI references"
+          git add -A
+          git commit -m "Rename CFlareAPI to CFlareAIProxy"
           git push origin HEAD:${GITHUB_HEAD_REF}
 
   check:
-    needs: scan-brand
-    if: always() && (needs.scan-brand.result == 'success' || needs.scan-brand.result == 'skipped')
+    needs: apply-brand-rename
+    if: always() && (needs.apply-brand-rename.result == 'success' || needs.apply-brand-rename.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
