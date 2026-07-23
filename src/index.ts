@@ -83,7 +83,7 @@ app.get("/oauth/callback/:provider", async (c) => {
 app.notFound((c) => c.json({ error: { message: "Not found", type: "invalid_request_error", code: "NOT_FOUND" } }, 404));
 app.onError((error) => errorResponse(error));
 
-const handler: ExportedHandler<Env> = {
+const handler: ExportedHandler<Env, UsageEvent> = {
   fetch(request, env, ctx) {
     return app.fetch(request, env, ctx);
   },
