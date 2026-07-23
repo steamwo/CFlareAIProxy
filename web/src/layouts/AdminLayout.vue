@@ -29,10 +29,10 @@ function onAccount(key:string){if(key==="logout") void logout();}
 <template>
 <n-layout has-sider style="min-height:100vh">
   <n-layout-sider bordered collapse-mode="width" :collapsed-width="72" :width="244" show-trigger="bar" class="desktop-sider">
-    <div class="side-brand"><div class="brand-mark small"><waypoints :size="21" /></div><div><strong>CFlareAPI</strong><span>LLM Gateway</span></div></div>
+    <div class="side-brand"><div class="brand-mark small"><waypoints :size="21" /></div><div><strong>CFlareAIProxy</strong><span>LLM Gateway</span></div></div>
     <n-menu :value="active" :options="items" :collapsed-width="72" :collapsed-icon-size="20" @update:value="navigate" />
   </n-layout-sider>
-  <n-drawer v-model:show="ui.mobileMenu" placement="left" :width="280"><n-drawer-content closable title="CFlareAPI"><n-menu :value="active" :options="items" @update:value="navigate" /></n-drawer-content></n-drawer>
+  <n-drawer v-model:show="ui.mobileMenu" placement="left" :width="280"><n-drawer-content closable title="CFlareAIProxy"><n-menu :value="active" :options="items" @update:value="navigate" /></n-drawer-content></n-drawer>
   <n-layout>
     <n-layout-header bordered class="topbar">
       <n-space align="center"><n-button quaternary circle class="mobile-menu" @click="ui.mobileMenu=true"><template #icon><menu-icon /></template></n-button><n-text depth="3">一个 Worker · 动态模型 · 多账号池</n-text></n-space>

@@ -48,7 +48,7 @@ function openCodeHeaders(context: ProxyRequestContext, accept: string): Headers 
   authHeaders.forEach((value, key) => headers.set(key, value));
   headers.set("content-type", "application/json");
   headers.set("accept", accept);
-  headers.set("user-agent", headers.get("user-agent") ?? "CFlareAPI/0.5.3");
+  headers.set("user-agent", headers.get("user-agent") ?? "CFlareAIProxy/0.5.3");
   return headers;
 }
 

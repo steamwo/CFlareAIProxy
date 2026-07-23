@@ -1,6 +1,6 @@
 # Vue 3 管理台
 
-CFlareAPI 0.5.0 不再把 HTML、CSS 和 JavaScript 写进 Worker TypeScript 字符串。
+CFlareAIProxy 0.5.0 不再把 HTML、CSS 和 JavaScript 写进 Worker TypeScript 字符串。
 
 ## 技术栈
 

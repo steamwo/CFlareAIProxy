@@ -1,4 +1,4 @@
-# CFlareAPI 0.5.3 部署说明
+# CFlareAIProxy 0.5.3 部署说明
 
 ## 单 Worker 架构
 
@@ -92,7 +92,7 @@ socks5h://user:pass@host:port
 建议解压到新目录，再复制本地密钥：
 
 ```powershell
-Copy-Item ..\CFlareAPI-old\.dev.vars .\.dev.vars
+Copy-Item ..\CFlareAIProxy-old\.dev.vars .\.dev.vars
 pnpm install
 pnpm run doctor
 pnpm run dev

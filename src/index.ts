@@ -36,7 +36,7 @@ app.get("/health", async (c) => {
   }
   return c.json({
     status: database === "ok" ? "ok" : "degraded",
-    service: c.env.APP_NAME ?? "CFlareAPI",
+    service: c.env.APP_NAME ?? "CFlareAIProxy",
     database,
     time: new Date().toISOString(),
   }, database === "ok" ? 200 : 503);

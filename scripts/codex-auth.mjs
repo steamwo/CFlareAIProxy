@@ -55,7 +55,7 @@ async function api(path, options = {}) {
   const text = await response.text();
   let payload = {};
   try { payload = text ? JSON.parse(text) : {}; } catch { payload = { message: text }; }
-  if (!response.ok) throw new Error(payload?.error?.message || payload?.message || `CFlareAPI returned HTTP ${response.status}`);
+  if (!response.ok) throw new Error(payload?.error?.message || payload?.message || `CFlareAIProxy returned HTTP ${response.status}`);
   return payload;
 }
 function base64url(bytes) { return Buffer.from(bytes).toString("base64url"); }
@@ -211,7 +211,7 @@ async function login() {
   };
   for (const [key, value] of Object.entries(auth)) if (key.startsWith("authorize_param_") && typeof value === "string") params[key.slice(16)] = value;
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
-  console.log(`CFlareAPI Codex 本地授权\n供应商：${row.name}\n回调：${redirectUri}\n打开：${url}`);
+  console.log(`CFlareAIProxy Codex 本地授权\n供应商：${row.name}\n回调：${redirectUri}\n打开：${url}`);
   const completion = new Promise((resolvePromise, reject) => {
     const timer = setTimeout(() => reject(new Error("OAuth 登录等待超时")), 10 * 60 * 1000);
     server.on("request", async (request, response) => {
@@ -231,7 +231,7 @@ async function login() {
         const target = resolve(arg("save", join(authDir, `codex-${safeName(authData.email || authData.accountId)}.json`)));
         saveAuth(authData, credentialId, target);
         response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-        response.end("<meta charset=utf-8><h1>Codex 授权完成</h1><p>Token 已安全导入 CFlareAPI，可以关闭此窗口。</p>");
+        response.end("<meta charset=utf-8><h1>Codex 授权完成</h1><p>Token 已安全导入 CFlareAIProxy，可以关闭此窗口。</p>");
         clearTimeout(timer);
         resolvePromise({ credentialId, target, authData });
       } catch (error) {
@@ -266,7 +266,7 @@ async function syncAuthFile({ watch = false } = {}) {
     credentialId = await uploadAuth(auth, label, credentialId || raw.credential_id);
     saveAuth(auth, credentialId, target);
     lastFingerprint = fingerprint;
-    if (announce) console.log(`✓ 已同步 Codex 授权：${credentialId}\n✓ CFlareAPI 同步状态：${target}`);
+    if (announce) console.log(`✓ 已同步 Codex 授权：${credentialId}\n✓ CFlareAIProxy 同步状态：${target}`);
     return true;
   };
 
@@ -276,7 +276,7 @@ async function syncAuthFile({ watch = false } = {}) {
     return;
   }
 
-  console.log(`正在监视 ${source}\n每 ${intervalSeconds} 秒检查一次；官方 Codex CLI 刷新 Token 后会自动同步到 CFlareAPI。按 Ctrl+C 停止。`);
+  console.log(`正在监视 ${source}\n每 ${intervalSeconds} 秒检查一次；官方 Codex CLI 刷新 Token 后会自动同步到 CFlareAIProxy。按 Ctrl+C 停止。`);
   let stopping = false;
   process.once("SIGINT", () => { stopping = true; });
   process.once("SIGTERM", () => { stopping = true; });
@@ -311,7 +311,7 @@ function defaultRefreshSource() {
 }
 async function refreshFile() {
   const source = defaultRefreshSource();
-  if (!existsSync(source)) throw new Error(`找不到 CFlareAPI Codex 授权副本：${source}。请先运行 codex:login / codex:sync，或使用 --file 指定。`);
+  if (!existsSync(source)) throw new Error(`找不到 CFlareAIProxy Codex 授权副本：${source}。请先运行 codex:login / codex:sync，或使用 --file 指定。`);
   const raw = JSON.parse(readFileSync(source, "utf8"));
   const auth = normalizedAuth(raw);
   if (!auth.refreshToken) throw new Error("授权文件没有 refresh_token");
@@ -324,7 +324,7 @@ async function refreshFile() {
   if (!credentialId) throw new Error("授权副本没有 credential_id，请用 --credential 指定");
   await uploadAuth(refreshed, "", credentialId);
   saveAuth(refreshed, credentialId, source);
-  console.log(`✓ Codex Token 已在本机刷新并同步到 CFlareAPI：${credentialId}`);
+  console.log(`✓ Codex Token 已在本机刷新并同步到 CFlareAIProxy：${credentialId}`);
 }
 
 try {

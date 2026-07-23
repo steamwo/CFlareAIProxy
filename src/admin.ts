@@ -254,7 +254,7 @@ export function createAdminApp() {
   // strict:false makes /admin and /admin/ equivalent and avoids a fragile
   // redirect + nested-root combination in local Wrangler development.
   const app = new Hono<{ Bindings: Env }>({ strict: false }).basePath("/admin");
-  app.get("/api/version", (c) => c.json({ service: c.env.APP_NAME ?? "CFlareAPI", version: ADMIN_UI_VERSION }));
+  app.get("/api/version", (c) => c.json({ service: c.env.APP_NAME ?? "CFlareAIProxy", version: ADMIN_UI_VERSION }));
 
   app.post("/api/login", async (c) => {
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
@@ -267,13 +267,13 @@ export function createAdminApp() {
     const session = await createSessionToken(expected.username, c.env);
     c.header("set-cookie", sessionCookie(session.token, c.req.raw));
     c.header("cache-control", "no-store");
-    return c.json({ authenticated: true, username: expected.username, expiresAt: session.expiresAt, service: c.env.APP_NAME ?? "CFlareAPI" });
+    return c.json({ authenticated: true, username: expected.username, expiresAt: session.expiresAt, service: c.env.APP_NAME ?? "CFlareAIProxy" });
   });
   app.get("/api/session", async (c) => {
     const session = await readSession(c.req.raw, c.env);
     if (!session) throw new GatewayError(401, "ADMIN_AUTH_REQUIRED", "Administrator login is required", "authentication_error");
     c.header("cache-control", "no-store");
-    return c.json({ authenticated: true, username: session.username, expiresAt: session.expiresAt, service: c.env.APP_NAME ?? "CFlareAPI" });
+    return c.json({ authenticated: true, username: session.username, expiresAt: session.expiresAt, service: c.env.APP_NAME ?? "CFlareAIProxy" });
   });
   app.post("/api/logout", (c) => {
     c.header("set-cookie", sessionCookie("", c.req.raw, 0));
@@ -327,7 +327,7 @@ export function createAdminApp() {
     const requests = usage?.requests ?? 0;
     const successes = usage?.successes ?? 0;
     return c.json({
-      service: c.env.APP_NAME ?? "CFlareAPI",
+      service: c.env.APP_NAME ?? "CFlareAIProxy",
       publicBaseUrl: c.env.PUBLIC_BASE_URL || new URL(c.req.url).origin,
       now,
       counts: {
@@ -588,7 +588,7 @@ export function createAdminApp() {
       provider: {
         cflareapi: {
           npm: "@ai-sdk/openai-compatible",
-          name: "CFlareAPI",
+          name: "CFlareAIProxy",
           options: { baseURL: `${origin}/v1`, apiKey: "{env:CFLARE_API_KEY}" },
           models: modelEntries,
         },

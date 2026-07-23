@@ -1,6 +1,6 @@
-# CFlareAPI
+# CFlareAIProxy
 
-CFlareAPI 是运行在 Cloudflare Workers 上的多账号 LLM API 网关，对外提供 OpenAI-compatible API，并由同一个 Worker 交付 Vue 3 管理台。
+CFlareAIProxy 是运行在 Cloudflare Workers 上的多账号 LLM API 网关，对外提供 OpenAI-compatible API，并由同一个 Worker 交付 Vue 3 管理台。
 
 ## 0.5.3 的核心能力
 
@@ -166,7 +166,7 @@ Deploy command: node scripts/deploy.mjs
 ```text
 • 应用远程 D1 迁移...
 • 验证远程 D1 schema...
-✓ CFlareAPI 部署、密钥初始化和数据库迁移完成
+✓ CFlareAIProxy 部署、密钥初始化和数据库迁移完成
 ```
 
 部署完成后访问：

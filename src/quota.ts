@@ -252,7 +252,7 @@ export async function refreshCredentialQuota(env: Env, credentialId: string): Pr
     const headers = providerAuthHeaders(provider, credential);
     if (provider.kind === "qoder") {
       headers.set("accept", "application/json");
-      headers.set("user-agent", headers.get("user-agent") ?? "CFlareAPI/0.5.3");
+      headers.set("user-agent", headers.get("user-agent") ?? "CFlareAIProxy/0.5.3");
     }
     const extra = provider.options.quota_headers;
     if (extra && typeof extra === "object" && !Array.isArray(extra)) for (const [key, value] of Object.entries(extra as Record<string, unknown>)) if (typeof value === "string") headers.set(key, value);

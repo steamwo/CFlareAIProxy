@@ -72,7 +72,7 @@ function kimiHeaders(deviceId: string): Headers {
   return new Headers({
     accept: "application/json",
     "content-type": "application/x-www-form-urlencoded",
-    "x-msh-platform": "CFlareAPI",
+    "x-msh-platform": "CFlareAIProxy",
     "x-msh-version": "0.1.0",
     "x-msh-device-name": "cloudflare-worker",
     "x-msh-device-model": "Cloudflare Workers",
@@ -246,7 +246,7 @@ function qoderPayloadRoot(payload: Record<string, unknown>): Record<string, unkn
 async function fetchQoderUserInfo(env: Env, provider: ProviderConfig, token: string): Promise<Record<string, unknown>> {
   try {
     const response = await providerFetch(env, provider, "https://openapi.qoder.sh/api/v1/userinfo", {
-      headers: { authorization: `Bearer ${token}`, accept: "application/json", "user-agent": "CFlareAPI/0.5.3" },
+      headers: { authorization: `Bearer ${token}`, accept: "application/json", "user-agent": "CFlareAIProxy/0.5.3" },
     }, { purpose: "oauth", timeoutMs: 20_000 });
     if (!response.ok) return {};
     return qoderPayloadRoot(await response.json() as Record<string, unknown>);
@@ -327,7 +327,7 @@ export async function pollOAuth(env: Env, providerId: string, sessionId: string)
     url.searchParams.set("nonce", session.secret.nonce);
     url.searchParams.set("verifier", session.secret.verifier);
     url.searchParams.set("challenge_method", "S256");
-    const response = await providerFetch(env, provider, url, { headers: { accept: "application/json", "user-agent": "CFlareAPI/0.5.3" } }, { purpose: "oauth", timeoutMs: 20_000 });
+    const response = await providerFetch(env, provider, url, { headers: { accept: "application/json", "user-agent": "CFlareAIProxy/0.5.3" } }, { purpose: "oauth", timeoutMs: 20_000 });
     if (response.status === 202 || response.status === 404) {
       return { status: "pending", message: "等待 Qoder 完成授权…", retryAfterSeconds: 2 };
     }

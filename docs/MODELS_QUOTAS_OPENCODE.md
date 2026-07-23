@@ -26,15 +26,15 @@ source_id/upstream_model_id
 ### OpenCode Zen 作为上游
 
 ```text
-CFlareAPI → OpenCode Zen
+CFlareAIProxy → OpenCode Zen
 ```
 
 供应商类型为 `opencode`，通过 Zen 实际模型目录与多协议端点转发。详见 [OPENCODE_UPSTREAM.md](OPENCODE_UPSTREAM.md)。
 
-### OpenCode 客户端连接 CFlareAPI
+### OpenCode 客户端连接 CFlareAIProxy
 
 ```text
-OpenCode 客户端 → CFlareAPI
+OpenCode 客户端 → CFlareAIProxy
 ```
 
 管理台“客户端集成”生成的是一个 OpenAI-compatible 自定义 Provider 配置。配置中的模型来自当前 `/v1/models`，密钥通过：

@@ -1,4 +1,4 @@
-name: Check CFlareAPI
+name: Check CFlareAIProxy
 
 on:
   pull_request:
