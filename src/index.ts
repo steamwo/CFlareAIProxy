@@ -25,8 +25,15 @@ app.use("/v1/*", cors({
 }));
 
 app.get("/health", async (c) => {
-  let database = "ok";
-  try { await c.env.DB.prepare("SELECT 1 AS ok").first(); } catch { database = "error"; }
+  let database: "ok" | "schema_missing" | "error" = "ok";
+  try {
+    const schema = await c.env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='providers'",
+    ).first<{ name: string }>();
+    if (!schema) database = "schema_missing";
+  } catch (error) {
+    database = /no such table/i.test(error instanceof Error ? error.message : String(error)) ? "schema_missing" : "error";
+  }
   return c.json({
     status: database === "ok" ? "ok" : "degraded",
     service: c.env.APP_NAME ?? "CFlareAPI",
@@ -83,7 +90,7 @@ app.get("/oauth/callback/:provider", async (c) => {
 app.notFound((c) => c.json({ error: { message: "Not found", type: "invalid_request_error", code: "NOT_FOUND" } }, 404));
 app.onError((error) => errorResponse(error));
 
-const handler: ExportedHandler<Env> = {
+const handler: ExportedHandler<Env, UsageEvent> = {
   fetch(request, env, ctx) {
     return app.fetch(request, env, ctx);
   },

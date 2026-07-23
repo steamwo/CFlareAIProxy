@@ -1,4 +1,4 @@
-import { connect, type Socket } from "cloudflare:sockets";
+import { connect } from "cloudflare:sockets";
 import { getProviderProxyConfig } from "./db";
 import { GatewayError } from "./errors";
 import type { Env, ProviderConfig, ProviderProxyConfig, ProxyProtocol } from "./types";
@@ -41,7 +41,7 @@ function indexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
 
 class SocketReader {
   private reader: ReadableStreamDefaultReader<Uint8Array>;
-  private buffered = new Uint8Array();
+  private buffered: Uint8Array = new Uint8Array();
 
   constructor(readable: ReadableStream<Uint8Array>) {
     this.reader = readable.getReader();

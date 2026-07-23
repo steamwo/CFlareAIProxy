@@ -118,9 +118,11 @@ export function md5Hex(input: Uint8Array): string {
     .join("");
 }
 
-async function aesCbcEncrypt(plaintext: Uint8Array, keyBytes: Uint8Array): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey("raw", keyBytes, "AES-CBC", false, ["encrypt"]);
-  const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: keyBytes }, key, plaintext);
+async function aesCbcEncrypt(plaintext: Uint8Array, keyBytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
+  const keyData: Uint8Array<ArrayBuffer> = new Uint8Array(keyBytes);
+  const data: Uint8Array<ArrayBuffer> = new Uint8Array(plaintext);
+  const key = await crypto.subtle.importKey("raw", keyData, "AES-CBC", false, ["encrypt"]);
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: keyData }, key, data);
   return new Uint8Array(encrypted);
 }
 
