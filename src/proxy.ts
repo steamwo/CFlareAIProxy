@@ -1,0 +1,314 @@
+import type { Context } from "hono";
+import { authenticateGatewayKey, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";
+import { GatewayError, errorResponse } from "./errors";
+import { refreshCredential } from "./oauth";
+import { ensureOpenCodeAnonymousModels } from "./models";
+import { captureQuotaHeaders } from "./quota";
+import { buildUpstreamRequest } from "./providers";
+import { prepareDownstreamResponse, trackResponse } from "./stream";
+import type { Env, GatewayEndpoint, PoolCandidate, PoolLease, RateLease, Usage, UsageEvent } from "./types";
+import { asInt, parseJson, readJsonBody, truncate } from "./utils";
+import { orderHealthyRoutes, recordProviderFailure, recordProviderSuccess } from "./routing-health";
+import { providerFetch } from "./upstream-fetch";
+
+function bearerToken(request: Request): string {
+  const authorization = request.headers.get("authorization") ?? "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match?.[1]) throw new GatewayError(401, "AUTHENTICATION_ERROR", "Missing Bearer API key", "authentication_error");
+  return match[1].trim();
+}
+
+function estimateInputTokens(body: Record<string, unknown>): number {
+  return Math.max(1, Math.ceil(JSON.stringify(body).length / 4));
+}
+
+function sessionKey(request: Request, body: Record<string, unknown>, gatewayKeyId: string, providerId: string): string | undefined {
+  const explicit = request.headers.get("x-session-id") ?? request.headers.get("x-conversation-id");
+  const user = typeof body.user === "string" ? body.user : undefined;
+  const previous = typeof body.previous_response_id === "string" ? body.previous_response_id : undefined;
+  const value = explicit ?? previous ?? user;
+  return value ? `${providerId}:${gatewayKeyId}:${value}` : undefined;
+}
+
+async function postDo<T>(stub: DurableObjectStub, path: string, payload: unknown): Promise<T> {
+  const response = await stub.fetch(`https://do.internal${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result: Record<string, unknown> = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
+  if (!response.ok) throw new Error(typeof result.error === "string" ? result.error : `Durable Object returned ${response.status}`);
+  return result as T;
+}
+
+async function readErrorBody(response: Response, maxBytes = 64 * 1024): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  while (total < maxBytes) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const slice = value.byteLength <= maxBytes - total ? value : value.slice(0, maxBytes - total);
+    text += decoder.decode(slice, { stream: true });
+    total += slice.byteLength;
+    if (slice.byteLength < value.byteLength) break;
+  }
+  await reader.cancel("error body captured").catch(() => undefined);
+  return truncate(text, 4000);
+}
+
+function retryableStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function usageEvent(base: Omit<UsageEvent, "usage" | "statusCode" | "latencyMs" | "createdAt">, usage: Usage, statusCode: number, latencyMs: number, firstTokenMs?: number): UsageEvent {
+  return { ...base, usage, statusCode, latencyMs, firstTokenMs, createdAt: Math.floor(Date.now() / 1000) };
+}
+
+export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: GatewayEndpoint): Promise<Response> {
+  const requestId = crypto.randomUUID();
+  const startedAt = Date.now();
+  let rateStub: DurableObjectStub | undefined;
+  let rateLeaseId: string | undefined;
+  let lastError: unknown;
+  let logGatewayKeyId: string | undefined;
+  let logPublicModel: string | undefined;
+  let logProviderId: string | undefined;
+  let logCredentialId: string | undefined;
+  let logUpstreamModel: string | undefined;
+
+  try {
+    const rawKey = bearerToken(c.req.raw);
+    const gatewayKey = await authenticateGatewayKey(c.env, rawKey);
+    logGatewayKeyId = gatewayKey.id;
+    const maxBody = asInt(c.env.MAX_BODY_BYTES, 8 * 1024 * 1024);
+    const body = await readJsonBody(c.req.raw, maxBody);
+    const publicModel = typeof body.model === "string" ? body.model.trim() : "";
+    logPublicModel = publicModel || undefined;
+    if (!publicModel) throw new GatewayError(400, "INVALID_REQUEST", "The model field is required", "invalid_request_error");
+
+    const allowedModels = parseJson<string[]>(gatewayKey.allowed_models_json, []);
+    if (allowedModels.length > 0 && !allowedModels.includes(publicModel)) {
+      throw new GatewayError(403, "MODEL_NOT_ALLOWED", `API key is not allowed to use model ${publicModel}`, "permission_error");
+    }
+
+    rateStub = c.env.RATE_LIMITER.get(c.env.RATE_LIMITER.idFromName(gatewayKey.id));
+    const rateLease = await postDo<RateLease>(rateStub, "/acquire", {
+      rpm: gatewayKey.rpm,
+      maxConcurrency: gatewayKey.max_concurrency,
+      monthlyTokenLimit: gatewayKey.monthly_token_limit,
+      estimatedTokens: estimateInputTokens(body),
+    });
+    if (!rateLease.allowed) {
+      const status = rateLease.reason === "TOKEN_QUOTA_EXCEEDED" ? 402 : 429;
+      const error = new GatewayError(status, rateLease.reason ?? "RATE_LIMIT_EXCEEDED", "Rate, concurrency, or token quota exceeded", "rate_limit_error");
+      const response = errorResponse(error, requestId);
+      if (rateLease.retryAfterMs) response.headers.set("retry-after", Math.max(1, Math.ceil(rateLease.retryAfterMs / 1000)).toString());
+      c.executionCtx.waitUntil(c.env.USAGE_QUEUE.send(usageEvent({
+        requestId,
+        gatewayKeyId: gatewayKey.id,
+        publicModel,
+        endpoint,
+        errorCode: error.code,
+        errorMessage: error.message,
+      }, { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 }, status, Date.now() - startedAt)).catch(() => undefined));
+      return response;
+    }
+    rateLeaseId = rateLease.leaseId;
+
+    let routes = await listRoutesForModel(c.env, publicModel, endpoint);
+    if (routes.length === 0 && publicModel.startsWith("opencode/")) {
+      await ensureOpenCodeAnonymousModels(c.env).catch(() => null);
+      routes = await listRoutesForModel(c.env, publicModel, endpoint);
+    }
+    if (routes.length === 0) throw new GatewayError(404, "MODEL_NOT_FOUND", `No route is configured for model ${publicModel}`, "invalid_request_error");
+    const ordered = await orderHealthyRoutes(c.env, routes);
+    if (ordered.routes.length === 0) {
+      const retryAt = ordered.blockedUntil ? Math.ceil(ordered.blockedUntil / 1000) : undefined;
+      throw new GatewayError(503, "UPSTREAM_CIRCUIT_OPEN", retryAt
+        ? `All upstream providers are temporarily unavailable; retry after ${new Date(retryAt * 1000).toISOString()}`
+        : "All upstream providers are temporarily unavailable", "upstream_error");
+    }
+    // Try a second account on each route before falling back to the next route.
+    const attemptPlan = ordered.routes.flatMap((route) => [route, route]);
+    const blockedProviders = new Set<string>();
+
+    for (const route of attemptPlan) {
+      if (blockedProviders.has(route.provider_id)) continue;
+      logProviderId = route.provider_id;
+      logUpstreamModel = route.upstream_model;
+      logCredentialId = undefined;
+      let poolStub: DurableObjectStub | undefined;
+      let poolLease: PoolLease | undefined;
+      try {
+        const provider = await getProvider(c.env, route.provider_id);
+        const availability = await listCredentialAvailabilityForModel(c.env, provider.id, route.upstream_model, endpoint);
+        const rows = availability.filter((entry) => entry.available).map((entry) => entry.row);
+        if (rows.length === 0) {
+          const blocked = availability.find((entry) => !entry.available);
+          const retry = blocked?.retryAt ? `，预计 ${new Date(blocked.retryAt * 1000).toISOString()} 恢复` : "";
+          throw new GatewayError(503, "NO_CREDENTIAL_AVAILABLE", `${provider.name} 没有可用账号${blocked?.reason ? `：${blocked.reason}` : ""}${retry}`, "upstream_error");
+        }
+        const candidates: PoolCandidate[] = rows.map((row) => ({
+          id: row.id,
+          priority: row.priority,
+          weight: Math.max(1, row.weight),
+          maxConcurrency: Math.max(1, row.max_concurrency),
+          enabled: row.enabled === 1,
+        }));
+        poolStub = c.env.ACCOUNT_POOL.get(c.env.ACCOUNT_POOL.idFromName(provider.id));
+        try {
+          poolLease = await postDo<PoolLease>(poolStub, "/acquire", {
+            providerId: provider.id,
+            strategy: provider.pool_strategy,
+            candidates,
+            sessionKey: provider.options.session_affinity === false ? undefined : sessionKey(c.req.raw, body, gatewayKey.id, provider.id),
+            leaseTtlMs: 15 * 60_000,
+          });
+        } catch (error) {
+          throw new GatewayError(503, "NO_CREDENTIAL_AVAILABLE", error instanceof Error ? error.message : "No credential is currently available", "upstream_error");
+        }
+
+        let credential = await getCredential(c.env, poolLease.credentialId);
+        logCredentialId = credential.id;
+        if (credential.expires_at && credential.expires_at <= Math.floor(Date.now() / 1000) + 300 && credential.refreshToken) {
+          const lock = await postDo<{ acquired: boolean; lockId?: string }>(poolStub, "/lock", { credentialId: credential.id, ttlMs: 60_000 });
+          if (lock.acquired && lock.lockId) {
+            try {
+              credential = await refreshCredential(c.env, provider, credential);
+            } finally {
+              await postDo(poolStub, "/unlock", { credentialId: credential.id, lockId: lock.lockId }).catch(() => undefined);
+            }
+          } else if (credential.expires_at <= Math.floor(Date.now() / 1000)) {
+            throw new GatewayError(503, "CREDENTIAL_REFRESH_BUSY", "Credential refresh is already in progress", "upstream_error");
+          }
+        }
+
+        const upstreamRequest = await buildUpstreamRequest({
+          requestId,
+          endpoint,
+          publicModel,
+          upstreamModel: route.upstream_model,
+          body,
+          originalRequest: c.req.raw,
+          provider,
+          credential,
+        }, c.env);
+        const timeoutMs = typeof provider.options.timeout_ms === "number" ? Math.max(1000, provider.options.timeout_ms) : 120_000;
+        let upstream: Response;
+        try {
+          upstream = await providerFetch(c.env, provider, upstreamRequest.url, upstreamRequest.init, { purpose: "inference", timeoutMs });
+        } catch (error) {
+          const timedOut = error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError");
+          const normalized = new GatewayError(
+            timedOut ? 504 : 502,
+            timedOut ? "UPSTREAM_TIMEOUT" : "UPSTREAM_UNAVAILABLE",
+            timedOut ? `${provider.name} timed out after ${timeoutMs} ms` : `${provider.name} request failed: ${error instanceof Error ? error.message : String(error)}`,
+            "upstream_error",
+          );
+          const health = await recordProviderFailure(c.env, provider.id, normalized.status, normalized.message);
+          if (health.disabledUntil > Date.now()) blockedProviders.add(provider.id);
+          throw normalized;
+        }
+        if (!upstream.ok) {
+          c.executionCtx.waitUntil(captureQuotaHeaders(c.env, credential.id, provider.id, upstream.headers).catch(() => undefined));
+          const detail = await readErrorBody(upstream);
+          await postDo(poolStub, "/release", {
+            leaseId: poolLease.leaseId,
+            success: false,
+            statusCode: upstream.status,
+            cooldownMs: asInt(c.env.CREDENTIAL_COOLDOWN_MS, 60_000),
+          }).catch(() => undefined);
+          poolLease = undefined;
+          await setCredentialError(c.env, credential.id, `HTTP ${upstream.status}: ${detail}`).catch(() => undefined);
+          if (retryableStatus(upstream.status)) {
+            lastError = new GatewayError(502, "UPSTREAM_UNAVAILABLE", `${provider.name} returned ${upstream.status}: ${detail}`, "upstream_error");
+            if (upstream.status === 408 || upstream.status === 425 || upstream.status >= 500) {
+              const health = await recordProviderFailure(c.env, provider.id, upstream.status, detail || `${provider.name} returned ${upstream.status}`);
+              if (health.disabledUntil > Date.now()) blockedProviders.add(provider.id);
+            }
+            continue;
+          }
+          throw new GatewayError(upstream.status, "UPSTREAM_ERROR", detail || `${provider.name} returned ${upstream.status}`, "upstream_error");
+        }
+
+        c.executionCtx.waitUntil(captureQuotaHeaders(c.env, credential.id, provider.id, upstream.headers).catch(() => undefined));
+        const downstream = await prepareDownstreamResponse(
+          upstream,
+          upstreamRequest.responseMode,
+          body.stream === true,
+          publicModel,
+          requestId,
+        );
+        const eventBase = {
+          requestId,
+          gatewayKeyId: gatewayKey.id,
+          providerId: provider.id,
+          credentialId: credential.id,
+          publicModel,
+          upstreamModel: route.upstream_model,
+          endpoint,
+        };
+        const leaseId = poolLease.leaseId;
+        const tracked = trackResponse(downstream, startedAt, async ({ usage, firstTokenMs, streamError }) => {
+          const finalStatus = streamError ? 502 : downstream.status;
+          const tasks: Promise<unknown>[] = [
+            postDo(poolStub!, "/release", {
+              leaseId,
+              success: !streamError,
+              statusCode: finalStatus,
+              cooldownMs: asInt(c.env.CREDENTIAL_COOLDOWN_MS, 60_000),
+            }),
+            postDo(rateStub!, "/release", { leaseId: rateLeaseId!, actualTokens: usage.totalTokens > 0 ? usage.totalTokens : undefined }),
+            c.env.USAGE_QUEUE.send({
+              ...usageEvent(eventBase, usage, finalStatus, Date.now() - startedAt, firstTokenMs),
+              ...(streamError ? { errorCode: "UPSTREAM_STREAM_ERROR", errorMessage: truncate(streamError, 1000) } : {}),
+            }),
+            streamError
+              ? recordProviderFailure(c.env, provider.id, 502, streamError)
+              : recordProviderSuccess(c.env, provider.id),
+          ];
+          rateLeaseId = undefined;
+          c.executionCtx.waitUntil(Promise.allSettled(tasks).then(() => undefined));
+        });
+        tracked.headers.set("x-request-id", requestId);
+        return tracked;
+      } catch (error) {
+        lastError = error;
+        if (poolStub && poolLease) {
+          await postDo(poolStub, "/release", {
+            leaseId: poolLease.leaseId,
+            success: false,
+            statusCode: error instanceof GatewayError ? error.status : 500,
+            cooldownMs: asInt(c.env.CREDENTIAL_COOLDOWN_MS, 60_000),
+          }).catch(() => undefined);
+        }
+        if (error instanceof GatewayError && error.status < 500 && !retryableStatus(error.status)) throw error;
+      }
+    }
+
+    throw lastError ?? new GatewayError(502, "UPSTREAM_UNAVAILABLE", "All upstream routes failed", "upstream_error");
+  } catch (error) {
+    if (rateStub && rateLeaseId) {
+      await postDo(rateStub, "/release", { leaseId: rateLeaseId, actualTokens: 0 }).catch(() => undefined);
+    }
+    const normalized = error instanceof GatewayError
+      ? error
+      : new GatewayError(500, "INTERNAL_ERROR", error instanceof Error ? error.message : "Internal gateway error");
+    c.executionCtx.waitUntil(c.env.USAGE_QUEUE.send(usageEvent({
+      requestId,
+      gatewayKeyId: logGatewayKeyId,
+      providerId: logProviderId,
+      credentialId: logCredentialId,
+      publicModel: logPublicModel,
+      upstreamModel: logUpstreamModel,
+      endpoint,
+      errorCode: normalized.code,
+      errorMessage: normalized.message,
+    }, { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 }, normalized.status, Date.now() - startedAt)).catch(() => undefined));
+    console.error(JSON.stringify({ event: "gateway_error", request_id: requestId, error: normalized.message }));
+    return errorResponse(normalized, requestId);
+  }
+}

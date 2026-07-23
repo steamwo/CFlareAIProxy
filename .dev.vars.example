@@ -1,0 +1,9 @@
+# pnpm run dev 会在缺失时自动生成本地值。
+MASTER_KEY=
+ADMIN_TOKEN=
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=
+
+# 可选：部署 Proxy Bridge 后设置。管理台用户只填写系统/来源 Proxy URL。
+PROXY_BRIDGE_URL=
+PROXY_BRIDGE_TOKEN=

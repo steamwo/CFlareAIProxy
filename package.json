@@ -1,0 +1,93 @@
+{
+  "name": "cflare-api",
+  "version": "0.5.3",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers LLM gateway with fixed built-in account channels, configurable OpenAI-compatible providers, Vue 3 admin UI, live models, quotas and provider-level proxy routing.",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "setup:local": "node scripts/setup-local.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "resources:ensure": "node scripts/ensure-remote-resources.mjs",
+    "deploy": "npm run build && node scripts/deploy.mjs",
+    "deploy:worker": "wrangler deploy",
+    "preview": "wrangler versions upload",
+    "cf-typegen": "wrangler types",
+    "typecheck": "npm run typecheck:worker && npm run typecheck:web",
+    "test": "vitest run",
+    "check": "node scripts/check-config.mjs && node scripts/check-web.mjs && npm run typecheck && npm run test",
+    "config:check": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "oauth:loopback": "node scripts/oauth-loopback.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "set-repository": "node scripts/set-repository.mjs",
+    "ui:check": "node scripts/check-web.mjs",
+    "smoke:admin": "node scripts/smoke-admin.mjs",
+    "codex:login": "node scripts/codex-auth.mjs login",
+    "codex:import": "node scripts/codex-auth.mjs import",
+    "codex:refresh": "node scripts/codex-auth.mjs refresh",
+    "codex:sync": "node scripts/codex-auth.mjs sync",
+    "codex:watch": "node scripts/codex-auth.mjs watch",
+    "proxy-bridge:install": "npm --prefix proxy-bridge install",
+    "proxy-bridge:start": "npm --prefix proxy-bridge start",
+    "proxy-bridge:check": "npm --prefix proxy-bridge run check",
+    "build:web": "vite build",
+    "typecheck:worker": "tsc -p tsconfig.worker.json --noEmit",
+    "typecheck:web": "vue-tsc -p web/tsconfig.json --noEmit",
+    "build": "npm run typecheck && npm run build:web"
+  },
+  "dependencies": {
+    "@lucide/vue": "1.25.0",
+    "hono": "4.12.31",
+    "naive-ui": "2.44.1",
+    "pinia": "3.0.4",
+    "vue": "3.5.40",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260722.1",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4",
+    "wrangler": "4.113.0",
+    "@types/node": "22.20.1",
+    "@vitejs/plugin-vue": "6.0.7",
+    "vite": "7.3.6",
+    "vue-tsc": "3.3.7"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "DB": {
+        "description": "D1 database for providers, encrypted credentials, discovered upstream models, quota snapshots, routes, gateway keys and request logs. It is created automatically during deployment."
+      },
+      "CONFIG_CACHE": {
+        "description": "KV namespace for short-lived provider/model configuration cache. It is created automatically during deployment."
+      },
+      "USAGE_QUEUE": {
+        "description": "Queue used to write request usage and cost records outside the response path."
+      },
+      "MASTER_KEY": {
+        "description": "Required secret. Base64 encoding of exactly 32 random bytes. Generate with: openssl rand -base64 32"
+      },
+      "ADMIN_TOKEN": {
+        "description": "Required secret used to sign administrator sessions and authenticate automation. Generate with: openssl rand -hex 32"
+      },
+      "ADMIN_USERNAME": {
+        "description": "Administrator login username for /admin. Recommended value: admin"
+      },
+      "ADMIN_PASSWORD": {
+        "description": "Administrator login password for /admin. Use a strong unique password."
+      },
+      "PROXY_BRIDGE_URL": {
+        "description": "Legacy compatibility setting. Native HTTP/SOCKS proxying no longer requires a bridge."
+      },
+      "PROXY_BRIDGE_TOKEN": {
+        "description": "Legacy compatibility setting. Native HTTP/SOCKS proxying no longer requires a bridge token."
+      }
+    }
+  },
+  "packageManager": "pnpm@11.9.0"
+}

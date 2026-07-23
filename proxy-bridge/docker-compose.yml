@@ -1,0 +1,8 @@
+services:
+  cflareapi-proxy-bridge:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:9090:9090"
