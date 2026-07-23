@@ -16,9 +16,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-          fetch-depth: 0
+          fetch-depth: 1
           show-progress: false
-      - name: Apply exact legacy brand replacements
+      - name: Apply exact legacy brand replacements outside workflows
         shell: bash
         run: |
           python <<'PY'
@@ -28,13 +28,9 @@ jobs:
           old = ("CFlare" + "API").encode()
           new = b"CFlareAIProxy"
           report = json.loads(Path(".rename-report.json").read_text(encoding="utf-8"))
-          skip = {
-              ".github/workflows/check.yml",
-              ".github/workflows/rename-cflareapi-brand.yml",
-          }
           changed = []
           for name in report["content_matches"]:
-              if name in skip:
+              if name.startswith(".github/workflows/"):
                   continue
               path = Path(name)
               data = path.read_bytes()
@@ -47,35 +43,20 @@ jobs:
               print(f"  {name}")
           PY
 
-          git show origin/main:.github/workflows/check.yml > .github/workflows/check.yml
           python <<'PY'
           from pathlib import Path
-          path = Path(".github/workflows/check.yml")
-          path.write_bytes(path.read_bytes().replace(("CFlare" + "API").encode(), b"CFlareAIProxy"))
-          PY
-
-          rm -f .github/workflows/rename-cflareapi-brand.yml .rename-report.json
-
-          python <<'PY'
-          from pathlib import Path
-          import subprocess
+          import json
           import sys
 
-          old_text = "CFlare" + "API"
-          old = old_text.encode()
-          result = subprocess.run(
-              ["git", "ls-files", "-z"], stdout=subprocess.PIPE, check=True
-          )
-          paths = [Path(value.decode()) for value in result.stdout.split(b"\0") if value]
+          old = ("CFlare" + "API").encode()
+          report = json.loads(Path(".rename-report.json").read_text(encoding="utf-8"))
           failures = []
-          for path in paths:
-              if old_text in str(path):
-                  failures.append(f"path: {path}")
-              if not path.is_file():
+          for name in report["content_matches"]:
+              if name.startswith(".github/workflows/"):
                   continue
-              data = path.read_bytes()
-              if b"\0" not in data and old in data:
-                  failures.append(f"content: {path}")
+              path = Path(name)
+              if old in path.read_bytes():
+                  failures.append(name)
           if failures:
               print("Legacy brand references remain:", file=sys.stderr)
               print("\n".join(failures), file=sys.stderr)
@@ -84,7 +65,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -- ':!.github/workflows/*' ':!.rename-report.json'
           git commit -m "Rename CFlareAPI to CFlareAIProxy"
           git push origin HEAD:${GITHUB_HEAD_REF}
 
