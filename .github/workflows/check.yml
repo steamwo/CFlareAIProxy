@@ -9,156 +9,27 @@ permissions:
   contents: write
 
 jobs:
-  rename-brand:
+  scan-brand:
     if: github.event_name == 'pull_request' && github.head_ref == 'agent/rename-cflareapi-brand'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-          fetch-depth: 0
-      - name: Replace exact legacy brand references
+          fetch-depth: 1
+          show-progress: false
+      - name: Generate legacy brand report
         shell: bash
         run: |
-          python <<'PY'
-          from pathlib import Path
-          import subprocess
-
-          old_text = "CFlare" + "API"
-          new_text = "CFlareAIProxy"
-          old = old_text.encode()
-          new = new_text.encode()
-
-          def tracked_paths():
-              result = subprocess.run(
-                  ["git", "ls-files", "-z"],
-                  stdout=subprocess.PIPE,
-                  check=True,
-              )
-              return [Path(value.decode()) for value in result.stdout.split(b"\0") if value]
-
-          moved = []
-          while True:
-              moves = {}
-              for path in tracked_paths():
-                  parts = path.parts
-                  for index, part in enumerate(parts):
-                      if old_text in part:
-                          source = Path(*parts[: index + 1])
-                          target = Path(*parts[:index], part.replace(old_text, new_text))
-                          moves[str(source)] = str(target)
-                          break
-              if not moves:
-                  break
-              for source, target in sorted(
-                  moves.items(), key=lambda item: len(Path(item[0]).parts)
-              ):
-                  if not Path(source).exists():
-                      continue
-                  Path(target).parent.mkdir(parents=True, exist_ok=True)
-                  subprocess.run(["git", "mv", source, target], check=True)
-                  moved.append((source, target))
-
-          changed = []
-          skip = {
-              Path(".github/workflows/check.yml"),
-              Path(".github/workflows/rename-cflareapi-brand.yml"),
-          }
-          for path in tracked_paths():
-              if path in skip or not path.is_file():
-                  continue
-              data = path.read_bytes()
-              if b"\0" in data:
-                  continue
-              updated = data.replace(old, new)
-              if updated != data:
-                  path.write_bytes(updated)
-                  changed.append(str(path))
-
-          print(f"Renamed {len(moved)} paths")
-          for source, target in moved:
-              print(f"  {source} -> {target}")
-          print(f"Updated {len(changed)} text files")
-          for path in changed:
-              print(f"  {path}")
-          PY
-
-          cat > .github/workflows/check.yml <<'EOF'
-          name: Check CFlareAIProxy
-
-          on:
-            pull_request:
-            push:
-              branches: [main]
-
-          permissions:
-            contents: read
-
-          jobs:
-            check:
-              runs-on: ubuntu-latest
-              timeout-minutes: 20
-              steps:
-                - uses: actions/checkout@v4
-                - uses: pnpm/action-setup@v4
-                  with:
-                    version: 11.9.0
-                - uses: actions/setup-node@v4
-                  with:
-                    node-version: 22.13.0
-                    cache: pnpm
-                - name: Install dependencies
-                  run: pnpm install --frozen-lockfile
-                - name: Check configuration
-                  id: config
-                  continue-on-error: true
-                  run: node scripts/check-config.mjs
-                - name: Check web assets
-                  id: web
-                  continue-on-error: true
-                  run: node scripts/check-web.mjs
-                - name: Typecheck worker and web
-                  id: types
-                  continue-on-error: true
-                  run: pnpm run typecheck
-                - name: Run tests
-                  id: tests
-                  continue-on-error: true
-                  run: pnpm exec vitest run --reporter=json --outputFile=vitest-results.json
-                - name: Upload test report
-                  if: always()
-                  uses: actions/upload-artifact@v4
-                  with:
-                    name: vitest-results
-                    path: vitest-results.json
-                    if-no-files-found: ignore
-                - name: Build production web bundle
-                  id: build
-                  continue-on-error: true
-                  run: pnpm run build:web
-                - name: Wrangler dry run
-                  id: wrangler
-                  continue-on-error: true
-                  run: pnpm run config:check
-                - name: Enforce validation results
-                  if: always()
-                  run: |
-                    if [ "${{ steps.config.outcome }}" != "success" ] \
-                      || [ "${{ steps.web.outcome }}" != "success" ] \
-                      || [ "${{ steps.types.outcome }}" != "success" ] \
-                      || [ "${{ steps.tests.outcome }}" != "success" ] \
-                      || [ "${{ steps.build.outcome }}" != "success" ] \
-                      || [ "${{ steps.wrangler.outcome }}" != "success" ]; then
-                      exit 1
-                    fi
-          EOF
-
-          rm -f .github/workflows/rename-cflareapi-brand.yml
+          if [ -f .rename-report.json ]; then
+            echo "Report already exists"
+            exit 0
+          fi
 
           python <<'PY'
           from pathlib import Path
+          import json
           import subprocess
-          import sys
 
           old_text = "CFlare" + "API"
           old = old_text.encode()
@@ -166,31 +37,40 @@ jobs:
               ["git", "ls-files", "-z"], stdout=subprocess.PIPE, check=True
           )
           paths = [Path(value.decode()) for value in result.stdout.split(b"\0") if value]
-          failures = []
+          report = {
+              "path_matches": [],
+              "content_matches": [],
+              "binary_matches": [],
+          }
           for path in paths:
               if old_text in str(path):
-                  failures.append(f"path: {path}")
-                  continue
+                  report["path_matches"].append(str(path))
               if not path.is_file():
                   continue
               data = path.read_bytes()
-              if b"\0" not in data and old in data:
-                  failures.append(f"content: {path}")
-          if failures:
-              print("Legacy brand references remain:", file=sys.stderr)
-              print("\n".join(failures), file=sys.stderr)
-              raise SystemExit(1)
+              if old not in data:
+                  continue
+              target = "binary_matches" if b"\0" in data else "content_matches"
+              report[target].append(str(path))
+
+          for values in report.values():
+              values.sort()
+          Path(".rename-report.json").write_text(
+              json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(report, ensure_ascii=False, indent=2))
           PY
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Rename CFlareAPI to CFlareAIProxy"
+          git add .rename-report.json
+          git commit -m "Report legacy CFlareAPI references"
           git push origin HEAD:${GITHUB_HEAD_REF}
 
   check:
-    needs: rename-brand
-    if: always() && (needs.rename-brand.result == 'success' || needs.rename-brand.result == 'skipped')
+    needs: scan-brand
+    if: always() && (needs.scan-brand.result == 'success' || needs.scan-brand.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
