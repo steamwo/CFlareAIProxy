@@ -1,4 +1,4 @@
-name: Check CFlareAPI
+name: Check CFlareAIProxy
 
 on:
   pull_request:
@@ -24,24 +24,61 @@ jobs:
           from pathlib import Path
           import subprocess
 
-          old = b"CFlareAPI"
-          new = b"CFlareAIProxy"
+          old_text = "CFlare" + "API"
+          new_text = "CFlareAIProxy"
+          old = old_text.encode()
+          new = new_text.encode()
 
-          result = subprocess.run(
-              ["git", "grep", "-Il", "-z", old.decode()],
-              stdout=subprocess.PIPE,
-              check=False,
-          )
-          paths = [Path(value.decode()) for value in result.stdout.split(b"\0") if value]
+          def tracked_paths():
+              result = subprocess.run(
+                  ["git", "ls-files", "-z"],
+                  stdout=subprocess.PIPE,
+                  check=True,
+              )
+              return [Path(value.decode()) for value in result.stdout.split(b"\0") if value]
+
+          moved = []
+          while True:
+              moves = {}
+              for path in tracked_paths():
+                  parts = path.parts
+                  for index, part in enumerate(parts):
+                      if old_text in part:
+                          source = Path(*parts[: index + 1])
+                          target = Path(*parts[:index], part.replace(old_text, new_text))
+                          moves[str(source)] = str(target)
+                          break
+              if not moves:
+                  break
+              for source, target in sorted(
+                  moves.items(), key=lambda item: len(Path(item[0]).parts)
+              ):
+                  if not Path(source).exists():
+                      continue
+                  Path(target).parent.mkdir(parents=True, exist_ok=True)
+                  subprocess.run(["git", "mv", source, target], check=True)
+                  moved.append((source, target))
+
           changed = []
-          for path in paths:
+          skip = {
+              Path(".github/workflows/check.yml"),
+              Path(".github/workflows/rename-cflareapi-brand.yml"),
+          }
+          for path in tracked_paths():
+              if path in skip or not path.is_file():
+                  continue
               data = path.read_bytes()
+              if b"\0" in data:
+                  continue
               updated = data.replace(old, new)
               if updated != data:
                   path.write_bytes(updated)
                   changed.append(str(path))
 
-          print(f"Updated {len(changed)} files")
+          print(f"Renamed {len(moved)} paths")
+          for source, target in moved:
+              print(f"  {source} -> {target}")
+          print(f"Updated {len(changed)} text files")
           for path in changed:
               print(f"  {path}")
           PY
@@ -118,10 +155,32 @@ jobs:
 
           rm -f .github/workflows/rename-cflareapi-brand.yml
 
-          if git grep -n -- 'CFlareAPI'; then
-            echo "Legacy brand references remain" >&2
-            exit 1
-          fi
+          python <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          old_text = "CFlare" + "API"
+          old = old_text.encode()
+          result = subprocess.run(
+              ["git", "ls-files", "-z"], stdout=subprocess.PIPE, check=True
+          )
+          paths = [Path(value.decode()) for value in result.stdout.split(b"\0") if value]
+          failures = []
+          for path in paths:
+              if old_text in str(path):
+                  failures.append(f"path: {path}")
+                  continue
+              if not path.is_file():
+                  continue
+              data = path.read_bytes()
+              if b"\0" not in data and old in data:
+                  failures.append(f"content: {path}")
+          if failures:
+              print("Legacy brand references remain:", file=sys.stderr)
+              print("\n".join(failures), file=sys.stderr)
+              raise SystemExit(1)
+          PY
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
