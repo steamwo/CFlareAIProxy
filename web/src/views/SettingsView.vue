@@ -62,24 +62,24 @@ onMounted(load);
 </script>
 
 <template>
-  <page-header title="系统设置" description="控制系统默认代理、请求统计和运行日志。">
+  <page-header title="系统设置" description="控制系统默认代理、基础调用统计和运行日志。">
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新</n-button>
   </page-header>
 
   <div class="settings-grid">
-    <n-card title="请求日志与统计">
+    <n-card title="请求日志与基础统计">
       <template #header-extra>
         <n-tag :type="logging.requestLoggingEnabled ? 'success' : 'default'">
-          {{ logging.requestLoggingEnabled ? '已开启' : '已关闭' }}
+          {{ logging.requestLoggingEnabled ? '日志已开启' : '日志已关闭' }}
         </n-tag>
       </template>
       <n-alert type="info" :bordered="false" class="settings-alert">
-        开启后，成功和失败请求先在 RateLimiter Durable Object 中按 5 分钟聚合，再以聚合消息写入 Queue；成功请求不会永久保存明细，失败请求才会进入错误日志表。
+        基础调用统计始终开启：成功和失败请求会在 RateLimiter Durable Object 中按 5 分钟聚合，再以聚合消息写入 Queue；成功请求不会永久保存单次明细。
       </n-alert>
       <n-alert type="warning" :bordered="false" class="settings-alert">
-        关闭后会停止新的请求统计、错误明细和本功能产生的结构化运行日志；账号池近 2 小时状态和概览调用量将逐渐变为空。调试级别日志量最大，免费版不建议长期启用。
+        关闭日志后，只会停止错误请求明细和本功能产生的结构化 Worker 日志。账号池近 2 小时状态、成功率、调用次数和概览统计仍会持续更新。
       </n-alert>
-      <n-form-item label="开启请求日志与统计">
+      <n-form-item label="开启请求明细与运行日志">
         <n-switch v-model:value="logging.requestLoggingEnabled" />
       </n-form-item>
       <n-form-item label="运行日志级别">
