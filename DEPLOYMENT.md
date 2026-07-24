@@ -1,6 +1,6 @@
 # 部署与升级指南
 
-本文档对应 `dev` 分支，覆盖本地开发、Cloudflare 远程部署、资源初始化、Secret、D1 migration、预览版本和常见故障。
+本文档覆盖本地开发、Cloudflare 远程部署、资源初始化、Secret、D1 migration、预览版本和常见故障。
 
 ## 1. 部署架构
 
@@ -27,11 +27,13 @@ Cloudflare 资源：
 
 Wrangler 会根据 `wrangler.jsonc` 自动配置 D1、KV、Durable Objects 和 Static Assets。部署脚本会额外确保 usage Queue 与 dead-letter Queue 存在。
 
-## 2. 环境要求
+## 2. 环境建议
 
-- Node.js `>= 20.19`
+- 推荐 Node.js `22.13.0` 或更高版本
 - pnpm `11.9.x`
 - Cloudflare 账号与 Wrangler 登录（远程部署）
+
+仓库固定使用 pnpm 11.9。Node.js 22.13.0+ 是为了匹配项目构建工具链的推荐环境，不是 Cloudflare Worker 运行时的硬性要求。
 
 ```bash
 node --version
@@ -180,17 +182,18 @@ pnpm run deploy
 Cloudflare Dashboard → Workers & Pages → Create → Import a repository：
 
 ```text
+Production branch: 你的生产分支
 Root directory: /
 Build command: pnpm run build
 Deploy command: node scripts/deploy.mjs
 ```
 
-生产分支应设置为你真正用于生产的分支。仓库默认分支是 `main`；使用 `dev` 作为生产分支前，应明确接受它可能包含尚未发布的变化。
+生产分支应与你的发布策略一致，并在部署前完成对应版本的校验。
 
 > [!IMPORTANT]
 > Deploy command 必须执行 `node scripts/deploy.mjs`。裸 `wrangler deploy` 只上传代码，不会执行项目的远程资源检查和 D1 schema 验证；`wrangler versions upload` 也不会自动应用远程 migrations。
 
-Cloudflare Builds 使用 pnpm 11 时应使用 Node.js 20.19 或更高版本。仓库 CI 当前使用 Node.js 22 与 pnpm 11.9。
+Cloudflare Builds 使用仓库固定的 pnpm 11.9 时，推荐配置 Node.js 22.13.0 或更高版本。该版本建议属于构建工具链配置，不是 Worker 运行时限制。
 
 ## 6. 部署后检查
 
@@ -326,23 +329,22 @@ pnpm run preview
 - 应用远程 D1 migrations；
 - 验证远程 schema。
 
-预览版本依赖的远程资源必须已经由正式部署准备完成。涉及新 migration 的分支不要只上传预览版本后直接判断功能是否正常。
+预览版本依赖的远程资源必须已经由正式部署准备完成。涉及新 migration 的版本不要只上传预览版本后直接判断功能是否正常。
 
 ## 11. 从旧版本升级
 
 升级前建议：
 
-1. 记录当前 Worker、D1 和生产分支；
+1. 记录当前 Worker、D1 和生产版本；
 2. 备份本地 `.dev.vars` 与 `.cflare/auth/`；
 3. 不要手工复制 `dist/` 或 `node_modules/`；
 4. 阅读 [CHANGELOG.md](CHANGELOG.md) 和 migration 文件；
 5. 先在预览或独立 Worker / D1 环境验证。
 
-更新代码：
+更新当前检出的代码：
 
 ```bash
 git fetch origin
-git switch dev
 git pull --ff-only
 pnpm install --frozen-lockfile
 pnpm run doctor
