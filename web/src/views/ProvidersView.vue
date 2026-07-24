@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { h, onMounted, reactive, ref } from "vue";
+import { computed, h, onMounted, reactive, ref, watch } from "vue";
 import {
   NAlert, NButton, NCard, NCheckbox, NDataTable, NDivider, NEmpty, NForm, NFormItem,
-  NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSpace, NSpin, NSwitch, NTag, useMessage,
+  NInput, NInputNumber, NModal, NPagination, NPopconfirm, NSelect, NSpace, NSpin, NSwitch, NTag, useMessage,
 } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import { Plus, RefreshCw } from "@lucide/vue";
@@ -38,8 +38,13 @@ const editing = ref<Provider | null>(null);
 const proxyOpen = ref(false);
 const selected = ref<Provider | null>(null);
 const discoveredModels = ref<string[]>([]);
+const modelPage = ref(1);
+const modelPageSize = ref(10);
 const message = useMessage();
 const tablePagination = { pageSize: 10, pageSizes: [10, 20, 50], showSizePicker: true, showQuickJumper: true };
+const modelPageCount = computed(() => Math.max(1, Math.ceil(discoveredModels.value.length / modelPageSize.value)));
+const pagedDiscoveredModels = computed(() => discoveredModels.value.slice((modelPage.value - 1) * modelPageSize.value, modelPage.value * modelPageSize.value));
+watch(modelPageCount, (count) => { if (modelPage.value > count) modelPage.value = count; });
 const form = reactive<FormState>({
   id: "", name: "", baseUrl: "", apiMode: "both", poolStrategy: "weighted",
   routingWeight: 1, enabled: true, apiKey: "", apiKeyLabel: "", modelSelections: [],
@@ -65,6 +70,7 @@ function resetSecret() { form.apiKey = ""; form.apiKeyLabel = ""; }
 function openCreate() {
   editing.value = null;
   discoveredModels.value = [];
+  modelPage.value = 1;
   Object.assign(form, {
     id: "", name: "", baseUrl: "", apiMode: "both", poolStrategy: "weighted",
     routingWeight: 1, enabled: true, apiKey: "", apiKeyLabel: "默认 API Key", modelSelections: [],
@@ -75,6 +81,7 @@ function openEdit(row: Provider) {
   editing.value = row;
   const selections = (row.modelSelections ?? []).map((item) => ({ ...item, endpoints: item.endpoints ? [...item.endpoints] : undefined }));
   discoveredModels.value = [...new Set(selections.map((item) => item.upstreamModel))];
+  modelPage.value = 1;
   Object.assign(form, {
     id: row.id, name: row.name, baseUrl: row.base_url, apiMode: row.apiMode,
     poolStrategy: row.pool_strategy, routingWeight: row.routingWeight ?? 1, enabled: row.enabled === 1,
@@ -99,6 +106,7 @@ async function testAndFetchModels() {
     const previous = new Map(form.modelSelections.map((item) => [item.upstreamModel, item]));
     const firstDiscovery = discoveredModels.value.length === 0 && !editing.value;
     discoveredModels.value = result.models;
+    modelPage.value = 1;
     form.modelSelections = firstDiscovery
       ? result.models.map((model) => ({ upstreamModel: model, publicModel: model }))
       : result.models.flatMap((model) => { const existing = previous.get(model); return existing ? [existing] : []; });
@@ -180,7 +188,7 @@ onMounted(load);
       <n-spin :show="testing">
         <n-empty v-if="discoveredModels.length === 0" description="先测试 API Key 获取模型；也可以保存后再回来配置" />
         <div v-else style="display:grid;gap:10px;max-height:340px;overflow:auto;padding-right:4px">
-          <n-card v-for="model in discoveredModels" :key="model" size="small">
+          <n-card v-for="model in pagedDiscoveredModels" :key="model" size="small">
             <div style="display:grid;grid-template-columns:minmax(220px,1fr) minmax(220px,1fr);gap:14px;align-items:center">
               <n-checkbox :checked="selectedModel(model)" @update:checked="(value: boolean) => toggleModel(model, value)"><span class="mono">{{ model }}</span></n-checkbox>
               <n-input v-if="selectionFor(model)" :value="selectionFor(model)?.publicModel" placeholder="客户端看到的模型名" @update:value="(value: string) => { const item = selectionFor(model); if (item) item.publicModel = value }"><template #prefix>映射为</template></n-input>
@@ -188,6 +196,7 @@ onMounted(load);
             </div>
           </n-card>
         </div>
+        <div v-if="discoveredModels.length > modelPageSize" class="pagination-row"><n-pagination v-model:page="modelPage" v-model:page-size="modelPageSize" :item-count="discoveredModels.length" :page-sizes="[10, 20, 50]" show-size-picker /></div>
       </n-spin>
       <n-divider />
       <n-form-item label="启用"><n-switch v-model:value="form.enabled" /></n-form-item>
