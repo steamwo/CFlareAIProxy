@@ -72,9 +72,13 @@ function authLabel(value: string): string {
   return "API Key";
 }
 function quotaPercentage(window: QuotaWindow): number {
+  // Defensive handling for old snapshots created before the backend 0/0 fix.
+  if (window.limit === 0 && window.remaining === 0) return 0;
   if (typeof window.remainingPercent === "number") return Math.max(0, Math.min(100, window.remainingPercent));
   if (typeof window.usedPercent === "number") return Math.max(0, Math.min(100, 100 - window.usedPercent));
-  if (typeof window.limit === "number" && window.limit > 0 && typeof window.remaining === "number") return Math.max(0, Math.min(100, window.remaining / window.limit * 100));
+  if (typeof window.limit === "number" && window.limit > 0 && typeof window.remaining === "number") {
+    return Math.max(0, Math.min(100, window.remaining / window.limit * 100));
+  }
   return 0;
 }
 function progressStatus(window: QuotaWindow): "success" | "warning" | "error" | "default" {
@@ -82,6 +86,32 @@ function progressStatus(window: QuotaWindow): "success" | "warning" | "error" | 
   if (remaining <= 10) return "error";
   if (remaining <= 30) return "warning";
   return "success";
+}
+function numericAmount(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
+}
+function exhaustedWindow(window: QuotaWindow): boolean {
+  if (window.limit === 0 && window.remaining === 0) return true;
+  return (typeof window.remaining === "number" && window.remaining <= 0)
+    || (typeof window.remainingPercent === "number" && window.remainingPercent <= 0)
+    || (typeof window.usedPercent === "number" && window.usedPercent >= 100);
+}
+function quotaExhausted(providerId: string, quota: ParsedQuota): boolean {
+  if (quota.credits?.unlimited) return false;
+  const balance = numericAmount(quota.credits?.balance);
+  if (quota.credits?.hasCredits === false || (balance !== undefined && balance <= 0)) return true;
+
+  const measurable = quota.windows.filter((window) =>
+    window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined,
+  );
+  if (!measurable.length) return false;
+  if (providerId === "qoder") {
+    const pools = measurable.filter((window) => window.key === "user" || window.key === "organization");
+    return pools.length > 0 && pools.every(exhaustedWindow);
+  }
+  return measurable.some(exhaustedWindow);
 }
 function formatAmount(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
@@ -93,11 +123,16 @@ function formatTime(value?: number | null): string {
   const milliseconds = value > 10_000_000_000 ? value : value * 1000;
   return new Date(milliseconds).toLocaleString("zh-CN", { hour12: false });
 }
-function quotaStatusText(status?: string): string {
+function quotaStatusText(status: string | undefined, providerId: string, quota: ParsedQuota): string {
+  if (status === "ok" && quotaExhausted(providerId, quota)) return "额度耗尽";
   return ({ ok: "额度正常", error: "刷新失败", unsupported: "暂不支持", unknown: "等待刷新" } as Record<string, string>)[status ?? ""] ?? "未刷新";
 }
-function quotaStatusType(status?: string): "success" | "error" | "warning" | "default" {
-  if (status === "ok") return "success";
+function quotaStatusType(
+  status: string | undefined,
+  providerId: string,
+  quota: ParsedQuota,
+): "success" | "error" | "warning" | "default" {
+  if (status === "ok") return quotaExhausted(providerId, quota) ? "error" : "success";
   if (status === "error") return "error";
   if (status === "unsupported") return "warning";
   return "default";
@@ -220,7 +255,10 @@ onMounted(load);
         <div class="quota-section">
           <div class="quota-section__head">
             <div><strong>{{ quotaFor(row.id).plan || "当前额度" }}</strong><div class="muted quota-caption">刷新于 {{ formatTime(quotaMap.get(row.id)?.fetched_at) }}</div></div>
-            <n-tag size="small" :type="quotaStatusType(quotaMap.get(row.id)?.status)">{{ quotaStatusText(quotaMap.get(row.id)?.status) }}</n-tag>
+            <n-tag
+              size="small"
+              :type="quotaStatusType(quotaMap.get(row.id)?.status, row.provider_id, quotaFor(row.id))"
+            >{{ quotaStatusText(quotaMap.get(row.id)?.status, row.provider_id, quotaFor(row.id)) }}</n-tag>
           </div>
           <div v-if="quotaFor(row.id).windows.length" class="quota-windows">
             <div v-for="window in quotaFor(row.id).windows" :key="window.key" class="quota-window">
