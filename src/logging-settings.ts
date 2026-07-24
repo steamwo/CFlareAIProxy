@@ -75,7 +75,7 @@ export function runtimeLog(
   level: LogLevel,
   payload: Record<string, unknown>,
 ): void {
-  if (LEVEL_WEIGHT[level] > LEVEL_WEIGHT[settings.level]) return;
+  if (!settings.requestLoggingEnabled || LEVEL_WEIGHT[level] > LEVEL_WEIGHT[settings.level]) return;
   const line = JSON.stringify(payload);
   if (level === "error") console.error(line);
   else if (level === "warn") console.warn(line);
