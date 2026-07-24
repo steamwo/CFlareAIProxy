@@ -388,7 +388,7 @@ async function ensureCodexQuotaCredential(
     headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
     body,
   }, { purpose: "oauth", timeoutMs: 30_000 });
-  const payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
+  const payload: Record<string, unknown> = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
   if (!response.ok) {
     if (credential.expires_at === null || credential.expires_at > nowSeconds()) return credential;
     const detail = stringValue(payload.error_description ?? payload.error) ?? `HTTP ${response.status}`;
