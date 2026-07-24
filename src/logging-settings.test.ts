@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldPersistError } from "./logging-settings";
+import { normalizeLoggingSettings, shouldPersistError } from "./logging-settings";
 import type { LoggingSettings, UsageEvent } from "./types";
 
 function event(statusCode: number, errorCode?: string): UsageEvent {
@@ -36,5 +36,12 @@ describe("request log retention", () => {
 
   it("stores no request details when logging is disabled", () => {
     expect(shouldPersistError(settings("debug", false), event(503, "UPSTREAM_ERROR"))).toBe(false);
+  });
+
+  it("keeps five-minute activity enabled while exposing the disabled log preference over JSON", () => {
+    const normalized = normalizeLoggingSettings({ requestLoggingEnabled: false, level: "debug" });
+    expect(normalized.requestLoggingEnabled).toBe(true);
+    expect(shouldPersistError(normalized, event(503, "UPSTREAM_ERROR"))).toBe(false);
+    expect(JSON.parse(JSON.stringify(normalized))).toEqual({ requestLoggingEnabled: false, level: "debug" });
   });
 });

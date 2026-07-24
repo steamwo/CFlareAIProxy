@@ -3,10 +3,13 @@ import { parseJson } from "./utils";
 
 const SETTINGS_KEY = "request_logging";
 const CACHE_TTL_MS = 30_000;
-const DEFAULT_SETTINGS: LoggingSettings = {
-  requestLoggingEnabled: true,
-  level: "error",
-};
+
+interface RuntimeLoggingSettings extends LoggingSettings {
+  /** Actual user preference for request-detail and structured runtime logs. */
+  logStorageEnabled: boolean;
+  /** Keep the public JSON shape backward-compatible while activity stays always-on internally. */
+  toJSON(): LoggingSettings;
+}
 
 const LEVEL_WEIGHT: Record<LogLevel, number> = {
   error: 0,
@@ -15,20 +18,40 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
   debug: 3,
 };
 
-let cached: { value: LoggingSettings; expiresAt: number } | undefined;
+let cached: { value: RuntimeLoggingSettings; expiresAt: number } | undefined;
 
 function normalizeLevel(value: unknown): LogLevel {
   return value === "warn" || value === "info" || value === "debug" ? value : "error";
 }
 
-function normalizeSettings(value: unknown): LoggingSettings {
+function createRuntimeSettings(logStorageEnabled: boolean, level: LogLevel): RuntimeLoggingSettings {
+  return {
+    // proxy-v2 historically used this property to decide whether to attach the
+    // five-minute activity event. Keep it true at runtime so base statistics
+    // are never disabled by the request-log switch.
+    requestLoggingEnabled: true,
+    logStorageEnabled,
+    level,
+    toJSON() {
+      // Admin API responses and D1 persistence retain the existing public
+      // contract: requestLoggingEnabled reflects the user's logging choice.
+      return { requestLoggingEnabled: logStorageEnabled, level };
+    },
+  };
+}
+
+export function normalizeLoggingSettings(value: unknown): LoggingSettings {
   const record = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-  return {
-    requestLoggingEnabled: record.requestLoggingEnabled !== false,
-    level: normalizeLevel(record.level),
-  };
+  return createRuntimeSettings(record.requestLoggingEnabled !== false, normalizeLevel(record.level));
+}
+
+function loggingEnabled(settings: LoggingSettings): boolean {
+  const runtime = settings as Partial<RuntimeLoggingSettings>;
+  return typeof runtime.logStorageEnabled === "boolean"
+    ? runtime.logStorageEnabled
+    : settings.requestLoggingEnabled;
 }
 
 export async function getLoggingSettings(env: Env): Promise<LoggingSettings> {
@@ -38,21 +61,21 @@ export async function getLoggingSettings(env: Env): Promise<LoggingSettings> {
     .bind(SETTINGS_KEY)
     .first<{ value_json: string }>()
     .catch(() => null);
-  const value = row?.value_json
-    ? normalizeSettings(parseJson<unknown>(row.value_json, DEFAULT_SETTINGS))
-    : DEFAULT_SETTINGS;
+  const value = normalizeLoggingSettings(row?.value_json
+    ? parseJson<unknown>(row.value_json, {})
+    : {}) as RuntimeLoggingSettings;
   cached = { value, expiresAt: now + CACHE_TTL_MS };
   return value;
 }
 
 export async function updateLoggingSettings(env: Env, input: Partial<LoggingSettings>): Promise<LoggingSettings> {
   const current = await getLoggingSettings(env);
-  const value = normalizeSettings({
-    requestLoggingEnabled: typeof input.requestLoggingEnabled === "boolean"
+  const value = createRuntimeSettings(
+    typeof input.requestLoggingEnabled === "boolean"
       ? input.requestLoggingEnabled
-      : current.requestLoggingEnabled,
-    level: input.level ?? current.level,
-  });
+      : loggingEnabled(current),
+    normalizeLevel(input.level ?? current.level),
+  );
   await env.DB.prepare(
     `INSERT INTO system_settings(key,value_ciphertext,value_json,updated_at)
      VALUES(?,NULL,?,?)
@@ -63,7 +86,7 @@ export async function updateLoggingSettings(env: Env, input: Partial<LoggingSett
 }
 
 export function shouldPersistError(settings: LoggingSettings, event: UsageEvent): boolean {
-  if (!settings.requestLoggingEnabled) return false;
+  if (!loggingEnabled(settings)) return false;
   const failed = event.statusCode < 200 || event.statusCode >= 400 || Boolean(event.errorCode);
   if (!failed) return false;
   if (settings.level === "error") return event.statusCode >= 500 || Boolean(event.errorCode);
@@ -75,7 +98,7 @@ export function runtimeLog(
   level: LogLevel,
   payload: Record<string, unknown>,
 ): void {
-  if (!settings.requestLoggingEnabled || LEVEL_WEIGHT[level] > LEVEL_WEIGHT[settings.level]) return;
+  if (!loggingEnabled(settings) || LEVEL_WEIGHT[level] > LEVEL_WEIGHT[settings.level]) return;
   const line = JSON.stringify(payload);
   if (level === "error") console.error(line);
   else if (level === "warn") console.warn(line);
