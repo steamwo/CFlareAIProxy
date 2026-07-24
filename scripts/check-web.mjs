@@ -24,7 +24,7 @@ if(accounts.includes("添加账号 / API Key")||accounts.includes('api<{ data: P
 if(!accounts.includes("近 2 小时健康状态")||!accounts.includes("stat-pill--success")||!accounts.includes("status-blocks")||!accounts.includes("发起授权")) errors.push("CPA 风格账号卡片、近两小时状态条或调用统计未接线");
 const worker=readFileSync(join(root,"src/index.ts"),"utf8");
 if(!worker.includes("ACCOUNT_POOL_PROVIDER_IDS")||!worker.includes("provider_id IN")) errors.push("账号池分页接口未限制为内置渠道");
-if(!worker.includes("ACTIVITY_BUCKET_SECONDS")||!worker.includes("totalActivityResult")) errors.push("账号池近两小时桶和累计调用统计未接线");
+if(!worker.includes("ACTIVITY_BUCKET_SECONDS")||worker.includes("totalActivityResult")||!worker.includes("entry.totals.successes += successes")) errors.push("账号池统计必须复用固定两小时窗口，禁止扫描全历史日志");
 const models=readFileSync(join(root,"web/src/views/ModelsView.vue"),"utf8");
 if(!models.includes("groupedDiscovered")||!models.includes("支持端点")) errors.push("实际模型列表未按逻辑模型聚合端点");
 const routes=readFileSync(join(root,"web/src/views/RoutesView.vue"),"utf8");
