@@ -3,20 +3,14 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   NAlert, NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NModal,
-  NPagination, NPopconfirm, NProgress, NSelect, NSpace, NSpin, NSwitch, NTag, useMessage,
+  NPagination, NPopconfirm, NProgress, NSpace, NSpin, NSwitch, NTag, useMessage,
 } from "naive-ui";
-import { Plus, RefreshCw } from "@lucide/vue";
+import { KeyRound, RefreshCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProviderIcon from "../components/ProviderIcon.vue";
 import { api, jsonBody } from "../api";
-import type { Channel, Credential, Provider, QuotaSnapshot, QuotaWindow } from "../types";
+import type { Channel, Credential, QuotaSnapshot, QuotaWindow } from "../types";
 
-interface SourceOption {
-  [key: string]: unknown;
-  label: string;
-  value: string;
-  type: "channel" | "provider";
-}
 interface ParsedQuota {
   plan?: string;
   windows: QuotaWindow[];
@@ -48,22 +42,14 @@ const activeSource = ref(sourceQuery());
 
 const credentials = ref<Credential[]>([]);
 const channels = ref<Channel[]>([]);
-const providers = ref<Provider[]>([]);
 const quotas = ref<QuotaSnapshot[]>([]);
 const total = ref(0);
 const loading = ref(false);
 const modal = ref(false);
 const editing = ref<Credential | null>(null);
-const form = reactive({ providerId: "", label: "", secret: "", enabled: true, priority: 100, weight: 1, maxConcurrency: 4 });
+const form = reactive({ label: "", enabled: true, priority: 100, weight: 1, maxConcurrency: 4 });
 
-const sources = computed<SourceOption[]>(() => [
-  ...channels.value.map((channel) => ({ label: `${channel.name}（内置渠道）`, value: channel.id, type: "channel" as const })),
-  ...providers.value.map((provider) => ({ label: provider.name, value: provider.id, type: "provider" as const })),
-]);
-const sourceNames = computed(() => new Map([
-  ...channels.value.map((channel) => [channel.id, channel.name] as const),
-  ...providers.value.map((provider) => [provider.id, provider.name] as const),
-]));
+const sourceNames = computed(() => new Map(channels.value.map((channel) => [channel.id, channel.name] as const)));
 const quotaMap = computed(() => new Map(quotas.value.map((quota) => [quota.credential_id, quota])));
 
 function parseQuota(row?: QuotaSnapshot): ParsedQuota {
@@ -137,43 +123,33 @@ async function load() {
   try {
     const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) });
     if (activeSource.value) params.set("provider", activeSource.value);
-    const [channelResult, providerResult, accountResult] = await Promise.all([
+    const [channelResult, accountResult] = await Promise.all([
       api<{ data: Channel[] }>("/channels"),
-      api<{ data: Provider[] }>("/providers"),
       api<CredentialPage>(`/credentials/paged?${params.toString()}`),
     ]);
     channels.value = channelResult.data;
-    providers.value = providerResult.data;
     credentials.value = accountResult.data;
     quotas.value = accountResult.quotas;
     total.value = accountResult.total;
     page.value = accountResult.page;
     pageSize.value = accountResult.pageSize;
-    if (activeSource.value && !form.providerId) form.providerId = activeSource.value;
     await normalizePaginationQuery();
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
   } finally { loading.value = false; }
 }
-function openCreate() {
-  editing.value = null;
-  Object.assign(form, { providerId: activeSource.value, label: "", secret: "", enabled: true, priority: 100, weight: 1, maxConcurrency: 4 });
-  modal.value = true;
-}
 function openEdit(row: Credential) {
   editing.value = row;
-  Object.assign(form, { providerId: row.provider_id, label: row.label, secret: "", enabled: row.enabled === 1, priority: row.priority, weight: row.weight, maxConcurrency: row.max_concurrency });
+  Object.assign(form, { label: row.label, enabled: row.enabled === 1, priority: row.priority, weight: row.weight, maxConcurrency: row.max_concurrency });
   modal.value = true;
 }
 async function save() {
+  if (!editing.value) return;
   try {
-    const body = { ...form };
-    if (editing.value) await api(`/credentials/${editing.value.id}`, { method: "PATCH", body: jsonBody(body) });
-    else await api("/credentials", { method: "POST", body: jsonBody({ ...body, authType: "api_key" }) });
-    message.success(editing.value ? "账号已更新" : "账号已添加，正在后台刷新模型与额度");
+    await api(`/credentials/${editing.value.id}`, { method: "PATCH", body: jsonBody(form) });
+    message.success("账号已更新");
     modal.value = false;
-    if (!editing.value && page.value !== 1) await router.replace({ query: paginationQuery(1, pageSize.value) });
-    else await load();
+    await load();
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
 }
 async function remove(id: string) {
@@ -218,8 +194,8 @@ onMounted(load);
 </script>
 
 <template>
-  <page-header title="账号池" description="管理 API Key 和已授权账号的状态、调度参数与实时额度；新 OAuth 登录请前往“授权”。">
-    <n-button type="primary" @click="openCreate"><template #icon><plus /></template>添加账号 / API Key</n-button>
+  <page-header title="账号池" description="只展示通过内置渠道 OAuth 或授权文件加入的账号；OpenAI-compatible 供应商 API Key 请在供应商配置中管理。">
+    <n-button type="primary" @click="router.push({ name: 'authorization' })"><template #icon><key-round /></template>前往授权</n-button>
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新</n-button>
   </page-header>
 
@@ -261,12 +237,12 @@ onMounted(load);
         <n-alert v-else-if="quotaMap.get(row.id)?.error_message" type="warning" :bordered="false" class="account-error">{{ quotaMap.get(row.id)?.error_message }}</n-alert>
         <div class="account-actions">
           <n-button size="small" @click="refreshOne(row.id)"><template #icon><refresh-cw /></template>刷新模型与额度</n-button>
-          <n-button size="small" @click="openEdit(row)">编辑</n-button>
-          <n-popconfirm @positive-click="remove(row.id)"><template #trigger><n-button size="small" type="error" secondary>删除</n-button></template>删除该账号、模型缓存和额度快照？</n-popconfirm>
+          <n-button size="small" @click="openEdit(row)">编辑调度</n-button>
+          <n-popconfirm @positive-click="remove(row.id)"><template #trigger><n-button size="small" type="error" secondary>删除</n-button></template>删除该授权账号、模型缓存和额度快照？</n-popconfirm>
         </div>
       </n-card>
     </div>
-    <n-card v-else><n-empty description="账号池还是空的，可添加 API Key，或从“授权”菜单登录内置渠道" /></n-card>
+    <n-card v-else><n-empty description="账号池还是空的，请前往“授权”登录内置渠道或导入授权文件" /></n-card>
   </n-spin>
   <div v-if="total > 0" class="pagination-row">
     <n-pagination
@@ -281,13 +257,12 @@ onMounted(load);
     />
   </div>
 
-  <n-modal v-model:show="modal" preset="card" :title="editing ? '编辑账号' : '添加账号 / API Key'" style="width:min(680px,calc(100vw - 32px))">
+  <n-modal v-model:show="modal" preset="card" title="编辑账号调度" style="width:min(680px,calc(100vw - 32px))">
     <n-form label-placement="top">
       <div class="grid-2">
-        <n-form-item label="来源"><n-select v-model:value="form.providerId" :disabled="!!editing" :options="sources" filterable /></n-form-item>
-        <n-form-item label="标签"><n-input v-model:value="form.label" placeholder="例如 主账号 / Key 01" /></n-form-item>
+        <n-form-item label="内置渠道"><n-input :value="editing ? sourceName(editing.provider_id) : ''" disabled /></n-form-item>
+        <n-form-item label="账号标签"><n-input v-model:value="form.label" placeholder="例如 工作账号 / 组织账号" /></n-form-item>
       </div>
-      <n-form-item :label="editing ? '新 Token / API Key（留空不修改）' : 'Token / API Key'"><n-input v-model:value="form.secret" type="password" show-password-on="click" /></n-form-item>
       <div class="grid-stats account-form-grid">
         <n-form-item label="优先级"><n-input-number v-model:value="form.priority" :min="1" /></n-form-item>
         <n-form-item label="权重"><n-input-number v-model:value="form.weight" :min="1" /></n-form-item>
