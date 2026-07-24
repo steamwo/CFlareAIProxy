@@ -227,11 +227,7 @@ function activityCells(credentialId: string): StatusCell[] {
   });
 }
 function recentSummary(credentialId: string): ActivityTotals & { successRate: number } {
-  const summary = activityRecord(credentialId).buckets.reduce((result, row) => ({
-    requests: result.requests + row.requests,
-    successes: result.successes + row.successes,
-    failures: result.failures + row.failures,
-  }), { requests: 0, successes: 0, failures: 0 });
+  const summary = activityRecord(credentialId).totals;
   return {
     ...summary,
     successRate: summary.requests > 0 ? summary.successes / summary.requests * 100 : 0,
@@ -265,11 +261,14 @@ async function load() {
   try {
     const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) });
     if (activeSource.value) params.set("provider", activeSource.value);
+    const channelRequest = channels.value.length
+      ? Promise.resolve<{ data: Channel[] } | null>(null)
+      : api<{ data: Channel[] }>("/channels");
     const [channelResult, accountResult] = await Promise.all([
-      api<{ data: Channel[] }>("/channels"),
+      channelRequest,
       api<CredentialPage>(`/credentials/paged?${params.toString()}`),
     ]);
-    channels.value = channelResult.data;
+    if (channelResult) channels.value = channelResult.data;
     credentials.value = accountResult.data;
     quotas.value = accountResult.quotas;
     activity.value = accountResult.activity ?? {};
@@ -371,7 +370,7 @@ onMounted(load);
 </script>
 
 <template>
-  <page-header title="账号池" description="集中查看账号状态、累计调用、近 2 小时健康度和额度窗口。">
+  <page-header title="账号池" description="集中查看账号状态、近 2 小时调用健康度和额度窗口。">
     <n-button type="primary" @click="router.push({ name: 'authorization' })"><template #icon><key-round /></template>发起授权</n-button>
     <n-button @click="router.push({ name: 'authorization', query: { import: '1' } })"><template #icon><file-json /></template>导入认证文件</n-button>
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新</n-button>
@@ -410,8 +409,8 @@ onMounted(load);
 
         <div class="card-insights">
           <div class="usage-stats">
-            <span class="stat-pill stat-pill--success">成功 <strong>{{ formatCompact(activityRecord(row.id).totals.successes) }}</strong></span>
-            <span class="stat-pill stat-pill--failure">失败 <strong>{{ formatCompact(activityRecord(row.id).totals.failures) }}</strong></span>
+            <span class="stat-pill stat-pill--success">2h 成功 <strong>{{ formatCompact(activityRecord(row.id).totals.successes) }}</strong></span>
+            <span class="stat-pill stat-pill--failure">2h 失败 <strong>{{ formatCompact(activityRecord(row.id).totals.failures) }}</strong></span>
           </div>
 
           <div class="health-panel">
@@ -431,7 +430,7 @@ onMounted(load);
               </span>
             </div>
             <div class="health-caption muted">
-              {{ recentSummary(row.id).requests }} 次请求 · 成功 {{ recentSummary(row.id).successes }} · 失败 {{ recentSummary(row.id).failures }}
+              近 2 小时共 {{ recentSummary(row.id).requests }} 次请求
             </div>
           </div>
         </div>
