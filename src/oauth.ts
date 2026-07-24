@@ -54,6 +54,10 @@ function numberValue(object: Record<string, unknown>, key: string): number | und
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
 function oauthEndpointError(
   provider: ProviderConfig,
   action: "exchange" | "refresh",
@@ -93,18 +97,16 @@ async function saveSession(
   await env.DB.prepare(
     `INSERT INTO oauth_sessions(id, provider_id, state, flow, secret_ciphertext, payload_json, expires_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      id,
-      providerId,
-      state,
-      flow,
-      await encryptSecret(JSON.stringify(secret), env.MASTER_KEY),
-      JSON.stringify(payload),
-      expiresAt,
-      nowSeconds(),
-    )
-    .run();
+  ).bind(
+    id,
+    providerId,
+    state,
+    flow,
+    await encryptSecret(JSON.stringify(secret), env.MASTER_KEY),
+    JSON.stringify(payload),
+    expiresAt,
+    nowSeconds(),
+  ).run();
   return id;
 }
 
@@ -156,7 +158,11 @@ export async function startOAuth(env: Env, providerId: string): Promise<OAuthSta
     if (!deviceUrl || !clientId) throw new GatewayError(400, "OAUTH_CONFIG_INVALID", "Device-flow provider is not configured");
     const deviceId = crypto.randomUUID();
     const body = new URLSearchParams({ client_id: clientId });
-    const response = await providerFetch(env, provider, deviceUrl, { method: "POST", headers: kimiHeaders(deviceId), body }, { purpose: "oauth", timeoutMs: 30_000 });
+    const response = await providerFetch(env, provider, deviceUrl, {
+      method: "POST",
+      headers: kimiHeaders(deviceId),
+      body,
+    }, { purpose: "oauth", timeoutMs: 30_000 });
     const payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
     if (!response.ok) {
       throw new GatewayError(502, "OAUTH_DEVICE_START_FAILED", stringValue(payload, "error_description") ?? `OAuth device start failed: ${response.status}`);
@@ -232,6 +238,33 @@ function tokenExpiry(payload: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
+function codexMetadata(
+  payload: Record<string, unknown>,
+  accessToken: string,
+  previous: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const idToken = stringValue(payload, "id_token")
+    ?? (typeof previous.id_token === "string" ? previous.id_token : undefined);
+  const claims = decodeJwtPayload(idToken ?? accessToken);
+  const auth = record(claims["https://api.openai.com/auth"]);
+  const metadata: Record<string, unknown> = {
+    ...previous,
+    id_token: idToken,
+    account_id: pickString(auth, ["chatgpt_account_id"])
+      ?? pickString(claims, ["chatgpt_account_id", "account_id"])
+      ?? previous.account_id,
+    email: pickString(claims, ["email"]) ?? previous.email,
+    plan_type: pickString(auth, ["chatgpt_plan_type"]) ?? previous.plan_type,
+    chatgpt_subscription_active_start: auth.chatgpt_subscription_active_start ?? previous.chatgpt_subscription_active_start,
+    chatgpt_subscription_active_until: auth.chatgpt_subscription_active_until ?? previous.chatgpt_subscription_active_until,
+    token_type: stringValue(payload, "token_type") ?? previous.token_type ?? "Bearer",
+    scope: stringValue(payload, "scope") ?? previous.scope,
+    last_refresh: new Date().toISOString(),
+  };
+  for (const key of Object.keys(metadata)) if (metadata[key] === undefined) delete metadata[key];
+  return metadata;
+}
+
 function qoderPayloadRoot(payload: Record<string, unknown>): Record<string, unknown> {
   let current = payload;
   for (let depth = 0; depth < 3; depth += 1) {
@@ -265,16 +298,19 @@ async function finalizeCredential(
   const accessToken = stringValue(payload, "access_token") ?? stringValue(payload, "token");
   if (!accessToken) throw new GatewayError(502, "OAUTH_TOKEN_INVALID", "OAuth server returned no access token");
   const refreshToken = stringValue(payload, "refresh_token");
-  const jwt = decodeJwtPayload(accessToken);
-  const authClaim = jwt["https://api.openai.com/auth"];
-  const authMetadata = authClaim && typeof authClaim === "object" ? authClaim as Record<string, unknown> : {};
-  const metadata: Record<string, unknown> = {
+  const accessClaims = decodeJwtPayload(accessToken);
+  const accessAuth = record(accessClaims["https://api.openai.com/auth"]);
+  const baseMetadata: Record<string, unknown> = {
     token_type: stringValue(payload, "token_type") ?? "Bearer",
     scope: stringValue(payload, "scope"),
-    account_id: pickString(authMetadata, ["chatgpt_account_id"]) ?? pickString(jwt, ["chatgpt_account_id", "account_id"]),
-    email: pickString(jwt, ["email"]),
+    account_id: pickString(accessAuth, ["chatgpt_account_id"])
+      ?? pickString(accessClaims, ["chatgpt_account_id", "account_id"]),
+    email: pickString(accessClaims, ["email"]),
     ...extraMetadata,
   };
+  const metadata = provider.kind === "codex"
+    ? { ...codexMetadata(payload, accessToken, baseMetadata), ...extraMetadata }
+    : baseMetadata;
   for (const key of Object.keys(metadata)) if (metadata[key] === undefined) delete metadata[key];
   const label = typeof metadata.email === "string" ? `${provider.name} · ${metadata.email}` : `${provider.name} OAuth`;
   const credentialId = await createCredential(env, {
@@ -306,7 +342,11 @@ export async function pollOAuth(env: Env, providerId: string, sessionId: string)
       device_code: session.secret.deviceCode,
       grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     });
-    const response = await providerFetch(env, provider, tokenUrl, { method: "POST", headers: kimiHeaders(session.secret.deviceId), body }, { purpose: "oauth", timeoutMs: 30_000 });
+    const response = await providerFetch(env, provider, tokenUrl, {
+      method: "POST",
+      headers: kimiHeaders(session.secret.deviceId),
+      body,
+    }, { purpose: "oauth", timeoutMs: 30_000 });
     const payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
     const oauthError = stringValue(payload, "error");
     if (oauthError === "authorization_pending" || oauthError === "slow_down") {
@@ -327,7 +367,9 @@ export async function pollOAuth(env: Env, providerId: string, sessionId: string)
     url.searchParams.set("nonce", session.secret.nonce);
     url.searchParams.set("verifier", session.secret.verifier);
     url.searchParams.set("challenge_method", "S256");
-    const response = await providerFetch(env, provider, url, { headers: { accept: "application/json", "user-agent": "CFlareAIProxy/0.5.3" } }, { purpose: "oauth", timeoutMs: 20_000 });
+    const response = await providerFetch(env, provider, url, {
+      headers: { accept: "application/json", "user-agent": "CFlareAIProxy/0.5.3" },
+    }, { purpose: "oauth", timeoutMs: 20_000 });
     if (response.status === 202 || response.status === 404) {
       return { status: "pending", message: "等待 Qoder 完成授权…", retryAfterSeconds: 2 };
     }
@@ -407,33 +449,42 @@ export async function refreshCredential(env: Env, provider: ProviderConfig, cred
       body: JSON.stringify({ refreshToken: credential.refreshToken }),
     }, { purpose: "oauth", timeoutMs: 30_000 });
     payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
-    if (!response.ok) return credential; // Device tokens are often long-lived and refresh may be rejected.
+    if (!response.ok) return credential;
   } else {
     const tokenUrl = stringValue(provider.auth, "token_url");
     const clientId = stringValue(provider.auth, "client_id");
     if (!tokenUrl || !clientId) return credential;
-    const body = new URLSearchParams({ grant_type: "refresh_token", client_id: clientId, refresh_token: credential.refreshToken });
+    const values: Record<string, string> = {
+      grant_type: "refresh_token",
+      client_id: clientId,
+      refresh_token: credential.refreshToken,
+    };
+    if (provider.kind === "codex") values.scope = "openid profile email";
+    const body = new URLSearchParams(values);
     const headers = provider.kind === "kimi"
       ? kimiHeaders(typeof credential.metadata.device_id === "string" ? credential.metadata.device_id : crypto.randomUUID())
       : new Headers({ accept: "application/json", "content-type": "application/x-www-form-urlencoded" });
-    const response = await providerFetch(env, provider, tokenUrl, { method: "POST", headers, body }, { purpose: "oauth", timeoutMs: 30_000 });
+    const response = await providerFetch(env, provider, tokenUrl, {
+      method: "POST",
+      headers,
+      body,
+    }, { purpose: "oauth", timeoutMs: 30_000 });
     payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
     if (!response.ok) throw new GatewayError(502, "OAUTH_REFRESH_FAILED", oauthEndpointError(provider, "refresh", response.status, payload));
   }
   const access = stringValue(payload, "access_token") ?? stringValue(payload, "token");
   if (!access) return credential;
-  await updateCredentialTokens(
-    env,
-    credential.id,
-    access,
-    stringValue(payload, "refresh_token") ?? credential.refreshToken,
-    tokenExpiry(payload),
-    credential.metadata,
-  );
+  const refreshToken = stringValue(payload, "refresh_token") ?? credential.refreshToken;
+  const expiresAt = tokenExpiry(payload) ?? credential.expires_at;
+  const metadata = provider.kind === "codex"
+    ? codexMetadata(payload, access, credential.metadata)
+    : credential.metadata;
+  await updateCredentialTokens(env, credential.id, access, refreshToken, expiresAt ?? undefined, metadata);
   return {
     ...credential,
     secret: access,
-    refreshToken: stringValue(payload, "refresh_token") ?? credential.refreshToken,
-    expires_at: tokenExpiry(payload) ?? credential.expires_at,
+    refreshToken,
+    expires_at: expiresAt,
+    metadata,
   };
 }
