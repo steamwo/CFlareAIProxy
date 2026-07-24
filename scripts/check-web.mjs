@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { root } from "./lib.mjs";
-const required=["web/index.html","web/src/main.ts","web/src/App.vue","web/src/router.ts","web/src/views/ChannelsView.vue","web/src/views/ProvidersView.vue","web/src/views/AuthorizationView.vue","web/src/views/AccountsView.vue","vite.config.ts"];
+const required=["web/index.html","web/src/main.ts","web/src/App.vue","web/src/router.ts","web/src/views/ChannelsView.vue","web/src/views/ProvidersView.vue","web/src/views/AuthorizationView.vue","web/src/views/AccountsView.vue","web/src/views/SettingsView.vue","vite.config.ts","src/logging-settings.ts","src/usage-storage.ts","migrations/20260724_request_activity_5m.sql"];
 const errors=[];
 for(const file of required) if(!existsSync(join(root,file))) errors.push(`缺少 ${file}`);
 const pkg=JSON.parse(readFileSync(join(root,"package.json"),"utf8"));
@@ -10,6 +10,7 @@ for(const dep of ["vue","naive-ui","pinia","vue-router"]) if(!pkg.dependencies?.
 const config=JSON.parse(readFileSync(join(root,"wrangler.jsonc"),"utf8"));
 if(config.assets?.directory!=="./dist") errors.push("assets.directory 必须为 ./dist");
 if(config.assets?.not_found_handling!=="single-page-application") errors.push("管理台必须启用 SPA fallback");
+if(config.queues?.consumers?.[0]?.max_batch_size!==100||config.queues?.consumers?.[0]?.max_batch_timeout!==60) errors.push("聚合 Queue 必须使用 100 条 / 60 秒批处理上限");
 const admin=readFileSync(join(root,"src/admin.ts"),"utf8");
 if(admin.includes("ADMIN_SCRIPT")||admin.includes("ADMIN_CSS")||admin.includes("adminPage(")) errors.push("后端仍引用旧的内嵌管理页面");
 if(!admin.includes('basePath("/admin")')) errors.push("管理 API 未挂载到 /admin");
@@ -22,9 +23,15 @@ if(!router.includes('path: "authorization"')||!router.includes("AuthorizationVie
 const accounts=readFileSync(join(root,"web/src/views/AccountsView.vue"),"utf8");
 if(accounts.includes("添加账号 / API Key")||accounts.includes('api<{ data: Provider[] }>("/providers")')) errors.push("账号池仍暴露自定义供应商 API Key 管理入口");
 if(!accounts.includes("近 2 小时健康状态")||!accounts.includes("stat-pill--success")||!accounts.includes("status-blocks")||!accounts.includes("发起授权")) errors.push("CPA 风格账号卡片、近两小时状态条或调用统计未接线");
+const settings=readFileSync(join(root,"web/src/views/SettingsView.vue"),"utf8");
+if(!settings.includes("requestLoggingEnabled")||!settings.includes("运行日志级别")||!settings.includes("5 分钟聚合")) errors.push("系统设置缺少请求日志开关、日志级别或聚合说明");
 const worker=readFileSync(join(root,"src/index.ts"),"utf8");
 if(!worker.includes("ACCOUNT_POOL_PROVIDER_IDS")||!worker.includes("provider_id IN")) errors.push("账号池分页接口未限制为内置渠道");
-if(!worker.includes("ACTIVITY_BUCKET_SECONDS")||worker.includes("totalActivityResult")||!worker.includes("entry.totals.successes += successes")) errors.push("账号池统计必须复用固定两小时窗口，禁止扫描全历史日志");
+if(!worker.includes("request_activity_5m")||worker.includes("totalActivityResult")||!worker.includes("persistUsageQueueBatch")) errors.push("账号池与概览必须读取五分钟聚合表，禁止扫描全历史请求明细");
+const proxy=readFileSync(join(root,"src/proxy-v2.ts"),"utf8");
+if(proxy.includes("USAGE_QUEUE.send(usageEvent")||!proxy.includes("requestLoggingEnabled")||!proxy.includes('kind: "error"')) errors.push("成功请求不得逐条写入 Queue，失败明细必须受日志设置控制");
+const limiter=readFileSync(join(root,"src/rate-limiter.ts"),"utf8");
+if(!limiter.includes("activity_buckets")||!limiter.includes("setAlarm")||!limiter.includes('kind: "aggregate"')) errors.push("RateLimiter 未按五分钟桶聚合并通过 Queue 刷新");
 const models=readFileSync(join(root,"web/src/views/ModelsView.vue"),"utf8");
 if(!models.includes("groupedDiscovered")||!models.includes("支持端点")) errors.push("实际模型列表未按逻辑模型聚合端点");
 const routes=readFileSync(join(root,"web/src/views/RoutesView.vue"),"utf8");
