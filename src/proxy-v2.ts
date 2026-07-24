@@ -8,6 +8,8 @@ import { ensureOpenCodeAnonymousModels } from "./models";
 import { refreshCredentialForInference } from "./credential-refresh";
 import { prepareProviderResponse } from "./provider-response";
 import { buildUpstreamRequest } from "./providers";
+import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
+import { isOpenCodeAnonymousCredential } from "./providers/opencode-anonymous";
 import { captureQuotaHeaders } from "./quota";
 import { orderHealthyRoutes, recordProviderFailure, recordProviderSuccess } from "./routing-health";
 import { trackResponse } from "./stream";
@@ -73,7 +75,8 @@ function usageEvent(
   return { ...base, usage, statusCode, latencyMs, firstTokenMs, createdAt: Math.floor(Date.now() / 1000) };
 }
 
-function cooldownMs(env: Env, retryAfterMs?: number): number {
+function credentialCooldownMs(env: Env, credentialId: string, retryAfterMs?: number): number {
+  if (isOpenCodeAnonymousCredential(credentialId)) return 0;
   return Math.max(asInt(env.CREDENTIAL_COOLDOWN_MS, 60_000), retryAfterMs ?? 0);
 }
 
@@ -212,8 +215,35 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
         }, c.env);
         const timeoutMs = typeof provider.options.timeout_ms === "number" ? Math.max(1000, provider.options.timeout_ms) : 120_000;
         let upstream: Response;
+        let mirrorCredentialFailure: ReturnType<typeof classifyUpstreamResponse> | undefined;
         try {
-          upstream = await providerFetchForCredential(c.env, provider, credential, upstreamRequest.url, upstreamRequest.init, { purpose: "inference", timeoutMs });
+          if (provider.kind === "opencode") {
+            const result = await fetchOpenCodeWithFailover({
+              env: c.env,
+              provider,
+              credential,
+              target: upstreamRequest.url,
+              init: upstreamRequest.init,
+              fetcher: (target, requestInit) => providerFetchForCredential(
+                c.env, provider, credential, target, requestInit, { purpose: "inference", timeoutMs },
+              ),
+            });
+            upstream = result.response;
+            if (result.officialFailure && !isOpenCodeAnonymousCredential(credential.id)) {
+              const classifiedOfficial = classifyUpstreamResponse(
+                result.officialFailure.status,
+                result.officialFailure.body,
+                result.officialFailure.headers,
+                provider.kind,
+              );
+              if (classifiedOfficial.code === "AUTH_UNAVAILABLE" || classifiedOfficial.code === "RATE_LIMIT_EXCEEDED") {
+                mirrorCredentialFailure = classifiedOfficial;
+                await setCredentialError(c.env, credential.id, `${classifiedOfficial.code}: ${classifiedOfficial.message}`).catch(() => undefined);
+              }
+            }
+          } else {
+            upstream = await providerFetchForCredential(c.env, provider, credential, upstreamRequest.url, upstreamRequest.init, { purpose: "inference", timeoutMs });
+          }
         } catch (error) {
           const normalized = classifyTransportError(error, provider.name, timeoutMs);
           const health = await recordProviderFailure(c.env, provider.id, normalized.status, normalized.message);
@@ -229,7 +259,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             leaseId: poolLease.leaseId,
             success: false,
             statusCode: classified.status,
-            cooldownMs: classified.credentialFailure ? cooldownMs(c.env, classified.retryAfterMs) : 0,
+            cooldownMs: classified.credentialFailure ? credentialCooldownMs(c.env, credential.id, classified.retryAfterMs) : 0,
           }).catch(() => undefined);
           poolLease = undefined;
           if (classified.credentialFailure) await setCredentialError(c.env, credential.id, `${classified.code}: ${classified.message}`).catch(() => undefined);
@@ -237,6 +267,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             const health = await recordProviderFailure(c.env, provider.id, upstream.status, classified.message);
             if (health.disabledUntil > Date.now()) blockedProviders.add(provider.id);
           }
+          if (isOpenCodeAnonymousCredential(credential.id)) blockedProviders.add(provider.id);
           const classifiedError = gatewayErrorFromClassification(classified);
           if (classified.retryable) {
             lastError = classifiedError;
@@ -271,9 +302,13 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
           const tasks: Promise<unknown>[] = [
             postDo(poolStub!, "/release", {
               leaseId,
-              success: !streamError,
-              statusCode: finalStatus,
-              cooldownMs: streamError ? cooldownMs(c.env) : 0,
+              success: !streamError && !mirrorCredentialFailure,
+              statusCode: streamError ? finalStatus : mirrorCredentialFailure?.status ?? finalStatus,
+              cooldownMs: streamError
+                ? credentialCooldownMs(c.env, credential.id)
+                : mirrorCredentialFailure
+                  ? credentialCooldownMs(c.env, credential.id, mirrorCredentialFailure.retryAfterMs)
+                  : 0,
             }),
             postDo(rateStub!, "/release", { leaseId: rateLeaseId!, actualTokens: usage.totalTokens > 0 ? usage.totalTokens : undefined }),
             c.env.USAGE_QUEUE.send({
@@ -299,7 +334,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             leaseId: poolLease.leaseId,
             success: false,
             statusCode: error instanceof GatewayError ? error.status : 500,
-            cooldownMs: cooldownMs(c.env),
+            cooldownMs: credentialCooldownMs(c.env, poolLease.credentialId),
           }).catch(() => undefined);
         }
         if (error instanceof GatewayError && error.status < 500 && error.code !== "AUTH_UNAVAILABLE" && error.code !== "RATE_LIMIT_EXCEEDED") throw error;

@@ -87,12 +87,15 @@ export function classifyUpstreamResponse(
     || /invalid_api_key|invalid or expired token|refresh_token_reused|unauthorized|forbidden/.test(lower)) {
     return { status, code: "AUTH_UNAVAILABLE", type: status === 403 ? "permission_error" : "authentication_error", message, retryable: true, credentialFailure: true, providerFailure: false, retryAfterMs };
   }
+  // Preserve transport/server status semantics before applying broad textual
+  // rate-limit heuristics. A 5xx body such as "overloaded" is a provider
+  // outage and should trip provider failover, not cool a single credential.
+  if (status === 408 || status === 425 || status >= 500) {
+    return { status: 502, code: "UPSTREAM_UNAVAILABLE", type: "upstream_error", message, retryable: true, credentialFailure: status !== 502 || providerKind === "codex", providerFailure: true, retryAfterMs };
+  }
   if (status === 429 || upstreamType === "rate_limit_error"
     || /rate.?limit|usage.?limit|quota|capacity|overloaded|too many requests/.test(lower)) {
     return { status: 429, code: "RATE_LIMIT_EXCEEDED", type: "rate_limit_error", message, retryable: true, credentialFailure: true, providerFailure: false, retryAfterMs };
-  }
-  if (status === 408 || status === 425 || status >= 500) {
-    return { status: 502, code: "UPSTREAM_UNAVAILABLE", type: "upstream_error", message, retryable: true, credentialFailure: status !== 502 || providerKind === "codex", providerFailure: true, retryAfterMs };
   }
   return { status, code: "UPSTREAM_ERROR", type: "upstream_error", message, retryable: false, credentialFailure: false, providerFailure: false, retryAfterMs };
 }
