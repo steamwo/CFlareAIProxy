@@ -19,6 +19,10 @@ const authorization=readFileSync(join(root,"web/src/views/AuthorizationView.vue"
 if(!authorization.includes("callbackUrl")||!authorization.includes("/exchange")) errors.push("Codex 管理台回调授权未接线");
 const router=readFileSync(join(root,"web/src/router.ts"),"utf8");
 if(!router.includes('path: "authorization"')||!router.includes("AuthorizationView.vue")) errors.push("独立授权页面未接入路由");
+const models=readFileSync(join(root,"web/src/views/ModelsView.vue"),"utf8");
+if(!models.includes("groupedDiscovered")||!models.includes("支持端点")) errors.push("实际模型列表未按逻辑模型聚合端点");
+const routes=readFileSync(join(root,"web/src/views/RoutesView.vue"),"utf8");
+if(!routes.includes("managedGroups")||!routes.includes("endpointStates")) errors.push("供应商自动路由未聚合多协议端点");
 const dashboard=readFileSync(join(root,"web/src/views/DashboardView.vue"),"utf8");
 if(!dashboard.includes("heatmapRows")||!dashboard.includes("服务可用性热力图")) errors.push("概览热力图未接线");
 if(errors.length){console.error(errors.map(v=>`✗ ${v}`).join("\n"));process.exit(1)}
