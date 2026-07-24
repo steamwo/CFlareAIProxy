@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { createAdminApp } from "./admin";
 import { AccountPool } from "./account-pool";
 import { BUILTIN_CHANNELS } from "./builtin-channels";
-import { authenticateGatewayKey, insertUsage, listModels } from "./db";
+import { authenticateGatewayKey, getCredential, insertUsage, listModels } from "./db";
 import { GatewayError, errorResponse } from "./errors";
 import { enrichModelsWithCapabilities } from "./model-capabilities";
 import { exchangeOAuthCode } from "./oauth";
@@ -67,6 +67,25 @@ app.post("/v1/completions", (c) => proxyGeneration(c, "completions"));
 app.get("/", (c) => c.redirect("/admin", 302));
 
 const adminApp = createAdminApp();
+
+adminApp.get("/api/auth-files/:id/export", async (c) => {
+  const credential = await getCredential(c.env, c.req.param("id"));
+  if (!ACCOUNT_POOL_PROVIDER_IDS.some((id) => id === credential.provider_id)) {
+    throw new GatewayError(400, "AUTH_FILE_EXPORT_UNSUPPORTED", "仅内置渠道账号支持导出认证文件", "invalid_request_error");
+  }
+  const payload: Record<string, unknown> = {
+    ...credential.metadata,
+    type: credential.provider_id,
+    provider_id: credential.provider_id,
+    access_token: credential.secret,
+  };
+  if (credential.refreshToken) payload.refresh_token = credential.refreshToken;
+  if (credential.expires_at !== null) payload.expires_at = credential.expires_at;
+  const safeName = credential.label.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80)
+    || credential.provider_id;
+  c.header("content-disposition", `attachment; filename="${safeName}.json"`);
+  return c.json(payload);
+});
 
 // Keep the original /credentials response backward-compatible for internal
 // provider-key workflows. The account-pool page is intentionally limited to
