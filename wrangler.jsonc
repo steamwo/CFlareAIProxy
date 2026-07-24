@@ -43,8 +43,8 @@
     "consumers": [
       {
         "queue": "cflare-api-usage",
-        "max_batch_size": 50,
-        "max_batch_timeout": 5,
+        "max_batch_size": 100,
+        "max_batch_timeout": 60,
         "max_retries": 3,
         "dead_letter_queue": "cflare-api-usage-dlq"
       }

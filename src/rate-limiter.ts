@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Env, RateLease } from "./types";
+import type { Env, RateLease, UsageAggregateEvent, UsageEvent } from "./types";
 
 interface AcquirePayload {
   rpm: number;
@@ -8,9 +8,38 @@ interface AcquirePayload {
   estimatedTokens: number;
 }
 
+interface ActivityRow {
+  [key: string]: SqlStorageValue;
+  bucket: number;
+  gateway_key_id: string;
+  provider_id: string;
+  credential_id: string;
+  public_model: string;
+  upstream_model: string;
+  endpoint: string;
+  requests: number;
+  successes: number;
+  failures: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  latency_sum_ms: number;
+  first_token_sum_ms: number;
+  first_token_samples: number;
+  updated_at: number;
+}
+
+const ACTIVITY_BUCKET_SECONDS = 5 * 60;
+const QUEUE_BATCH_SIZE = 100;
+
 export class RateLimiter extends DurableObject<Env> {
+  private alarmAt: number | null = null;
+  private readonly environment: Env;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.environment = env;
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS state (
@@ -26,7 +55,29 @@ export class RateLimiter extends DurableObject<Env> {
           reserved_tokens INTEGER NOT NULL,
           expires_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS activity_buckets (
+          bucket INTEGER NOT NULL,
+          gateway_key_id TEXT NOT NULL,
+          provider_id TEXT NOT NULL,
+          credential_id TEXT NOT NULL,
+          public_model TEXT NOT NULL,
+          upstream_model TEXT NOT NULL,
+          endpoint TEXT NOT NULL,
+          requests INTEGER NOT NULL DEFAULT 0,
+          successes INTEGER NOT NULL DEFAULT 0,
+          failures INTEGER NOT NULL DEFAULT 0,
+          prompt_tokens INTEGER NOT NULL DEFAULT 0,
+          completion_tokens INTEGER NOT NULL DEFAULT 0,
+          cached_tokens INTEGER NOT NULL DEFAULT 0,
+          total_tokens INTEGER NOT NULL DEFAULT 0,
+          latency_sum_ms INTEGER NOT NULL DEFAULT 0,
+          first_token_sum_ms INTEGER NOT NULL DEFAULT 0,
+          first_token_samples INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(bucket,provider_id,credential_id,public_model,upstream_model,endpoint)
+        );
       `);
+      this.alarmAt = await this.ctx.storage.getAlarm();
     });
   }
 
@@ -37,11 +88,79 @@ export class RateLimiter extends DurableObject<Env> {
       return Response.json(this.acquire(payload));
     }
     if (request.method === "POST" && url.pathname === "/release") {
-      const payload = await request.json() as { leaseId: string; actualTokens?: number };
-      this.release(payload.leaseId, payload.actualTokens);
+      const payload = await request.json() as { leaseId: string; actualTokens?: number; activity?: UsageEvent };
+      await this.release(payload.leaseId, payload.actualTokens, payload.activity);
       return Response.json({ ok: true });
     }
     return new Response("Not found", { status: 404 });
+  }
+
+  override async alarm(): Promise<void> {
+    const rows = this.ctx.storage.sql.exec<ActivityRow>(
+      `SELECT bucket,gateway_key_id,provider_id,credential_id,public_model,upstream_model,endpoint,
+              requests,successes,failures,prompt_tokens,completion_tokens,cached_tokens,total_tokens,
+              latency_sum_ms,first_token_sum_ms,first_token_samples,updated_at
+       FROM activity_buckets ORDER BY bucket`,
+    ).toArray();
+    if (!rows.length) {
+      this.alarmAt = null;
+      return;
+    }
+
+    try {
+      for (let index = 0; index < rows.length; index += QUEUE_BATCH_SIZE) {
+        await this.environment.USAGE_QUEUE.sendBatch(rows.slice(index, index + QUEUE_BATCH_SIZE).map((row) => ({
+          body: {
+            kind: "aggregate",
+            bucket: row.bucket,
+            sourceId: row.gateway_key_id,
+            gatewayKeyId: row.gateway_key_id,
+            providerId: row.provider_id,
+            credentialId: row.credential_id,
+            publicModel: row.public_model,
+            upstreamModel: row.upstream_model,
+            endpoint: row.endpoint,
+            requests: row.requests,
+            successes: row.successes,
+            failures: row.failures,
+            promptTokens: row.prompt_tokens,
+            completionTokens: row.completion_tokens,
+            cachedTokens: row.cached_tokens,
+            totalTokens: row.total_tokens,
+            latencySumMs: row.latency_sum_ms,
+            firstTokenSumMs: row.first_token_sum_ms,
+            firstTokenSamples: row.first_token_samples,
+            updatedAt: row.updated_at,
+          } satisfies UsageAggregateEvent,
+        })));
+      }
+
+      for (const row of rows) {
+        this.ctx.storage.sql.exec(
+          `DELETE FROM activity_buckets
+           WHERE bucket=? AND provider_id=? AND credential_id=? AND public_model=?
+             AND upstream_model=? AND endpoint=? AND updated_at<=?`,
+          row.bucket,
+          row.provider_id,
+          row.credential_id,
+          row.public_model,
+          row.upstream_model,
+          row.endpoint,
+          row.updated_at,
+        );
+      }
+      const remaining = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM activity_buckets").one();
+      if ((remaining?.count ?? 0) > 0) {
+        this.alarmAt = Date.now() + 60_000;
+        await this.ctx.storage.setAlarm(this.alarmAt);
+      } else {
+        this.alarmAt = null;
+      }
+    } catch (error) {
+      this.alarmAt = Date.now() + 60_000;
+      await this.ctx.storage.setAlarm(this.alarmAt);
+      throw error;
+    }
   }
 
   private cleanup(now: number): void {
@@ -115,7 +234,7 @@ export class RateLimiter extends DurableObject<Env> {
     return { leaseId, allowed: true };
   }
 
-  private release(leaseId: string, actualTokens?: number): void {
+  private async release(leaseId: string, actualTokens?: number, activity?: UsageEvent): Promise<void> {
     const lease = this.ctx.storage.sql
       .exec<{ reserved_tokens: number }>("SELECT reserved_tokens FROM leases WHERE lease_id = ?", leaseId)
       .toArray()[0];
@@ -127,5 +246,59 @@ export class RateLimiter extends DurableObject<Env> {
       "UPDATE state SET inflight = MAX(0, inflight - 1), month_tokens = MAX(0, month_tokens + ?) WHERE singleton = 1",
       delta,
     );
+    if (activity) await this.recordActivity(activity);
+  }
+
+  private async recordActivity(event: UsageEvent): Promise<void> {
+    const bucket = Math.floor(event.createdAt / ACTIVITY_BUCKET_SECONDS) * ACTIVITY_BUCKET_SECONDS;
+    const success = event.statusCode >= 200 && event.statusCode < 400 && !event.errorCode;
+    const gatewayKeyId = event.gatewayKeyId ?? "";
+    const providerId = event.providerId ?? "";
+    const credentialId = event.credentialId ?? "";
+    const publicModel = event.publicModel ?? "";
+    const upstreamModel = event.upstreamModel ?? "";
+    const endpoint = event.endpoint ?? "";
+    const firstTokenMs = typeof event.firstTokenMs === "number" ? Math.max(0, event.firstTokenMs) : 0;
+    const firstTokenSamples = typeof event.firstTokenMs === "number" ? 1 : 0;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO activity_buckets
+        (bucket,gateway_key_id,provider_id,credential_id,public_model,upstream_model,endpoint,
+         requests,successes,failures,prompt_tokens,completion_tokens,cached_tokens,total_tokens,
+         latency_sum_ms,first_token_sum_ms,first_token_samples,updated_at)
+       VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(bucket,provider_id,credential_id,public_model,upstream_model,endpoint) DO UPDATE SET
+         requests=requests+1,
+         successes=successes+excluded.successes,
+         failures=failures+excluded.failures,
+         prompt_tokens=prompt_tokens+excluded.prompt_tokens,
+         completion_tokens=completion_tokens+excluded.completion_tokens,
+         cached_tokens=cached_tokens+excluded.cached_tokens,
+         total_tokens=total_tokens+excluded.total_tokens,
+         latency_sum_ms=latency_sum_ms+excluded.latency_sum_ms,
+         first_token_sum_ms=first_token_sum_ms+excluded.first_token_sum_ms,
+         first_token_samples=first_token_samples+excluded.first_token_samples,
+         updated_at=excluded.updated_at`,
+      bucket,
+      gatewayKeyId,
+      providerId,
+      credentialId,
+      publicModel,
+      upstreamModel,
+      endpoint,
+      success ? 1 : 0,
+      success ? 0 : 1,
+      Math.max(0, event.usage.promptTokens),
+      Math.max(0, event.usage.completionTokens),
+      Math.max(0, event.usage.cachedTokens),
+      Math.max(0, event.usage.totalTokens),
+      Math.max(0, event.latencyMs),
+      firstTokenMs,
+      firstTokenSamples,
+      Math.floor(Date.now() / 1000),
+    );
+    if (this.alarmAt === null) {
+      this.alarmAt = (bucket + ACTIVITY_BUCKET_SECONDS) * 1000 + 5_000;
+      await this.ctx.storage.setAlarm(this.alarmAt);
+    }
   }
 }

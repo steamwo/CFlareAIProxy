@@ -26,15 +26,21 @@ jobs:
       - name: Check configuration
         id: config
         continue-on-error: true
-        run: node scripts/check-config.mjs
+        run: |
+          set -o pipefail
+          node scripts/check-config.mjs 2>&1 | tee config-check.log
       - name: Check web assets
         id: web
         continue-on-error: true
-        run: node scripts/check-web.mjs
+        run: |
+          set -o pipefail
+          node scripts/check-web.mjs 2>&1 | tee web-check.log
       - name: Typecheck worker and web
         id: types
         continue-on-error: true
-        run: pnpm run typecheck
+        run: |
+          set -o pipefail
+          pnpm run typecheck 2>&1 | tee typecheck.log
       - name: Run tests
         id: tests
         continue-on-error: true
@@ -49,11 +55,27 @@ jobs:
       - name: Build production web bundle
         id: build
         continue-on-error: true
-        run: pnpm run build:web
+        run: |
+          set -o pipefail
+          pnpm run build:web 2>&1 | tee build-web.log
       - name: Wrangler dry run
         id: wrangler
         continue-on-error: true
-        run: pnpm run config:check
+        run: |
+          set -o pipefail
+          pnpm run config:check 2>&1 | tee wrangler.log
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-logs
+          path: |
+            config-check.log
+            web-check.log
+            typecheck.log
+            build-web.log
+            wrangler.log
+          if-no-files-found: ignore
       - name: Enforce validation results
         if: always()
         run: |

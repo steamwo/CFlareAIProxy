@@ -3,6 +3,7 @@ import { providerFetchForCredential } from "./credential-fetch";
 import { authenticateGatewayKey, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";
 import type { CredentialAvailability } from "./db";
 import { GatewayError, errorResponse } from "./errors";
+import { getLoggingSettings, runtimeLog, shouldPersistError } from "./logging-settings";
 import { routeRuntimeOptions, validateModelCapabilities } from "./model-capabilities";
 import { ensureOpenCodeAnonymousModels } from "./models";
 import { refreshCredentialForInference } from "./credential-refresh";
@@ -13,7 +14,7 @@ import { isOpenCodeAnonymousCredential } from "./providers/opencode-anonymous";
 import { captureQuotaHeaders } from "./quota";
 import { orderHealthyRoutes, recordProviderFailure, recordProviderSuccess } from "./routing-health";
 import { trackResponse } from "./stream";
-import type { CredentialRow, Env, GatewayEndpoint, ModelRouteRow, PoolCandidate, PoolLease, RateLease, Usage, UsageEvent } from "./types";
+import type { CredentialRow, Env, GatewayEndpoint, LoggingSettings, ModelRouteRow, PoolCandidate, PoolLease, RateLease, Usage, UsageEvent } from "./types";
 import { classifyTransportError, classifyUpstreamResponse, gatewayErrorFromClassification } from "./upstream-errors";
 import { asInt, parseJson, readJsonBody, truncate } from "./utils";
 
@@ -75,6 +76,11 @@ function usageEvent(
   return { ...base, usage, statusCode, latencyMs, firstTokenMs, createdAt: Math.floor(Date.now() / 1000) };
 }
 
+function queueError(env: Env, settings: LoggingSettings, event: UsageEvent): Promise<void> {
+  if (!shouldPersistError(settings, event)) return Promise.resolve();
+  return env.USAGE_QUEUE.send({ kind: "error", event });
+}
+
 function credentialCooldownMs(env: Env, credentialId: string, retryAfterMs?: number): number {
   if (isOpenCodeAnonymousCredential(credentialId)) return 0;
   return Math.max(asInt(env.CREDENTIAL_COOLDOWN_MS, 60_000), retryAfterMs ?? 0);
@@ -83,6 +89,7 @@ function credentialCooldownMs(env: Env, credentialId: string, retryAfterMs?: num
 export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: GatewayEndpoint): Promise<Response> {
   const requestId = crypto.randomUUID();
   const startedAt = Date.now();
+  const logging = await getLoggingSettings(c.env);
   let rateStub: DurableObjectStub | undefined;
   let rateLeaseId: string | undefined;
   let lastError: unknown;
@@ -119,14 +126,16 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
       const error = new GatewayError(status, rateLease.reason ?? "RATE_LIMIT_EXCEEDED", "Rate, concurrency, or token quota exceeded", "rate_limit_error");
       const response = errorResponse(error, requestId);
       if (rateLease.retryAfterMs) response.headers.set("retry-after", Math.max(1, Math.ceil(rateLease.retryAfterMs / 1000)).toString());
-      c.executionCtx.waitUntil(c.env.USAGE_QUEUE.send(usageEvent({
+      const event = usageEvent({
         requestId,
         gatewayKeyId: gatewayKey.id,
         publicModel,
         endpoint,
         errorCode: error.code,
         errorMessage: error.message,
-      }, { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 }, status, Date.now() - startedAt)).catch(() => undefined));
+      }, { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 }, status, Date.now() - startedAt);
+      c.executionCtx.waitUntil(queueError(c.env, logging, event).catch(() => undefined));
+      runtimeLog(logging, "warn", { event: "gateway_rate_limited", request_id: requestId, status, code: error.code });
       return response;
     }
     rateLeaseId = rateLease.leaseId;
@@ -299,6 +308,10 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
         const leaseId = poolLease.leaseId;
         const tracked = trackResponse(downstream, startedAt, async ({ usage, firstTokenMs, streamError }) => {
           const finalStatus = streamError ? 502 : downstream.status;
+          const event = {
+            ...usageEvent(eventBase, usage, finalStatus, Date.now() - startedAt, firstTokenMs),
+            ...(streamError ? { errorCode: "UPSTREAM_STREAM_ERROR", errorMessage: truncate(streamError, 1000) } : {}),
+          };
           const tasks: Promise<unknown>[] = [
             postDo(poolStub!, "/release", {
               leaseId,
@@ -310,11 +323,12 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
                   ? credentialCooldownMs(c.env, credential.id, mirrorCredentialFailure.retryAfterMs)
                   : 0,
             }),
-            postDo(rateStub!, "/release", { leaseId: rateLeaseId!, actualTokens: usage.totalTokens > 0 ? usage.totalTokens : undefined }),
-            c.env.USAGE_QUEUE.send({
-              ...usageEvent(eventBase, usage, finalStatus, Date.now() - startedAt, firstTokenMs),
-              ...(streamError ? { errorCode: "UPSTREAM_STREAM_ERROR", errorMessage: truncate(streamError, 1000) } : {}),
+            postDo(rateStub!, "/release", {
+              leaseId: rateLeaseId!,
+              actualTokens: usage.totalTokens > 0 ? usage.totalTokens : undefined,
+              ...(logging.requestLoggingEnabled ? { activity: event } : {}),
             }),
+            queueError(c.env, logging, event),
             streamError
               ? Promise.allSettled([
                   setCredentialError(c.env, credential.id, truncate(streamError, 1000)),
@@ -323,6 +337,15 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
               : recordProviderSuccess(c.env, provider.id),
           ];
           rateLeaseId = undefined;
+          runtimeLog(logging, streamError ? "error" : "debug", {
+            event: streamError ? "gateway_stream_error" : "gateway_request_complete",
+            request_id: requestId,
+            provider_id: provider.id,
+            credential_id: credential.id,
+            status: finalStatus,
+            latency_ms: event.latencyMs,
+            total_tokens: usage.totalTokens,
+          });
           c.executionCtx.waitUntil(Promise.allSettled(tasks).then(() => undefined));
         });
         tracked.headers.set("x-request-id", requestId);
@@ -343,11 +366,10 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
 
     throw lastError ?? new GatewayError(502, "UPSTREAM_UNAVAILABLE", "All upstream routes failed", "upstream_error");
   } catch (error) {
-    if (rateStub && rateLeaseId) await postDo(rateStub, "/release", { leaseId: rateLeaseId, actualTokens: 0 }).catch(() => undefined);
     const normalized = error instanceof GatewayError
       ? error
       : new GatewayError(500, "INTERNAL_ERROR", error instanceof Error ? error.message : "Internal gateway error");
-    c.executionCtx.waitUntil(c.env.USAGE_QUEUE.send(usageEvent({
+    const event = usageEvent({
       requestId,
       gatewayKeyId: logGatewayKeyId,
       providerId: logProviderId,
@@ -357,8 +379,23 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
       endpoint,
       errorCode: normalized.code,
       errorMessage: normalized.message,
-    }, { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 }, normalized.status, Date.now() - startedAt)).catch(() => undefined));
-    console.error(JSON.stringify({ event: "gateway_error", request_id: requestId, error: normalized.message }));
+    }, { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 }, normalized.status, Date.now() - startedAt);
+    if (rateStub && rateLeaseId) {
+      await postDo(rateStub, "/release", {
+        leaseId: rateLeaseId,
+        actualTokens: 0,
+        ...(logging.requestLoggingEnabled ? { activity: event } : {}),
+      }).catch(() => undefined);
+      rateLeaseId = undefined;
+    }
+    c.executionCtx.waitUntil(queueError(c.env, logging, event).catch(() => undefined));
+    runtimeLog(logging, normalized.status >= 500 ? "error" : "warn", {
+      event: "gateway_error",
+      request_id: requestId,
+      status: normalized.status,
+      code: normalized.code,
+      error: normalized.message,
+    });
     return errorResponse(normalized, requestId);
   }
 }
