@@ -148,7 +148,7 @@ adminApp.get("/api/credentials/paged", async (c) => {
     const credentialPlaceholders = credentialIds.map(() => "?").join(",");
     const currentBucket = Math.floor(Math.floor(Date.now() / 1000) / ACTIVITY_BUCKET_SECONDS) * ACTIVITY_BUCKET_SECONDS;
     const activitySince = currentBucket - (ACTIVITY_BUCKET_COUNT - 1) * ACTIVITY_BUCKET_SECONDS;
-    const [quotaResult, recentActivityResult, totalActivityResult] = await Promise.all([
+    const [quotaResult, recentActivityResult] = await Promise.all([
       c.env.DB.prepare(
         `SELECT q.*, c.label AS credential_label, p.name AS provider_name
          FROM quota_snapshots q
@@ -176,20 +176,6 @@ adminApp.get("/api/credentials/paged", async (c) => {
         failures: number | null;
         tokens: number;
       }>(),
-      c.env.DB.prepare(
-        `SELECT credential_id,
-           COUNT(*) AS requests,
-           SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) AS successes,
-           SUM(CASE WHEN status_code IS NULL OR status_code < 200 OR status_code >= 400 THEN 1 ELSE 0 END) AS failures
-         FROM request_logs
-         WHERE credential_id IN (${credentialPlaceholders})
-         GROUP BY credential_id`,
-      ).bind(...credentialIds).all<{
-        credential_id: string;
-        requests: number;
-        successes: number | null;
-        failures: number | null;
-      }>(),
     ]);
     quotas = quotaResult.results.map((row) => ({
       ...row,
@@ -204,28 +190,23 @@ adminApp.get("/api/credentials/paged", async (c) => {
       activity[id] = { buckets: [], totals: { requests: 0, successes: 0, failures: 0 } };
     }
     for (const row of recentActivityResult.results) {
+      const requests = Number(row.requests);
+      const successes = Number(row.successes ?? 0);
+      const failures = Number(row.failures ?? 0);
       const entry = activity[row.credential_id] ??= {
         buckets: [],
         totals: { requests: 0, successes: 0, failures: 0 },
       };
       entry.buckets.push({
         bucket: Number(row.bucket),
-        requests: Number(row.requests),
-        successes: Number(row.successes ?? 0),
-        failures: Number(row.failures ?? 0),
+        requests,
+        successes,
+        failures,
         tokens: Number(row.tokens ?? 0),
       });
-    }
-    for (const row of totalActivityResult.results) {
-      const entry = activity[row.credential_id] ??= {
-        buckets: [],
-        totals: { requests: 0, successes: 0, failures: 0 },
-      };
-      entry.totals = {
-        requests: Number(row.requests),
-        successes: Number(row.successes ?? 0),
-        failures: Number(row.failures ?? 0),
-      };
+      entry.totals.requests += requests;
+      entry.totals.successes += successes;
+      entry.totals.failures += failures;
     }
   }
 
