@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { root } from "./lib.mjs";
-const required=["web/index.html","web/src/main.ts","web/src/App.vue","web/src/router.ts","web/src/views/ChannelsView.vue","web/src/views/ProvidersView.vue","vite.config.ts"];
+const required=["web/index.html","web/src/main.ts","web/src/App.vue","web/src/router.ts","web/src/views/ChannelsView.vue","web/src/views/ProvidersView.vue","web/src/views/AuthorizationView.vue","web/src/views/AccountsView.vue","vite.config.ts"];
 const errors=[];
 for(const file of required) if(!existsSync(join(root,file))) errors.push(`缺少 ${file}`);
 const pkg=JSON.parse(readFileSync(join(root,"package.json"),"utf8"));
@@ -15,8 +15,19 @@ if(admin.includes("ADMIN_SCRIPT")||admin.includes("ADMIN_CSS")||admin.includes("
 if(!admin.includes('basePath("/admin")')) errors.push("管理 API 未挂载到 /admin");
 const providers=readFileSync(join(root,"web/src/views/ProvidersView.vue"),"utf8");
 if(!providers.includes("form.apiKey")||!providers.includes("首个 API Key")) errors.push("OpenAI-compatible 供应商表单缺少 API Key");
+const authorization=readFileSync(join(root,"web/src/views/AuthorizationView.vue"),"utf8");
+if(!authorization.includes("callbackUrl")||!authorization.includes("/exchange")) errors.push("Codex 管理台回调授权未接线");
+const router=readFileSync(join(root,"web/src/router.ts"),"utf8");
+if(!router.includes('path: "authorization"')||!router.includes("AuthorizationView.vue")) errors.push("独立授权页面未接入路由");
 const accounts=readFileSync(join(root,"web/src/views/AccountsView.vue"),"utf8");
-if(!accounts.includes("callbackUrl")||!accounts.includes("/exchange")) errors.push("Codex 管理台回调授权未接线");
+if(accounts.includes("添加账号 / API Key")||accounts.includes('api<{ data: Provider[] }>("/providers")')) errors.push("账号池仍暴露自定义供应商 API Key 管理入口");
+if(!accounts.includes("只展示通过内置渠道 OAuth")||!accounts.includes("前往授权")) errors.push("账号池未明确限定内置渠道授权账号");
+const worker=readFileSync(join(root,"src/index.ts"),"utf8");
+if(!worker.includes("ACCOUNT_POOL_PROVIDER_IDS")||!worker.includes("provider_id IN")) errors.push("账号池分页接口未限制为内置渠道");
+const models=readFileSync(join(root,"web/src/views/ModelsView.vue"),"utf8");
+if(!models.includes("groupedDiscovered")||!models.includes("支持端点")) errors.push("实际模型列表未按逻辑模型聚合端点");
+const routes=readFileSync(join(root,"web/src/views/RoutesView.vue"),"utf8");
+if(!routes.includes("managedGroups")||!routes.includes("endpointStates")) errors.push("供应商自动路由未聚合多协议端点");
 const dashboard=readFileSync(join(root,"web/src/views/DashboardView.vue"),"utf8");
 if(!dashboard.includes("heatmapRows")||!dashboard.includes("服务可用性热力图")) errors.push("概览热力图未接线");
 if(errors.length){console.error(errors.map(v=>`✗ ${v}`).join("\n"));process.exit(1)}

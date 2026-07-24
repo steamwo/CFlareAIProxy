@@ -13,6 +13,7 @@ const router = createRouter({
         { path: "", name: "dashboard", component: () => import("./views/DashboardView.vue") },
         { path: "channels", name: "channels", component: () => import("./views/ChannelsView.vue") },
         { path: "providers", name: "providers", component: () => import("./views/ProvidersView.vue") },
+        { path: "authorization", name: "authorization", component: () => import("./views/AuthorizationView.vue") },
         { path: "accounts", name: "accounts", component: () => import("./views/AccountsView.vue") },
         { path: "models", name: "models", component: () => import("./views/ModelsView.vue") },
         { path: "routes", name: "routes", component: () => import("./views/RoutesView.vue") },
