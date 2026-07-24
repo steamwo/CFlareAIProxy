@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { credentialProxyUrl, providerFetchForCredential } from "../src/credential-fetch";
 import { normalizeCapabilities, validateModelCapabilities } from "../src/model-capabilities";
 import { prepareProviderResponse } from "../src/provider-response";
+import { chatToResponses } from "../src/providers/codex";
 import { buildKimiRequest, normalizeKimiMessages } from "../src/providers/kimi";
 import type { Credential, Env, ProviderConfig, ProxyRequestContext } from "../src/types";
 import { classifyUpstreamResponse } from "../src/upstream-errors";
@@ -26,7 +27,13 @@ describe("P0/P1 provider runtime", () => {
 
     const context = {
       requestId: "request-1", endpoint: "responses", publicModel: "kimi-fast", upstreamModel: "kimi-k2.5[1m]",
-      body: { model: "kimi-fast", input: "hello", stream: true },
+      body: {
+        model: "kimi-fast",
+        input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+        tool_choice: { type: "function", name: "lookup" },
+        stream: true,
+      },
       originalRequest: new Request("https://gateway.example/v1/responses", { method: "POST" }),
       provider: { id: "kimi", name: "Kimi", kind: "kimi", base_url: "https://api.kimi.com/coding/v1", endpoints: { chat: "/chat/completions" }, auth: {}, headers: {}, options: {} },
       credential: { id: "credential-1", secret: "token", metadata: { device_id: "device-1" } },
@@ -35,8 +42,17 @@ describe("P0/P1 provider runtime", () => {
     const body = JSON.parse(String(request.init.body)) as Record<string, unknown>;
     expect(request.url).toBe("https://api.kimi.com/coding/v1/chat/completions");
     expect(body.model).toBe("kimi-k2.5");
-    expect(body.messages).toEqual([{ role: "user", content: "hello" }]);
+    expect(body.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
+    expect(body.tool_choice).toEqual({ type: "function", function: { name: "lookup" } });
     expect(body.stream_options).toEqual({ include_usage: true });
+
+    const codex = chatToResponses({
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ type: "function", function: { name: "lookup", description: "Lookup", parameters: { type: "object" } } }],
+      tool_choice: { type: "function", function: { name: "lookup" } },
+    }, "gpt-codex");
+    expect(codex.tools).toEqual([{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }]);
+    expect(codex.tool_choice).toEqual({ type: "function", name: "lookup" });
   });
 
   it("reconstructs Codex output and rejects incomplete or failed terminal streams", async () => {
@@ -65,6 +81,12 @@ describe("P0/P1 provider runtime", () => {
       mode: "codex-chat", requestedStream: false, model: "codex-public", requestId: "request-4",
       providerKind: "codex", endpoint: "chat",
     })).rejects.toMatchObject({ code: "RATE_LIMIT_EXCEEDED" });
+
+    await expect(prepareProviderResponse({
+      upstream: sse({ type: "response.failed", response: { error: { type: "server_error", message: "upstream failed" } } }),
+      mode: "codex-chat", requestedStream: false, model: "codex-public", requestId: "request-5",
+      providerKind: "codex", endpoint: "chat",
+    })).rejects.toMatchObject({ code: "UPSTREAM_UNAVAILABLE", status: 502 });
   });
 
   it("classifies upstream failures with retry and cooldown semantics", () => {

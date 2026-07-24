@@ -67,11 +67,22 @@ function responsesStream(context: KimiResponseContext): Response {
       for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
         output.push({ type: "function_call", id: call.id, call_id: call.id, name: call.name, arguments: call.arguments || "{}", status: "completed" });
       }
+      const frames: Record<string, unknown>[] = [];
+      if (textItemStarted) {
+        frames.push({ type: "response.output_text.done", item_id: `msg_${context.requestId}`, output_index: 0, content_index: 0, text });
+        frames.push({ type: "response.output_item.done", output_index: 0, item: output[0] });
+      }
+      for (const [index, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
+        const outputIndex = index + (textItemStarted ? 1 : 0);
+        frames.push({ type: "response.function_call_arguments.done", item_id: call.id, output_index: outputIndex, arguments: call.arguments || "{}" });
+        frames.push({ type: "response.output_item.done", output_index: outputIndex, item: output[outputIndex] });
+      }
       const response = {
         id: responseId, object: "response", created_at: Math.floor(Date.now() / 1000), status: "completed", model: context.model, output,
         usage: { input_tokens: usage.promptTokens, output_tokens: usage.completionTokens, total_tokens: usage.totalTokens, input_tokens_details: { cached_tokens: usage.cachedTokens } },
       };
-      controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify({ type: "response.completed", response })}\n\ndata: [DONE]\n\n`));
+      frames.push({ type: "response.completed", response });
+      controller.enqueue(responseEncoder.encode(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("")}data: [DONE]\n\n`));
       return;
     }
     let chunk: Record<string, unknown>;

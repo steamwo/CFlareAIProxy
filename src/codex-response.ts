@@ -28,7 +28,17 @@ function eventError(event: Record<string, unknown>): GatewayError | undefined {
     ? responseRecord(responseRecord(event.response).error ?? event.error)
     : responseRecord(event.error ?? event);
   const body = JSON.stringify({ error: Object.keys(payload).length ? payload : { message: "Upstream stream failed without details" } });
-  return gatewayErrorFromClassification(classifyUpstreamResponse(400, body, new Headers(), "codex"));
+  const embedded = typeof payload.status_code === "number" ? payload.status_code : typeof payload.status === "number" ? payload.status : undefined;
+  const errorType = typeof payload.type === "string" ? payload.type.toLowerCase() : "";
+  const errorCode = typeof payload.code === "string" ? payload.code.toLowerCase() : "";
+  const status = embedded && embedded >= 400 && embedded <= 599
+    ? embedded
+    : errorType === "rate_limit_error" || /rate_limit|quota|capacity/.test(errorCode)
+      ? 429
+      : errorType === "authentication_error" ? 401
+        : errorType === "permission_error" ? 403
+          : errorType === "invalid_request_error" || errorType === "bad_request_error" ? 400 : 502;
+  return gatewayErrorFromClassification(classifyUpstreamResponse(status, body, new Headers(), "codex"));
 }
 
 function rememberItem(event: Record<string, unknown>, state: CodexState): void {

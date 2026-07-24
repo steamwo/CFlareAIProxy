@@ -65,6 +65,32 @@ export function normalizeKimiMessages(messages: unknown): Array<Record<string, u
   return output;
 }
 
+function responsesContentToChat(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((raw) => {
+    const part = record(raw);
+    const type = typeof part.type === "string" ? part.type : "";
+    if ((type === "input_text" || type === "output_text") && typeof part.text === "string") {
+      return { type: "text", text: part.text };
+    }
+    if (type === "input_image") {
+      const image = part.image_url ?? part.image;
+      if (typeof image === "string") return { type: "image_url", image_url: { url: image } };
+      if (image && typeof image === "object" && !Array.isArray(image)) return { type: "image_url", image_url: image };
+    }
+    return part;
+  });
+}
+
+function responsesToolChoiceToChat(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const choice = record(value);
+  if (choice.type === "function" && typeof choice.name === "string") {
+    return { type: "function", function: { name: choice.name } };
+  }
+  return value;
+}
+
 function responsesInputToMessages(body: Record<string, unknown>): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [];
   if (typeof body.instructions === "string" && body.instructions.trim()) messages.push({ role: "system", content: body.instructions });
@@ -80,7 +106,7 @@ function responsesInputToMessages(body: Record<string, unknown>): Array<Record<s
       } else if (type === "function_call" || type === "custom_tool_call") {
         messages.push({ role: "assistant", content: null, tool_calls: [{ id: item.call_id ?? item.id, type: "function", function: { name: item.name ?? "unknown", arguments: item.arguments ?? "{}" } }] });
       } else {
-        messages.push({ role: typeof item.role === "string" ? item.role : "user", content: item.content ?? item.text ?? "" });
+        messages.push({ role: typeof item.role === "string" ? item.role : "user", content: responsesContentToChat(item.content ?? item.text ?? "") });
       }
     }
   }
@@ -109,7 +135,7 @@ function requestBody(context: ProxyRequestContext): Record<string, unknown> {
     };
     const tools = responsesToolsToChat(source.tools);
     if (tools) body.tools = tools;
-    if (source.tool_choice !== undefined) body.tool_choice = source.tool_choice;
+    if (source.tool_choice !== undefined) body.tool_choice = responsesToolChoiceToChat(source.tool_choice);
     if (source.temperature !== undefined) body.temperature = source.temperature;
     if (source.top_p !== undefined) body.top_p = source.top_p;
     if (source.max_output_tokens !== undefined) body.max_tokens = source.max_output_tokens;

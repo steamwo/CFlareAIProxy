@@ -8,6 +8,35 @@ function contentToText(content: unknown): string {
   return content.map((part) => part && typeof part === "object" && typeof (part as Record<string, unknown>).text === "string" ? String((part as Record<string, unknown>).text) : "").filter(Boolean).join("\n");
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function chatToolsToResponses(value: unknown): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((raw) => {
+    const tool = record(raw);
+    const fn = record(tool.function);
+    if (tool.type !== "function" || !Object.keys(fn).length) return tool;
+    const output: Record<string, unknown> = {
+      type: "function",
+      name: typeof fn.name === "string" ? fn.name : "unknown",
+      parameters: record(fn.parameters),
+    };
+    if (typeof fn.description === "string") output.description = fn.description;
+    if (typeof fn.strict === "boolean") output.strict = fn.strict;
+    return output;
+  });
+}
+
+function chatToolChoiceToResponses(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const choice = record(value);
+  const fn = record(choice.function);
+  if (choice.type === "function" && typeof fn.name === "string") return { type: "function", name: fn.name };
+  return value;
+}
+
 export function chatToResponses(body: Record<string, unknown>, model: string): Record<string, unknown> {
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const input: Array<Record<string, unknown>> = [];
@@ -40,8 +69,9 @@ export function chatToResponses(body: Record<string, unknown>, model: string): R
     }
   }
   const output: Record<string, unknown> = { model, input, stream: body.stream === true, store: false, instructions };
-  if (Array.isArray(body.tools)) output.tools = body.tools;
-  if (body.tool_choice !== undefined) output.tool_choice = body.tool_choice;
+  const tools = chatToolsToResponses(body.tools);
+  if (tools) output.tools = tools;
+  if (body.tool_choice !== undefined) output.tool_choice = chatToolChoiceToResponses(body.tool_choice);
   if (body.temperature !== undefined) output.temperature = body.temperature;
   if (body.top_p !== undefined) output.top_p = body.top_p;
   if (body.max_completion_tokens !== undefined) output.max_output_tokens = body.max_completion_tokens;
