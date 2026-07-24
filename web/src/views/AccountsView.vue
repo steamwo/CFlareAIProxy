@@ -16,16 +16,32 @@ interface ParsedQuota {
   windows: QuotaWindow[];
   credits?: { balance?: string | number; unlimited?: boolean; hasCredits?: boolean };
 }
+interface ActivityBucket {
+  day: number;
+  requests: number;
+  successes: number;
+  failures: number;
+  tokens: number;
+}
+interface HeatmapCell extends ActivityBucket {
+  level: number;
+  title: string;
+}
 interface CredentialPage {
   data: Credential[];
   quotas: QuotaSnapshot[];
+  activity: Record<string, ActivityBucket[]>;
   total: number;
   page: number;
   pageSize: number;
   pageCount: number;
 }
 
-const allowedPageSizes = [9, 18, 36];
+type AccountTagType = "success" | "error" | "warning" | "info" | "default";
+
+const DAY_SECONDS = 24 * 60 * 60;
+const HEATMAP_DAYS = 28;
+const allowedPageSizes = [6, 12, 24];
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
@@ -36,13 +52,14 @@ const queryInteger = (value: unknown, fallback: number): number => {
 };
 const sourceQuery = (): string => typeof route.query.source === "string" ? route.query.source : "";
 const page = ref(queryInteger(route.query.page, 1));
-const initialPageSize = queryInteger(route.query.pageSize, 9);
-const pageSize = ref(allowedPageSizes.includes(initialPageSize) ? initialPageSize : 9);
+const initialPageSize = queryInteger(route.query.pageSize, 6);
+const pageSize = ref(allowedPageSizes.includes(initialPageSize) ? initialPageSize : 6);
 const activeSource = ref(sourceQuery());
 
 const credentials = ref<Credential[]>([]);
 const channels = ref<Channel[]>([]);
 const quotas = ref<QuotaSnapshot[]>([]);
+const activity = ref<Record<string, ActivityBucket[]>>({});
 const total = ref(0);
 const loading = ref(false);
 const modal = ref(false);
@@ -57,22 +74,38 @@ function parseQuota(row?: QuotaSnapshot): ParsedQuota {
   try {
     const parsed = JSON.parse(row?.quota_json || "{}") as Partial<ParsedQuota>;
     return { plan: parsed.plan, windows: Array.isArray(parsed.windows) ? parsed.windows : [], credits: parsed.credits };
-  } catch { return { windows: [] }; }
+  } catch {
+    return { windows: [] };
+  }
 }
-function quotaFor(credentialId: string): ParsedQuota { return parseQuota(quotaMap.value.get(credentialId)); }
-function sourceName(providerId: string): string { return sourceNames.value.get(providerId) ?? providerId; }
+function quotaFor(credentialId: string): ParsedQuota {
+  return parseQuota(quotaMap.value.get(credentialId));
+}
+function sourceName(providerId: string): string {
+  return sourceNames.value.get(providerId) ?? providerId;
+}
 function accountIdentity(row: Credential): string {
   const metadata = row.metadata ?? {};
   const value = metadata.email ?? metadata.name ?? metadata.username ?? metadata.user_id ?? metadata.userId;
-  return typeof value === "string" && value.trim() ? value : "";
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+function accountTitle(row: Credential): string {
+  return accountIdentity(row) || row.label || sourceName(row.provider_id);
+}
+function secondaryLabel(row: Credential): string {
+  const title = accountTitle(row).toLowerCase();
+  return row.label.trim() && row.label.trim().toLowerCase() !== title ? row.label.trim() : "";
 }
 function authLabel(value: string): string {
   if (value.includes("oauth")) return "OAuth";
   if (value.includes("anonymous")) return "匿名";
   return "API Key";
 }
+function planLabel(value?: string): string {
+  if (!value) return "未识别";
+  return value.length <= 12 ? value.replace(/^./, (letter) => letter.toUpperCase()) : value;
+}
 function quotaPercentage(window: QuotaWindow): number {
-  // Defensive handling for old snapshots created before the backend 0/0 fix.
   if (window.limit === 0 && window.remaining === 0) return 0;
   if (typeof window.remainingPercent === "number") return Math.max(0, Math.min(100, window.remainingPercent));
   if (typeof window.usedPercent === "number") return Math.max(0, Math.min(100, 100 - window.usedPercent));
@@ -98,44 +131,95 @@ function exhaustedWindow(window: QuotaWindow): boolean {
     || (typeof window.remainingPercent === "number" && window.remainingPercent <= 0)
     || (typeof window.usedPercent === "number" && window.usedPercent >= 100);
 }
-function quotaExhausted(providerId: string, quota: ParsedQuota): boolean {
-  if (quota.credits?.unlimited) return false;
-  const balance = numericAmount(quota.credits?.balance);
-  if (quota.credits?.hasCredits === false || (balance !== undefined && balance <= 0)) return true;
-
-  const measurable = quota.windows.filter((window) =>
+function measurableWindows(quota: ParsedQuota): QuotaWindow[] {
+  return quota.windows.filter((window) =>
     window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined,
   );
-  if (!measurable.length) return false;
-  if (providerId === "qoder") {
+}
+function quotaExhausted(providerId: string, quota: ParsedQuota): boolean {
+  if (quota.credits?.unlimited) return false;
+  const measurable = measurableWindows(quota);
+
+  // Codex subscription windows are authoritative. A zero top-up credit balance or
+  // one exhausted auxiliary window must not mark an otherwise usable account dead.
+  if (providerId === "codex" && measurable.length) {
+    const core = measurable.filter((window) => window.key === "primary" || window.key === "secondary");
+    const target = core.length ? core : measurable.filter((window) => !window.key.startsWith("additional_"));
+    return target.length > 0 && target.every(exhaustedWindow);
+  }
+
+  if (providerId === "qoder" && measurable.length) {
     const pools = measurable.filter((window) => window.key === "user" || window.key === "organization");
     return pools.length > 0 && pools.every(exhaustedWindow);
   }
-  return measurable.some(exhaustedWindow);
+
+  if (measurable.length) return measurable.every(exhaustedWindow);
+  const balance = numericAmount(quota.credits?.balance);
+  return quota.credits?.hasCredits === false || (balance !== undefined && balance <= 0);
+}
+function accountState(row: Credential): { text: string; type: AccountTagType } {
+  if (row.enabled !== 1) return { text: "已停用", type: "default" };
+  if (row.last_error) return { text: "账号异常", type: "error" };
+  const snapshot = quotaMap.value.get(row.id);
+  const quota = quotaFor(row.id);
+  if (snapshot?.status === "error") return { text: "额度刷新失败", type: "warning" };
+  if (snapshot?.status === "ok" && quotaExhausted(row.provider_id, quota)) return { text: "额度耗尽", type: "error" };
+  if (snapshot?.status === "unsupported") return { text: "额度未知", type: "warning" };
+  return { text: "可用", type: "success" };
 }
 function formatAmount(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
   if (typeof value === "string" && value.trim()) return value;
   return "—";
 }
+function formatCompact(value: number): string {
+  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
 function formatTime(value?: number | null): string {
   if (!value) return "—";
   const milliseconds = value > 10_000_000_000 ? value : value * 1000;
   return new Date(milliseconds).toLocaleString("zh-CN", { hour12: false });
 }
-function quotaStatusText(status: string | undefined, providerId: string, quota: ParsedQuota): string {
-  if (status === "ok" && quotaExhausted(providerId, quota)) return "额度耗尽";
-  return ({ ok: "额度正常", error: "刷新失败", unsupported: "暂不支持", unknown: "等待刷新" } as Record<string, string>)[status ?? ""] ?? "未刷新";
+function formatShortTime(value?: number | null): string {
+  if (!value) return "从未";
+  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+  return new Date(milliseconds).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
-function quotaStatusType(
-  status: string | undefined,
-  providerId: string,
-  quota: ParsedQuota,
-): "success" | "error" | "warning" | "default" {
-  if (status === "ok") return quotaExhausted(providerId, quota) ? "error" : "success";
-  if (status === "error") return "error";
-  if (status === "unsupported") return "warning";
-  return "default";
+function activityCells(credentialId: string): HeatmapCell[] {
+  const rows = activity.value[credentialId] ?? [];
+  const byDay = new Map(rows.map((row) => [row.day, row] as const));
+  const today = Math.floor(Math.floor(Date.now() / 1000) / DAY_SECONDS) * DAY_SECONDS;
+  const maxRequests = Math.max(0, ...rows.map((row) => row.requests));
+  return Array.from({ length: HEATMAP_DAYS }, (_, index) => {
+    const day = today - (HEATMAP_DAYS - 1 - index) * DAY_SECONDS;
+    const row = byDay.get(day) ?? { day, requests: 0, successes: 0, failures: 0, tokens: 0 };
+    const level = row.requests === 0 || maxRequests === 0
+      ? 0
+      : Math.max(1, Math.min(4, Math.ceil(Math.log1p(row.requests) / Math.log1p(maxRequests) * 4)));
+    const date = new Date(day * 1000).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+    return {
+      ...row,
+      level,
+      title: `${date} · ${row.requests} 次请求 · 成功 ${row.successes} · 失败 ${row.failures} · ${formatCompact(row.tokens)} Token`,
+    };
+  });
+}
+function activitySummary(credentialId: string): { requests: number; successes: number; failures: number; successRate: number } {
+  const summary = (activity.value[credentialId] ?? []).reduce((result, row) => ({
+    requests: result.requests + row.requests,
+    successes: result.successes + row.successes,
+    failures: result.failures + row.failures,
+  }), { requests: 0, successes: 0, failures: 0 });
+  return {
+    ...summary,
+    successRate: summary.requests > 0 ? summary.successes / summary.requests * 100 : 0,
+  };
 }
 function paginationQuery(nextPage = page.value, nextPageSize = pageSize.value) {
   return { ...route.query, page: String(nextPage), pageSize: String(nextPageSize) };
@@ -165,17 +249,26 @@ async function load() {
     channels.value = channelResult.data;
     credentials.value = accountResult.data;
     quotas.value = accountResult.quotas;
+    activity.value = accountResult.activity ?? {};
     total.value = accountResult.total;
     page.value = accountResult.page;
     pageSize.value = accountResult.pageSize;
     await normalizePaginationQuery();
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
-  } finally { loading.value = false; }
+  } finally {
+    loading.value = false;
+  }
 }
 function openEdit(row: Credential) {
   editing.value = row;
-  Object.assign(form, { label: row.label, enabled: row.enabled === 1, priority: row.priority, weight: row.weight, maxConcurrency: row.max_concurrency });
+  Object.assign(form, {
+    label: row.label,
+    enabled: row.enabled === 1,
+    priority: row.priority,
+    weight: row.weight,
+    maxConcurrency: row.max_concurrency,
+  });
   modal.value = true;
 }
 async function save() {
@@ -185,20 +278,26 @@ async function save() {
     message.success("账号已更新");
     modal.value = false;
     await load();
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error));
+  }
 }
 async function remove(id: string) {
   try {
     await api(`/credentials/${id}`, { method: "DELETE" });
     message.success("账号已删除");
     await load();
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error));
+  }
 }
 async function toggleEnabled(row: Credential, enabled: boolean) {
   try {
     await api(`/credentials/${row.id}`, { method: "PATCH", body: jsonBody({ enabled }) });
     row.enabled = enabled ? 1 : 0;
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error));
+  }
 }
 async function refreshOne(id: string) {
   try {
@@ -208,7 +307,9 @@ async function refreshOne(id: string) {
     ]);
     message.success("模型与额度已刷新");
     await load();
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error));
+  }
 }
 async function downloadAuth(row: Credential) {
   try {
@@ -224,15 +325,17 @@ async function downloadAuth(row: Credential) {
     anchor.remove();
     URL.revokeObjectURL(url);
     message.success("认证文件已下载，请妥善保管");
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error));
+  }
 }
 
 watch(
   () => [route.query.page, route.query.pageSize, route.query.source] as const,
   () => {
     const nextPage = queryInteger(route.query.page, 1);
-    const requestedPageSize = queryInteger(route.query.pageSize, 9);
-    const nextPageSize = allowedPageSizes.includes(requestedPageSize) ? requestedPageSize : 9;
+    const requestedPageSize = queryInteger(route.query.pageSize, 6);
+    const nextPageSize = allowedPageSizes.includes(requestedPageSize) ? requestedPageSize : 6;
     const nextSource = sourceQuery();
     const changed = nextPage !== page.value || nextPageSize !== pageSize.value || nextSource !== activeSource.value;
     page.value = nextPage;
@@ -245,7 +348,7 @@ onMounted(load);
 </script>
 
 <template>
-  <page-header title="账号池" description="只展示通过内置渠道 OAuth 或授权文件加入的账号；OpenAI-compatible 供应商 API Key 请在供应商配置中管理。">
+  <page-header title="账号池" description="集中查看账号健康、额度窗口和近 28 天调用活跃度。">
     <n-button type="primary" @click="router.push({ name: 'authorization' })"><template #icon><key-round /></template>发起授权</n-button>
     <n-button @click="router.push({ name: 'authorization', query: { import: '1' } })"><template #icon><file-json /></template>导入认证文件</n-button>
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新</n-button>
@@ -253,53 +356,97 @@ onMounted(load);
 
   <n-spin :show="loading">
     <div v-if="credentials.length" class="account-grid">
-      <n-card v-for="row in credentials" :key="row.id" class="account-card" size="small">
-        <template #header>
-          <div class="account-card__heading">
-            <div class="account-card__title-row">
-              <provider-icon :provider-id="row.provider_id" :name="sourceName(row.provider_id)" :size="26" />
-              <strong>{{ row.label }}</strong>
-              <n-tag size="small" :type="row.auth_type.includes('oauth') ? 'info' : 'default'">{{ authLabel(row.auth_type) }}</n-tag>
-            </div>
-            <div class="account-card__source">{{ sourceName(row.provider_id) }} · <span class="mono">{{ row.provider_id }}</span></div>
-          </div>
-        </template>
-        <template #header-extra><n-switch :value="row.enabled === 1" @update:value="value => toggleEnabled(row, value)" /></template>
-
-        <div v-if="accountIdentity(row)" class="account-identity">{{ accountIdentity(row) }}</div>
-        <div class="schedule-row"><n-tag size="small">优先级 {{ row.priority }}</n-tag><n-tag size="small">权重 {{ row.weight }}</n-tag><n-tag size="small">并发 {{ row.max_concurrency }}</n-tag></div>
-
-        <div class="quota-section">
-          <div class="quota-section__head">
-            <div><strong>{{ quotaFor(row.id).plan || "当前额度" }}</strong><div class="muted quota-caption">刷新于 {{ formatTime(quotaMap.get(row.id)?.fetched_at) }}</div></div>
-            <n-tag
-              size="small"
-              :type="quotaStatusType(quotaMap.get(row.id)?.status, row.provider_id, quotaFor(row.id))"
-            >{{ quotaStatusText(quotaMap.get(row.id)?.status, row.provider_id, quotaFor(row.id)) }}</n-tag>
-          </div>
-          <div v-if="quotaFor(row.id).windows.length" class="quota-windows">
-            <div v-for="window in quotaFor(row.id).windows" :key="window.key" class="quota-window">
-              <div class="quota-window__line"><span>{{ window.label }}</span><strong>{{ Math.round(quotaPercentage(window)) }}%</strong></div>
-              <n-progress type="line" :percentage="quotaPercentage(window)" :show-indicator="false" :height="8" :status="progressStatus(window)" />
-              <div class="quota-window__details muted"><span v-if="window.limit !== undefined || window.remaining !== undefined">剩余 {{ formatAmount(window.remaining) }} / {{ formatAmount(window.limit) }}</span><span v-if="window.resetAt">重置 {{ formatTime(window.resetAt) }}</span></div>
+      <n-card v-for="row in credentials" :key="row.id" class="account-card" size="small" :bordered="false">
+        <div class="account-card__top">
+          <div class="account-profile">
+            <div class="provider-avatar"><provider-icon :provider-id="row.provider_id" :name="sourceName(row.provider_id)" :size="30" /></div>
+            <div class="account-profile__copy">
+              <div class="account-primary-row">
+                <strong class="account-primary">{{ accountTitle(row) }}</strong>
+                <n-tag size="small" :type="row.auth_type.includes('oauth') ? 'info' : 'default'">{{ authLabel(row.auth_type) }}</n-tag>
+              </div>
+              <div class="account-secondary">
+                <span>{{ sourceName(row.provider_id) }}</span>
+                <span v-if="secondaryLabel(row)">· {{ secondaryLabel(row) }}</span>
+                <span class="mono">· {{ row.provider_id }}</span>
+              </div>
             </div>
           </div>
-          <div v-else-if="quotaFor(row.id).credits" class="credit-balance"><span>可用余额</span><strong>{{ quotaFor(row.id).credits?.unlimited ? "不限" : formatAmount(quotaFor(row.id).credits?.balance) }}</strong></div>
-          <n-empty v-else size="small" :description="quotaMap.get(row.id)?.error_message || '尚无可显示的额度数据'" />
+          <div class="account-state">
+            <n-tag size="small" round :type="accountState(row).type">{{ accountState(row).text }}</n-tag>
+            <n-switch :value="row.enabled === 1" @update:value="value => toggleEnabled(row, value)" />
+          </div>
         </div>
+
+        <div class="account-stat-strip">
+          <div class="account-stat"><span>套餐</span><strong>{{ planLabel(quotaFor(row.id).plan) }}</strong></div>
+          <div class="account-stat"><span>优先级</span><strong>{{ row.priority }}</strong></div>
+          <div class="account-stat"><span>权重 / 并发</span><strong>{{ row.weight }} / {{ row.max_concurrency }}</strong></div>
+          <div class="account-stat"><span>最后调用</span><strong>{{ formatShortTime(row.last_used_at) }}</strong></div>
+        </div>
+
+        <section class="account-section quota-panel">
+          <div class="section-heading">
+            <strong>额度窗口</strong>
+            <span class="muted">刷新于 {{ formatTime(quotaMap.get(row.id)?.fetched_at) }}</span>
+          </div>
+          <div v-if="quotaFor(row.id).windows.length" class="quota-grid">
+            <div v-for="window in quotaFor(row.id).windows" :key="window.key" class="quota-item">
+              <div class="quota-item__line">
+                <span>{{ window.label }}</span>
+                <strong>可用 {{ Math.round(quotaPercentage(window)) }}%</strong>
+              </div>
+              <n-progress type="line" :percentage="quotaPercentage(window)" :show-indicator="false" :height="7" :status="progressStatus(window)" />
+              <div class="quota-item__meta muted">
+                <span v-if="window.limit !== undefined || window.remaining !== undefined">{{ formatAmount(window.remaining) }} / {{ formatAmount(window.limit) }}</span>
+                <span v-if="window.resetAt">{{ formatTime(window.resetAt) }} 重置</span>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="quotaFor(row.id).credits" class="credit-balance">
+            <span>可用余额</span>
+            <strong>{{ quotaFor(row.id).credits?.unlimited ? "不限" : formatAmount(quotaFor(row.id).credits?.balance) }}</strong>
+          </div>
+          <n-empty v-else size="small" :description="quotaMap.get(row.id)?.error_message || '尚无可显示的额度数据'" />
+        </section>
+
+        <section class="account-section activity-panel">
+          <div class="section-heading">
+            <strong>近 28 天活跃度</strong>
+            <span class="muted">
+              {{ formatCompact(activitySummary(row.id).requests) }} 次
+              <template v-if="activitySummary(row.id).requests">· 成功率 {{ Math.round(activitySummary(row.id).successRate) }}%</template>
+            </span>
+          </div>
+          <div class="activity-row" aria-label="近 28 天账号请求热力图">
+            <span
+              v-for="cell in activityCells(row.id)"
+              :key="cell.day"
+              class="activity-cell"
+              :class="[`activity-cell--${cell.level}`, { 'activity-cell--failure': cell.failures > 0 }]"
+              :title="cell.title"
+            />
+          </div>
+          <div class="activity-legend muted"><span>28 天前</span><span>请求越多颜色越深；橙色描边表示当天有失败</span><span>今天</span></div>
+        </section>
 
         <n-alert v-if="row.last_error" type="error" :bordered="false" class="account-error">{{ row.last_error }}</n-alert>
         <n-alert v-else-if="quotaMap.get(row.id)?.error_message" type="warning" :bordered="false" class="account-error">{{ quotaMap.get(row.id)?.error_message }}</n-alert>
+
         <div class="account-actions">
-          <n-button size="small" @click="refreshOne(row.id)"><template #icon><refresh-cw /></template>刷新模型与额度</n-button>
-          <n-button size="small" @click="downloadAuth(row)"><template #icon><download /></template>下载认证文件</n-button>
-          <n-button size="small" @click="openEdit(row)">编辑调度</n-button>
-          <n-popconfirm @positive-click="remove(row.id)"><template #trigger><n-button size="small" type="error" secondary>删除</n-button></template>删除该授权账号、模型缓存和额度快照？</n-popconfirm>
+          <n-button size="small" @click="refreshOne(row.id)"><template #icon><refresh-cw /></template>刷新</n-button>
+          <n-button size="small" @click="downloadAuth(row)"><template #icon><download /></template>下载认证</n-button>
+          <n-button size="small" @click="openEdit(row)">调度设置</n-button>
+          <n-popconfirm @positive-click="remove(row.id)">
+            <template #trigger><n-button size="small" type="error" secondary>删除</n-button></template>
+            删除该授权账号、模型缓存和额度快照？
+          </n-popconfirm>
         </div>
       </n-card>
     </div>
-    <n-card v-else><n-empty description="账号池还是空的，请前往“授权”登录内置渠道或导入授权文件" /></n-card>
+    <n-card v-else><n-empty description="账号池还是空的，请前往“授权”登录内置渠道或导入认证文件" /></n-card>
   </n-spin>
+
   <div v-if="total > 0" class="pagination-row">
     <n-pagination
       :page="page"
@@ -331,24 +478,58 @@ onMounted(load);
 </template>
 
 <style scoped>
-.account-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; align-items: stretch; }
-.account-card { height: 100%; }
-.account-card__heading { min-width: 0; }
-.account-card__title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.account-card__title-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-card__source { margin-top: 4px; margin-left: 34px; font-size: 12px; opacity: .62; }
-.account-identity { margin-bottom: 12px; padding: 9px 11px; border-radius: 8px; background: var(--n-color-embedded); font-size: 13px; overflow-wrap: anywhere; }
-.schedule-row { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
-.quota-section { padding: 13px; border: 1px solid var(--n-border-color); border-radius: 10px; background: var(--n-color-embedded); }
-.quota-section__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
-.quota-caption { margin-top: 3px; font-size: 11px; }
-.quota-windows { display: grid; gap: 13px; }
-.quota-window__line, .quota-window__details, .credit-balance { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.quota-window__line { margin-bottom: 6px; font-size: 13px; }
-.quota-window__details { margin-top: 5px; flex-wrap: wrap; font-size: 11px; }
-.credit-balance { font-size: 14px; }
+.account-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 18px; align-items: stretch; }
+.account-card { height: 100%; border: 1px solid var(--n-border-color); border-radius: 14px; box-shadow: 0 8px 26px rgba(15, 23, 42, .05); overflow: hidden; }
+.account-card :deep(.n-card__content) { display: flex; flex-direction: column; height: 100%; padding: 18px; }
+.account-card__top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.account-profile { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.provider-avatar { display: grid; place-items: center; width: 42px; height: 42px; flex: 0 0 42px; border-radius: 12px; background: var(--n-color-embedded); border: 1px solid var(--n-border-color); }
+.account-profile__copy { min-width: 0; }
+.account-primary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.account-primary { max-width: min(42vw, 360px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+.account-secondary { margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; opacity: .62; }
+.account-state { display: flex; align-items: center; gap: 10px; flex: none; }
+.account-stat-strip { display: grid; grid-template-columns: 1.15fr .75fr 1fr 1.25fr; gap: 1px; margin-top: 16px; border: 1px solid var(--n-border-color); border-radius: 10px; overflow: hidden; background: var(--n-border-color); }
+.account-stat { min-width: 0; padding: 10px 11px; background: var(--n-color); }
+.account-stat span, .account-stat strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-stat span { margin-bottom: 3px; font-size: 11px; opacity: .58; }
+.account-stat strong { font-size: 12px; font-weight: 600; }
+.account-section { margin-top: 14px; padding: 13px; border: 1px solid var(--n-border-color); border-radius: 11px; background: var(--n-color-embedded); }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 11px; font-size: 12px; }
+.section-heading strong { font-size: 13px; }
+.quota-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.quota-item { min-width: 0; }
+.quota-item__line, .quota-item__meta, .credit-balance { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.quota-item__line { margin-bottom: 6px; font-size: 12px; }
+.quota-item__line span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quota-item__line strong { flex: none; font-size: 12px; }
+.quota-item__meta { margin-top: 5px; flex-wrap: wrap; font-size: 10px; }
+.credit-balance { font-size: 13px; }
+.activity-row { display: grid; grid-template-columns: repeat(28, minmax(5px, 1fr)); gap: 3px; }
+.activity-cell { height: 11px; border-radius: 3px; background: rgba(148, 163, 184, .16); transition: transform .15s ease, filter .15s ease; }
+.activity-cell:hover { transform: translateY(-2px) scale(1.08); filter: brightness(.95); }
+.activity-cell--1 { background: #bbf7d0; }
+.activity-cell--2 { background: #86efac; }
+.activity-cell--3 { background: #4ade80; }
+.activity-cell--4 { background: #16a34a; }
+.activity-cell--failure { box-shadow: inset 0 0 0 1px #f97316; }
+.activity-legend { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; font-size: 9px; }
 .account-error { margin-top: 12px; }
-.account-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.account-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 14px; }
 .account-form-grid { grid-template-columns: repeat(3, 1fr); }
-@media (max-width: 720px) { .account-grid { grid-template-columns: 1fr; } .account-form-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1040px) {
+  .account-grid { grid-template-columns: 1fr; }
+  .account-primary { max-width: 60vw; }
+}
+@media (max-width: 720px) {
+  .account-card__top { align-items: stretch; flex-direction: column; }
+  .account-state { justify-content: space-between; }
+  .account-stat-strip { grid-template-columns: repeat(2, 1fr); }
+  .quota-grid { grid-template-columns: 1fr; }
+  .account-primary { max-width: 68vw; }
+  .account-form-grid { grid-template-columns: 1fr; }
+  .activity-row { gap: 2px; }
+  .activity-cell { height: 9px; }
+  .activity-legend span:nth-child(2) { display: none; }
+}
 </style>
