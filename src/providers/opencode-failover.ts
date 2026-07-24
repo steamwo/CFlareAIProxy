@@ -16,9 +16,16 @@ interface StoredFailure {
   body: ArrayBuffer;
 }
 
+export interface OpenCodeAttemptFailure {
+  status: number;
+  headers: Headers;
+  body: string;
+}
+
 export interface OpenCodeFailoverResult {
   response: Response;
   usedMirror: boolean;
+  officialFailure?: OpenCodeAttemptFailure;
 }
 
 export interface OpenCodeFailoverInput {
@@ -51,11 +58,10 @@ function normalizeHttpUrl(value: string): string | undefined {
 }
 
 export function resolveOpenCodeMirrorUrls(env: Env, provider: ProviderConfig): string[] {
-  const environment = env as Env & { OPENCODE_MIRRORS_URL?: string };
   const configured = [
     ...DEFAULT_OPENCODE_MIRRORS,
     ...splitUrls(provider.options.mirror_urls),
-    ...splitUrls(environment.OPENCODE_MIRRORS_URL),
+    ...splitUrls(env.OPENCODE_MIRRORS_URL),
   ];
   const normalized = configured
     .map(normalizeHttpUrl)
@@ -111,6 +117,14 @@ async function storeFailure(response: Response): Promise<StoredFailure> {
   };
 }
 
+function failureMetadata(failure: StoredFailure): OpenCodeAttemptFailure {
+  return {
+    status: failure.status,
+    headers: new Headers(failure.headers),
+    body: new TextDecoder().decode(failure.body).slice(0, 4000),
+  };
+}
+
 function restoreFailure(failure: StoredFailure): Response {
   return new Response(failure.body, {
     status: failure.status,
@@ -147,7 +161,13 @@ export async function fetchOpenCodeWithFailover(input: OpenCodeFailoverInput): P
         mirrorTarget(input.provider, input.target, mirror),
         requestInit(input.init, "public", requestId, sessionId),
       );
-      if (response.ok) return { response, usedMirror: true };
+      if (response.ok) {
+        return {
+          response,
+          usedMirror: true,
+          ...(officialFailure ? { officialFailure: failureMetadata(officialFailure) } : {}),
+        };
+      }
       mirrorFailure = await storeFailure(response);
     } catch (error) {
       lastTransportError = error;

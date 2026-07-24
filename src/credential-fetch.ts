@@ -9,7 +9,7 @@ const HEADER_END = encoder.encode("\r\n\r\n");
 const CRLF = encoder.encode("\r\n");
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length"]);
 
-function concat(chunks: Uint8Array[]): Uint8Array {
+function concat(chunks: ReadonlyArray<Uint8Array<ArrayBufferLike>>): Uint8Array<ArrayBuffer> {
   const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
   const output = new Uint8Array(size);
   let offset = 0;

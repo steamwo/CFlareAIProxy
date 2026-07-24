@@ -3,6 +3,7 @@ import { GatewayError } from "./errors";
 import { providerAuthHeaders } from "./providers/headers";
 import { buildQoderHeaders } from "./providers/qoder-crypto";
 import { openCodeGatewayEndpoints } from "./providers/opencode";
+import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
 import { isOpenCodeAnonymousModel, openCodeAnonymousCredential } from "./providers/opencode-anonymous";
 import type { Credential, DiscoveredModelRow, Env, GatewayEndpoint, ProviderConfig } from "./types";
 import { normalizeBaseUrl } from "./utils";
@@ -128,7 +129,17 @@ async function fetchModelPayload(env: Env, provider: ProviderConfig, credential:
     : typeof configuredBody === "string" ? configuredBody : configuredBody === undefined ? undefined : JSON.stringify(configuredBody);
   if (body && !headers.has("content-type")) headers.set("content-type", "application/json");
   const timeoutMs = typeof provider.options.discovery_timeout_ms === "number" ? Math.max(1000, provider.options.discovery_timeout_ms) : 20_000;
-  const response = await providerFetch(env, provider, url, { method, headers, body, redirect: "manual" }, { purpose: "models", timeoutMs });
+  const init: RequestInit = { method, headers, body, redirect: "manual" };
+  const response = provider.kind === "opencode"
+    ? (await fetchOpenCodeWithFailover({
+        env,
+        provider,
+        credential,
+        target: url,
+        init,
+        fetcher: (target, requestInit) => providerFetch(env, provider, target, requestInit, { purpose: "models", timeoutMs }),
+      })).response
+    : await providerFetch(env, provider, url, init, { purpose: "models", timeoutMs });
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     throw new GatewayError(response.status, "MODEL_DISCOVERY_FAILED", `${provider.name} models returned ${response.status}: ${text.slice(0, 500)}`, "upstream_error");

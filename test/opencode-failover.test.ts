@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { fetchOpenCodeWithFailover, resolveOpenCodeMirrorUrls } from "../src/providers/opencode-failover";
-import { openCodeAnonymousCredential } from "../src/providers/opencode-anonymous";
+import { openCodeAnonymousCredential, openCodeAnonymousCredentialRow } from "../src/providers/opencode-anonymous";
 import type { Credential, Env, ProviderConfig } from "../src/types";
 
 function provider(options: Record<string, unknown> = {}): ProviderConfig {
@@ -81,7 +81,7 @@ describe("OpenCode failover", () => {
   });
 
   it("tries a configured key before falling back to a public mirror", async () => {
-    const fetcher = vi.fn(async (url: string) => (
+    const fetcher = vi.fn(async (url: string, _init: RequestInit) => (
       url.startsWith("https://opencode.ai/")
         ? new Response("unauthorized", { status: 401 })
         : new Response("ok", { status: 200 })
@@ -102,10 +102,35 @@ describe("OpenCode failover", () => {
     expect(fetcher.mock.calls[0]?.[0]).toBe("https://opencode.ai/zen/v1/responses");
     expect(header(fetcher.mock.calls[0]![1], "authorization")).toBe("Bearer secret-key");
     expect(header(fetcher.mock.calls[1]![1], "authorization")).toBe("Bearer public");
+    expect(result.officialFailure).toMatchObject({ status: 401, body: "unauthorized" });
+  });
+
+  it("routes anonymous model discovery through mirrors", async () => {
+    const fetcher = vi.fn(async (url: string, init: RequestInit) => new Response(JSON.stringify({ data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    const result = await fetchOpenCodeWithFailover({
+      env,
+      provider: provider(),
+      credential: openCodeAnonymousCredential(),
+      target: "https://opencode.ai/zen/v1/models",
+      init: { method: "GET", headers: { accept: "application/json" } },
+      fetcher,
+      random: () => 0,
+    });
+
+    expect(result.response.status).toBe(200);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0]?.[0]).toBe("https://opencode.ai.cmliussss.net/zen/v1/models");
+    expect(fetcher.mock.calls[0]?.[1].method).toBe("GET");
+    expect(fetcher.mock.calls[0]?.[1].body).toBeUndefined();
+    expect(openCodeAnonymousCredentialRow().max_concurrency).toBeGreaterThanOrEqual(100);
   });
 
   it("preserves the official failure after all mirrors fail", async () => {
-    const fetcher = vi.fn(async (url: string) => (
+    const fetcher = vi.fn(async (url: string, _init: RequestInit) => (
       url.startsWith("https://opencode.ai/")
         ? new Response("official failure", { status: 429 })
         : new Response("mirror failure", { status: 503 })

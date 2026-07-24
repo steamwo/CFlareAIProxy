@@ -5,8 +5,6 @@ import { refreshCredential } from "./oauth";
 import { ensureOpenCodeAnonymousModels } from "./models";
 import { captureQuotaHeaders } from "./quota";
 import { buildUpstreamRequest } from "./providers";
-import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
-import { isOpenCodeAnonymousCredential } from "./providers/opencode-anonymous";
 import { prepareDownstreamResponse, trackResponse } from "./stream";
 import type { Env, GatewayEndpoint, PoolCandidate, PoolLease, RateLease, Usage, UsageEvent } from "./types";
 import { asInt, parseJson, readJsonBody, truncate } from "./utils";
@@ -63,10 +61,6 @@ async function readErrorBody(response: Response, maxBytes = 64 * 1024): Promise<
 
 function retryableStatus(status: number): boolean {
   return status === 401 || status === 403 || status === 408 || status === 425 || status === 429 || status >= 500;
-}
-
-function credentialCooldownMs(env: Env, credentialId: string): number {
-  return isOpenCodeAnonymousCredential(credentialId) ? 0 : asInt(env.CREDENTIAL_COOLDOWN_MS, 60_000);
 }
 
 function usageEvent(base: Omit<UsageEvent, "usage" | "statusCode" | "latencyMs" | "createdAt">, usage: Usage, statusCode: number, latencyMs: number, firstTokenMs?: number): UsageEvent {
@@ -204,22 +198,8 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
         }, c.env);
         const timeoutMs = typeof provider.options.timeout_ms === "number" ? Math.max(1000, provider.options.timeout_ms) : 120_000;
         let upstream: Response;
-        let credentialSucceeded = true;
         try {
-          if (provider.kind === "opencode") {
-            const result = await fetchOpenCodeWithFailover({
-              env: c.env,
-              provider,
-              credential,
-              target: upstreamRequest.url,
-              init: upstreamRequest.init,
-              fetcher: (target, init) => providerFetch(c.env, provider, target, init, { purpose: "inference", timeoutMs }),
-            });
-            upstream = result.response;
-            credentialSucceeded = !result.usedMirror || isOpenCodeAnonymousCredential(credential.id);
-          } else {
-            upstream = await providerFetch(c.env, provider, upstreamRequest.url, upstreamRequest.init, { purpose: "inference", timeoutMs });
-          }
+          upstream = await providerFetch(c.env, provider, upstreamRequest.url, upstreamRequest.init, { purpose: "inference", timeoutMs });
         } catch (error) {
           const timedOut = error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError");
           const normalized = new GatewayError(
@@ -239,11 +219,10 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             leaseId: poolLease.leaseId,
             success: false,
             statusCode: upstream.status,
-            cooldownMs: credentialCooldownMs(c.env, credential.id),
+            cooldownMs: asInt(c.env.CREDENTIAL_COOLDOWN_MS, 60_000),
           }).catch(() => undefined);
           poolLease = undefined;
           await setCredentialError(c.env, credential.id, `HTTP ${upstream.status}: ${detail}`).catch(() => undefined);
-          if (isOpenCodeAnonymousCredential(credential.id)) blockedProviders.add(provider.id);
           if (retryableStatus(upstream.status)) {
             lastError = new GatewayError(502, "UPSTREAM_UNAVAILABLE", `${provider.name} returned ${upstream.status}: ${detail}`, "upstream_error");
             if (upstream.status === 408 || upstream.status === 425 || upstream.status >= 500) {
@@ -278,9 +257,9 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
           const tasks: Promise<unknown>[] = [
             postDo(poolStub!, "/release", {
               leaseId,
-              success: !streamError && credentialSucceeded,
+              success: !streamError,
               statusCode: finalStatus,
-              cooldownMs: credentialCooldownMs(c.env, credential.id),
+              cooldownMs: asInt(c.env.CREDENTIAL_COOLDOWN_MS, 60_000),
             }),
             postDo(rateStub!, "/release", { leaseId: rateLeaseId!, actualTokens: usage.totalTokens > 0 ? usage.totalTokens : undefined }),
             c.env.USAGE_QUEUE.send({
@@ -303,7 +282,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             leaseId: poolLease.leaseId,
             success: false,
             statusCode: error instanceof GatewayError ? error.status : 500,
-            cooldownMs: credentialCooldownMs(c.env, poolLease.credentialId),
+            cooldownMs: asInt(c.env.CREDENTIAL_COOLDOWN_MS, 60_000),
           }).catch(() => undefined);
         }
         if (error instanceof GatewayError && error.status < 500 && !retryableStatus(error.status)) throw error;

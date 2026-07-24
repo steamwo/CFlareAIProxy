@@ -54,18 +54,6 @@ jobs:
         id: wrangler
         continue-on-error: true
         run: pnpm run config:check
-      - name: Package installed workspace for local Worker validation
-        if: always() && github.event_name == 'pull_request'
-        run: tar --exclude=.git --exclude=local-test-workspace.tgz -czf local-test-workspace.tgz .
-      - name: Upload installed workspace
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: local-test-workspace
-          path: local-test-workspace.tgz
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
       - name: Enforce validation results
         if: always()
         run: |

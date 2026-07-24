@@ -106,11 +106,11 @@ describe("P0/P1 provider runtime", () => {
   });
 
   it("supports credential proxy override and explicit direct bypass", async () => {
-    expect(credentialProxyUrl({ metadata: { proxy_url: "socks5://127.0.0.1:1080" } } as Credential)).toBe("socks5://127.0.0.1:1080");
+    expect(credentialProxyUrl({ metadata: { proxy_url: "socks5://127.0.0.1:1080" } } as unknown as Credential)).toBe("socks5://127.0.0.1:1080");
     const fetchMock = vi.fn(async () => new Response("ok"));
     vi.stubGlobal("fetch", fetchMock);
     const provider = { id: "provider", name: "Provider", kind: "openai-compatible", base_url: "https://example.com/v1", endpoints: {}, auth: {}, headers: {}, options: {} } as unknown as ProviderConfig;
-    const response = await providerFetchForCredential({} as Env, provider, { metadata: { proxy_url: "none" } } as Credential, "https://example.com/v1/models", { method: "GET" }, { timeoutMs: 5000 });
+    const response = await providerFetchForCredential({} as Env, provider, { metadata: { proxy_url: "none" } } as unknown as Credential, "https://example.com/v1/models", { method: "GET" }, { timeoutMs: 5000 });
     expect(await response.text()).toBe("ok");
     expect(fetchMock).toHaveBeenCalledOnce();
   });

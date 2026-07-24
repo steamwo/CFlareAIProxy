@@ -27,6 +27,7 @@ export interface Env {
   DEFAULT_CONCURRENCY?: string;
   DEFAULT_MONTHLY_TOKENS?: string;
   CREDENTIAL_COOLDOWN_MS?: string;
+  OPENCODE_MIRRORS_URL?: string;
   PUBLIC_BASE_URL?: string;
   PROXY_BRIDGE_URL?: string;
   PROXY_BRIDGE_TOKEN?: string;
