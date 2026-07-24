@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createAdminApp } from "./admin";
 import { AccountPool } from "./account-pool";
+import { BUILTIN_CHANNELS } from "./builtin-channels";
 import { authenticateGatewayKey, insertUsage, listModels } from "./db";
 import { GatewayError, errorResponse } from "./errors";
 import { enrichModelsWithCapabilities } from "./model-capabilities";
@@ -16,6 +17,7 @@ import { parseJson } from "./utils";
 export { AccountPool, RateLimiter };
 
 const app = new Hono<{ Bindings: Env }>({ strict: false });
+const ACCOUNT_POOL_PROVIDER_IDS = BUILTIN_CHANNELS.map((channel) => channel.id);
 
 app.use("/v1/*", cors({
   origin: "*",
@@ -66,9 +68,10 @@ app.get("/", (c) => c.redirect("/admin", 302));
 
 const adminApp = createAdminApp();
 
-// Keep the original /credentials response backward-compatible while giving the
-// account-pool UI a real D1-backed paginated query. The existing /api/* admin
-// middleware on adminApp also protects routes registered after construction.
+// Keep the original /credentials response backward-compatible for internal
+// provider-key workflows. The account-pool page is intentionally limited to
+// credentials belonging to fixed built-in channels; OpenAI-compatible provider
+// keys remain managed from the provider configuration page.
 adminApp.get("/api/credentials/paged", async (c) => {
   const queryInteger = (value: string | undefined, fallback: number, maximum: number): number => {
     const parsed = Number(value);
@@ -78,9 +81,14 @@ adminApp.get("/api/credentials/paged", async (c) => {
   const requestedPage = queryInteger(c.req.query("page"), 1, 1_000_000);
   const pageSize = queryInteger(c.req.query("pageSize"), 9, 100);
   const provider = c.req.query("provider")?.trim() || "";
+  if (provider && !ACCOUNT_POOL_PROVIDER_IDS.some((id) => id === provider)) {
+    return c.json({ data: [], quotas: [], total: 0, page: 1, pageSize, pageCount: 1 });
+  }
+
+  const placeholders = ACCOUNT_POOL_PROVIDER_IDS.map(() => "?").join(",");
   const countStatement = provider
     ? c.env.DB.prepare("SELECT COUNT(*) AS total FROM credentials WHERE provider_id=?").bind(provider)
-    : c.env.DB.prepare("SELECT COUNT(*) AS total FROM credentials");
+    : c.env.DB.prepare(`SELECT COUNT(*) AS total FROM credentials WHERE provider_id IN (${placeholders})`).bind(...ACCOUNT_POOL_PROVIDER_IDS);
   const count = await countStatement.first<{ total: number }>();
   const total = Number(count?.total ?? 0);
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
@@ -88,7 +96,8 @@ adminApp.get("/api/credentials/paged", async (c) => {
   const offset = (page - 1) * pageSize;
   const dataStatement = provider
     ? c.env.DB.prepare("SELECT * FROM credentials WHERE provider_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(provider, pageSize, offset)
-    : c.env.DB.prepare("SELECT * FROM credentials ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(pageSize, offset);
+    : c.env.DB.prepare(`SELECT * FROM credentials WHERE provider_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+      .bind(...ACCOUNT_POOL_PROVIDER_IDS, pageSize, offset);
   const result = await dataStatement.all<CredentialRow>();
   const data = result.results.map(({ secret_ciphertext, refresh_ciphertext, metadata_json, ...row }) => ({
     ...row,
@@ -100,13 +109,13 @@ adminApp.get("/api/credentials/paged", async (c) => {
 
   let quotas: Array<QuotaSnapshotRow & { snapshot: QuotaSnapshot; credential_label: string; provider_name: string }> = [];
   if (data.length) {
-    const placeholders = data.map(() => "?").join(",");
+    const quotaPlaceholders = data.map(() => "?").join(",");
     const quotaResult = await c.env.DB.prepare(
       `SELECT q.*, c.label AS credential_label, p.name AS provider_name
        FROM quota_snapshots q
        JOIN credentials c ON c.id=q.credential_id
        JOIN providers p ON p.id=q.provider_id
-       WHERE q.credential_id IN (${placeholders})
+       WHERE q.credential_id IN (${quotaPlaceholders})
        ORDER BY p.name,c.priority,c.created_at`,
     ).bind(...data.map((row) => row.id)).all<QuotaSnapshotRow & { credential_label: string; provider_name: string }>();
     quotas = quotaResult.results.map((row) => ({
