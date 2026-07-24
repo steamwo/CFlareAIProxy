@@ -16,12 +16,17 @@ export interface LoggingSettings {
   level: LogLevel;
 }
 
+export interface UsageQueueBinding {
+  send(message: UsageQueueEvent): Promise<void>;
+  sendBatch(messages: Array<{ body: UsageQueueEvent }>): Promise<void>;
+}
+
 export interface Env {
   DB: D1Database;
   CONFIG_CACHE: KVNamespace;
   ACCOUNT_POOL: DurableObjectNamespace;
   RATE_LIMITER: DurableObjectNamespace;
-  USAGE_QUEUE: Queue<UsageQueueEvent>;
+  USAGE_QUEUE: UsageQueueBinding;
   ASSETS: Fetcher;
   MASTER_KEY: string;
   ADMIN_TOKEN: string;
