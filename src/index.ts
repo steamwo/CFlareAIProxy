@@ -204,7 +204,11 @@ adminApp.get("/api/credentials/paged", async (c) => {
       activity[id] = { buckets: [], totals: { requests: 0, successes: 0, failures: 0 } };
     }
     for (const row of recentActivityResult.results) {
-      activity[row.credential_id]?.buckets.push({
+      const entry = activity[row.credential_id] ??= {
+        buckets: [],
+        totals: { requests: 0, successes: 0, failures: 0 },
+      };
+      entry.buckets.push({
         bucket: Number(row.bucket),
         requests: Number(row.requests),
         successes: Number(row.successes ?? 0),
@@ -213,7 +217,11 @@ adminApp.get("/api/credentials/paged", async (c) => {
       });
     }
     for (const row of totalActivityResult.results) {
-      activity[row.credential_id].totals = {
+      const entry = activity[row.credential_id] ??= {
+        buckets: [],
+        totals: { requests: 0, successes: 0, failures: 0 },
+      };
+      entry.totals = {
         requests: Number(row.requests),
         successes: Number(row.successes ?? 0),
         failures: Number(row.failures ?? 0),
