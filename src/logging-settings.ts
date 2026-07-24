@@ -39,7 +39,7 @@ export async function getLoggingSettings(env: Env): Promise<LoggingSettings> {
     .first<{ value_json: string }>()
     .catch(() => null);
   const value = row?.value_json
-    ? normalizeSettings(parseJson<Record<string, unknown>>(row.value_json, DEFAULT_SETTINGS))
+    ? normalizeSettings(parseJson<unknown>(row.value_json, DEFAULT_SETTINGS))
     : DEFAULT_SETTINGS;
   cached = { value, expiresAt: now + CACHE_TTL_MS };
   return value;
