@@ -1,99 +1,199 @@
-# CFlareAIProxy
+<div align="center">
+  <img src="web/public/logo.svg" width="96" alt="CFlareAIProxy logo" />
+  <h1>CFlareAIProxy</h1>
+  <p><strong>运行在 Cloudflare Workers 上的多账号 LLM API 网关与控制台</strong></p>
+  <p>一个 Worker，统一接入 Codex、Kimi、Qoder、OpenCode Zen 与任意 OpenAI-compatible 上游。</p>
 
-CFlareAIProxy 是运行在 Cloudflare Workers 上的多账号 LLM API 网关，对外提供 OpenAI-compatible API，并由同一个 Worker 交付 Vue 3 管理台。
+  <p>
+    <img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white" />
+    <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white" />
+    <img alt="Vue" src="https://img.shields.io/badge/Vue-3.5-42B883?logo=vuedotjs&logoColor=white" />
+    <img alt="Hono" src="https://img.shields.io/badge/Hono-4.x-E36002?logo=hono&logoColor=white" />
+    <img alt="License" src="https://img.shields.io/github/license/steamwo/CFlareAIProxy" />
+  </p>
+</div>
 
-## 0.5.3 的核心能力
+> [!IMPORTANT]
+> 本文档对应 **`dev` 分支**。该分支可能领先于 `main`，适合测试最新路由、协议适配和管理端能力；生产升级前请先阅读 [部署与升级指南](DEPLOYMENT.md) 并执行完整校验。
 
-- **内置渠道**：Codex、Kimi、Qoder、OpenCode Zen。协议、OAuth、官方端点和模型发现由代码维护。
-- **OpenAI-compatible 供应商**：测试 API Key、读取 `/models`、勾选公开模型、设置客户端别名和供应商权重。
-- **可用性路由**：先过滤额度耗尽、账号冷却和供应商熔断节点，再按优先级主备、同级权重分流。
-- **原生代理**：只填写 HTTP/SOCKS5 Proxy URL；OAuth 换取/刷新 Token、模型、额度和推理请求共用同一代理出口，不再静默直连回退。
-- **完整计费**：模型价格分别设置输入、输出和缓存命中 Token；请求日志记录缓存 Token 并据此计算成本。
-- **Qoder 修复**：授权轮询、账号导入、个人/组织额度和重置时间正常工作。
-- **账号卡片**：每个账号独立显示状态、调度参数、额度、错误和恢复信息。
+## CFlareAIProxy 能做什么
 
-## API
+CFlareAIProxy 把不同上游的授权方式、请求协议、账号池和故障语义收敛成统一的 OpenAI-compatible API。客户端只持有网关 Key，上游 OAuth Token、API Key 和代理地址均由服务端加密保存。
 
-```text
-GET  /v1/models
-POST /v1/responses
-POST /v1/chat/completions
-POST /v1/completions
+| 能力 | 说明 |
+| --- | --- |
+| **统一 API** | 提供 `/v1/models`、`/v1/responses`、`/v1/chat/completions` 与 `/v1/completions`。 |
+| **内置渠道适配** | Codex、Kimi、Qoder、OpenCode Zen 使用独立 adapter，不是简单改写 Base URL。 |
+| **自定义上游** | 添加任意 OpenAI-compatible 服务，测试 API Key、发现模型、选择公开模型并设置别名。 |
+| **多账号调度** | 支持优先级、权重、最大并发、会话亲和、额度摘除、账号冷却与自动 Token 刷新。 |
+| **弹性路由** | 数字更小的优先级先使用；同级按权重分流；线路失败时切换账号、供应商或备用路由。 |
+| **能力感知** | 模型目录可暴露 tools、图片、推理等级和输入/输出模态；请求进入上游前会做能力校验。 |
+| **原生代理** | Worker 原生 HTTP CONNECT / SOCKS5；支持账号、供应商和系统三级代理策略及 `direct`/`none` 覆盖。 |
+| **限流与成本** | 每个网关 Key 可限制 RPM、并发、月 Token 和模型范围；日志记录缓存 Token 与估算费用。 |
+| **一体化管理台** | Vue 3 SPA 与 Hono API 由同一个 Worker 提供，无需单独部署前端和跨域服务。 |
+
+## 架构
+
+```mermaid
+flowchart LR
+  C[OpenAI-compatible 客户端] --> W[Cloudflare Worker / Hono]
+  W --> A[网关 Key 鉴权与限流]
+  A --> R[模型路由与健康检查]
+  R --> P[Provider Adapter]
+  P --> U1[Codex]
+  P --> U2[Kimi]
+  P --> U3[Qoder]
+  P --> U4[OpenCode Zen]
+  P --> U5[OpenAI-compatible 上游]
+
+  W --> S[Vue 3 管理台 / Static Assets]
+  W --> D[(D1)]
+  W --> K[(KV 配置缓存)]
+  W --> Q[Queue 异步用量写入]
+  A --> DO1[RateLimiter Durable Object]
+  R --> DO2[AccountPool Durable Object]
 ```
+
+核心资源：
+
+- **D1**：供应商、加密凭据、模型目录、额度快照、路由、网关 Key、价格与请求日志；
+- **Durable Objects**：账号租约、并发控制、会话亲和、刷新锁和网关限流；
+- **KV**：短时配置缓存；
+- **Queues**：将用量与费用写入移出响应主链路；
+- **Static Assets**：同域交付 `/admin` 管理台。
+
+## 支持的上游
+
+| 上游 | 授权 | 上游协议处理 | 备注 |
+| --- | --- | --- | --- |
+| **OpenAI Codex** | PKCE OAuth / 授权 JSON / 本地助手 | Responses 为主，Chat 与 Completions 自动转换 | 支持流式错误识别、完成事件检查和输出重建。 |
+| **Kimi Coding** | Device OAuth | Chat、Responses、Completions 转换 | 处理工具消息关联、模型名归一化和流式 usage。 |
+| **Qoder** | PKCE Device OAuth | Qoder 专用请求与 SSE | 内置 COSY 签名、模型发现和个人/组织额度。 |
+| **OpenCode Zen** | API Key / 匿名免费模型 | Responses、Anthropic Messages、Google GenerateContent、Chat | 官方线路失败后可按配置尝试镜像线路。 |
+| **OpenAI-compatible** | API Key | Chat、Responses 或 both | 可发现模型、设置公开别名、权重和代理。 |
+
+> [!NOTE]
+> 对外 API 仍以 OpenAI-compatible 为主。Anthropic / Google 协议是 OpenCode Zen adapter 的内部上游转换，不代表网关对外提供完整 Claude 或 Gemini 原生 API。
 
 ## 快速开始
 
-需要 Node.js 20.19 或更高版本。
+### 环境要求
+
+- Node.js `>= 20.19`
+- pnpm `11.9.x`
+- 一个可用的 Cloudflare 账号（远程部署时）
 
 ```bash
+git clone https://github.com/steamwo/CFlareAIProxy.git
+cd CFlareAIProxy
+git switch dev
 pnpm install
 pnpm run doctor
 pnpm run dev
 ```
 
-管理台：
+本地管理台：
 
 ```text
 http://127.0.0.1:8787/admin
 ```
 
-首次运行会创建 `.dev.vars`、初始化本地 D1、构建管理台并启动 Wrangler。
+`pnpm run dev` 会创建或补全 `.dev.vars`、应用本地 D1 migrations、构建管理台并启动 Wrangler。
 
-## 管理台怎么用
+首次登录至少需要：
 
-- **内置渠道**：启停 Codex、Kimi、Qoder、OpenCode Zen，设置账号池策略和渠道代理。
-- **OpenAI 供应商**：填写 Base URL 与 API Key，先测试并获取模型；勾选要公开的上游模型，按需改成更短的客户端模型名，并设置供应商权重。
-- **账号池**：添加 Key、导入 OAuth、发起授权，设置账号优先级/权重/并发，查看模型和额度。
-- **模型路由**：查看自动生成的线路和实时可用状态；高级场景再添加手动主备线路。
-- **模型价格**：分别维护输入、输出、缓存命中价格。
-- **网关密钥**：限制 RPM、并发、月 Token 和可用模型。
-- **系统设置**：设置默认 Proxy URL，并验证 Worker 直连 IP 与代理出口 IP。
-
-## OpenAI-compatible 供应商
-
-创建供应商时填写：
-
-```text
-ID: openai-main
-名称: OpenAI 主线路
-Base URL: https://api.openai.com/v1
-API Key: sk-...
-供应商权重: 3
+```dotenv
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=请设置强密码
 ```
 
-点击“测试 API Key 并获取模型”后：
+`MASTER_KEY` 与 `ADMIN_TOKEN` 在本地缺失时可由项目脚本生成。不要提交 `.dev.vars`。
 
-1. 勾选要对客户端公开的上游模型；
-2. “公开模型名”可保持原名，也可映射成 `coding-fast` 等别名；
-3. 保存后自动生成对应模型路由；
-4. 多个供应商映射到同一公开模型名、且优先级相同时，按供应商权重分流。
+## 三分钟完成首次请求
 
-未勾选的模型不会自动暴露。编辑供应商时 API Key 留空会使用已有启用账号测试；填写新 Key 会追加到账号池。
+1. 打开 `/admin`，登录管理台；
+2. 在“内置渠道”启用需要的渠道，或在“OpenAI 供应商”添加 Base URL 与 API Key；
+3. 在“授权”完成 OAuth，或在供应商页面测试 Key 并选择公开模型；
+4. 在“网关密钥”创建客户端 Key；
+5. 调用模型目录并发送请求。
 
-## 模型路由
+```bash
+export CFLARE_BASE_URL="http://127.0.0.1:8787/v1"
+export CFLARE_API_KEY="cfp_xxx"
 
-模型路由就是“客户端模型名 → 实际供应商与上游模型”的映射。
-
-```text
-客户端请求 coding-fast
-  ├─ 优先级 10：provider-a / model-x，权重 3
-  ├─ 优先级 10：provider-b / model-y，权重 1
-  └─ 优先级 20：provider-c / model-z，备用
+curl "$CFLARE_BASE_URL/models" \
+  -H "Authorization: Bearer $CFLARE_API_KEY"
 ```
 
-运行规则：
+```bash
+curl "$CFLARE_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $CFLARE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "coding-fast",
+    "messages": [{"role": "user", "content": "用一句话解释 Durable Objects"}],
+    "stream": false
+  }'
+```
 
-1. 先排除禁用、额度耗尽和冷却中的账号；
-2. 排除处于熔断期的供应商；
-3. 使用数字最小的可用优先级；
-4. 同一优先级按权重分流；
-5. 主线路不可用时自动尝试下一线路；供应商恢复成功后自动回到可用池。
+也可以直接使用 OpenAI SDK，只需替换 `base_url` / `baseURL`。完整示例见 [API 与客户端接入](docs/API_USAGE.md)。
 
-OpenAI 供应商的常规模型选择、别名和权重直接在供应商页面完成。“模型路由”页面主要用于跨供应商主备、同名聚合和高级覆盖。
+## 路由如何工作
 
-## 代理与 Codex 403
+```text
+客户端模型 coding-fast
+  ├─ priority 10 · provider-a/model-x · weight 3
+  ├─ priority 10 · provider-b/model-y · weight 1
+  └─ priority 20 · provider-c/model-z · 备用
+```
 
-支持：
+请求执行顺序：
+
+1. 校验网关 Key 的模型范围、RPM、并发和月 Token；
+2. 选择数字最小且健康的路由优先级；
+3. 同级路由按权重排序与分流；
+4. 排除禁用、额度耗尽、冷却中或模型不可用的账号；
+5. 通过账号池分配凭据，并在需要时使用刷新锁更新 OAuth Token；
+6. 对可重试错误切换账号或下一条路由；连续网络/5xx 失败会触发供应商熔断；
+7. 流结束后释放租约，并异步写入 usage、延迟和费用。
+
+客户端可传 `X-Session-Id` 或 `X-Conversation-Id`，帮助开启会话亲和的渠道尽量复用同一账号。
+
+## 模型能力元数据
+
+`GET /v1/models` 可能为模型附加非标准扩展字段：
+
+```json
+{
+  "id": "coding-fast",
+  "object": "model",
+  "x_cflare_capabilities": {
+    "inputModalities": ["text", "image"],
+    "outputModalities": ["text"],
+    "reasoningLevels": ["low", "medium", "high"],
+    "supportsTools": true,
+    "supportsImages": true
+  }
+}
+```
+
+网关会在转发前拒绝明确不支持的 tools、图片输入或 reasoning level，避免把无效请求消耗到上游。
+
+## 代理策略
+
+优先级从高到低：
+
+```text
+账号 proxy_url / proxyUrl
+        ↓ 未设置
+供应商或内置渠道 Proxy URL
+        ↓ 未设置
+系统默认 Proxy URL
+        ↓ 未设置
+Worker 直连
+```
+
+账号级值设为 `direct` 或 `none` 时，会明确跳过供应商与系统代理。支持：
 
 ```text
 http://user:pass@host:port
@@ -101,81 +201,33 @@ socks5://user:pass@host:port
 socks5h://user:pass@host:port
 ```
 
-HTTPS 上游通过 HTTP CONNECT 或 SOCKS5 隧道访问，所以 HTTP 代理仍填写 `http://`，不要填写 `https://`。代理启用后请求失败会明确报错，**不会回退到 Cloudflare 直连出口**。
+代理一旦选中，失败会明确返回错误，**不会静默回退直连**。详见 [代理与出口策略](docs/PROVIDER_PROXY.md)。
 
-渠道代理覆盖系统默认代理。Codex 授权码换 Token、刷新 Token、模型、额度和推理均使用 Codex 渠道的最终代理配置。
-
-在代理编辑器点击“验证出口 IP”：
-
-- `代理出口 IP` 与 `Worker 直连 IP` 不同：代理链路已改变出口；若 Codex 仍返回 403，通常是该代理出口或 Token 本身被上游拒绝。
-- 两个 IP 相同：代理没有真正改变出口，应检查代理服务或地址。
-
-`proxy-bridge/` 仅为旧部署兼容保留，0.5.3 不需要配置 Bridge。
-
-## Codex 管理台授权
-
-1. 在账号池发起 Codex 授权；
-2. 登录后浏览器跳转到 `http://localhost:1455/auth/callback?...`；
-3. 本机未监听时页面无法访问是正常现象；
-4. 把地址栏完整回调 URL 粘贴回管理台；
-5. Worker 使用原 PKCE 会话，并通过 Codex 渠道代理换取 Token。
-
-授权 JSON、`pnpm run codex:login` 和 `pnpm run oauth:loopback` 仍可作为备用方式。
-
-## 管理员登录与密钥
-
-Cloudflare Dashboard 中至少需要设置：
-
-```text
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=你的管理台登录密码
-```
-
-`ADMIN_PASSWORD` 应保存为 Secret。`ADMIN_USERNAME` 未设置时默认使用 `admin`。
-
-`ADMIN_TOKEN` 用于管理会话签名和自动化鉴权，`MASTER_KEY` 用于加密上游 Token、API Key 与代理地址。通过 `node scripts/deploy.mjs` 部署时，脚本会在它们缺失时安全生成一次；已存在的值会被保留，不会在每次部署时轮换。
-
-如果绕过部署脚本、只运行 `wrangler deploy` 或 `wrangler versions upload`，自动密钥初始化和远程 D1 migrations 都不会执行。
-
-## 构建和部署
+## 部署
 
 ```bash
 pnpm run build
 pnpm run deploy
 ```
 
-Cloudflare Dashboard 推荐：
+Cloudflare Git 连接推荐配置：
 
 ```text
-Production branch: main
+Production branch: main（或你明确用于生产的分支）
 Root directory: /
 Build command: pnpm run build
 Deploy command: node scripts/deploy.mjs
 ```
 
-**Deploy command 必须执行 `node scripts/deploy.mjs`。** 该脚本会：
+`node scripts/deploy.mjs` 不只是上传 Worker，它还会确保远程 Queue、初始化缺失的关键 Secret、应用 D1 migrations 并验证 schema。不要在生产部署中用裸 `wrangler versions upload` 替代它。
 
-1. 确保远程 Queues 存在；
-2. 缺失时生成 `ADMIN_TOKEN` 与 `MASTER_KEY`；
-3. 上传 Worker 后端和 Vue 静态资源；
-4. 执行 `migrations/` 中尚未应用的远程 D1 SQL；
-5. 查询 `providers` 表验证数据库 schema 已初始化。
+部署后检查：
 
-部署日志末尾应出现：
-
-```text
-• 应用远程 D1 迁移...
-• 验证远程 D1 schema...
-✓ CFlareAIProxy 部署、密钥初始化和数据库迁移完成
+```bash
+curl https://你的-worker地址/health
 ```
 
-部署完成后访问：
-
-```text
-https://你的-worker地址/health
-```
-
-正常结果应包含：
+正常响应应包含：
 
 ```json
 {
@@ -184,45 +236,61 @@ https://你的-worker地址/health
 }
 ```
 
-### D1 未初始化时怎么修复
+完整步骤、变量说明、故障排查和升级流程见 [部署与升级指南](DEPLOYMENT.md)。
 
-如果管理接口返回 `DATABASE_NOT_INITIALIZED`，或者 `/health` 显示 `database: "schema_missing"`，说明当前 Worker 绑定的远程 D1 仍是空库。可在项目目录手动执行：
+## 管理台导航
 
-```bash
-pnpm exec wrangler d1 migrations apply cflare-api-db --remote --yes
-pnpm exec wrangler d1 execute cflare-api-db --remote --yes \
-  --command "SELECT COUNT(*) AS provider_count FROM providers"
-```
+- **概览**：请求量、成功率、成本与近期运行状态；
+- **内置渠道**：启停 Codex、Kimi、Qoder、OpenCode Zen；
+- **OpenAI 供应商**：配置自定义上游、Key、模型公开范围与权重；
+- **授权**：集中处理 OAuth、设备授权与授权 JSON 导入；
+- **账号池**：账号状态、额度、并发、优先级、权重和错误恢复；
+- **实际模型 / 模型路由**：查看上游目录、能力元数据、别名和主备线路；
+- **网关密钥**：按客户端限制 RPM、并发、月 Token 与模型范围；
+- **模型价格 / 请求日志**：维护输入、输出、缓存价格并追踪 usage、延迟和错误；
+- **系统设置**：默认代理、出口验证与全局配置。
 
-如果 Cloudflare Dashboard 中变量名 `DB` 实际绑定了其他数据库，请把命令里的 `cflare-api-db` 换成绑定页面显示的真实数据库名。SQL 直接应用到远程 D1 后，通常不需要再次发布 Worker。
+详见 [管理台说明](docs/ADMIN_UI.md)。
 
-非生产分支可能使用单独的预览部署命令；若该命令只是 `wrangler versions upload`，它只上传预览版本，不会运行远程 D1 migrations。生产部署请确保生产分支是 `main`，并使用上面的 Deploy command。
+## 安全模型
 
-## 升级
+- 上游 Token、API Key 和 Proxy URL 使用 `MASTER_KEY` 进行 AES-GCM 加密；
+- 网关 Key 只保存哈希，完整值仅在创建时显示一次；
+- 管理台使用 HttpOnly Cookie，同域部署避免额外的跨域凭据风险；
+- 默认不保存完整提示词和模型输出；
+- 内置渠道端点、OAuth 配置和协议规则由代码注册表固定；
+- 代理配置不会在管理接口中回显完整认证信息；
+- `.dev.vars`、`.cflare/auth/` 和其他本地凭据文件不得提交到 Git。
 
-0.5.3 新增 migration `0006_routing_cache_prices.sql`，部署脚本会应用它，为模型价格增加缓存价格，为请求日志增加缓存 Token 字段。
-
-## 验证
+## 校验
 
 ```bash
 pnpm run doctor
 pnpm run check
+pnpm run config:check
 pnpm run smoke:admin
 ```
 
+`pnpm run check` 会覆盖配置检查、管理台静态检查、Worker/Web 类型检查和 Vitest。发布前清单见 [验证与发布检查](VALIDATION.md)。
+
 ## 文档
 
-- [部署说明](DEPLOYMENT.md)
-- [代理说明](docs/PROVIDER_PROXY.md)
-- [管理端架构](docs/ADMIN_UI.md)
-- [Codex 本地授权](docs/CODEX_LOCAL_AUTH.md)
-- [OpenCode Zen 上游](docs/OPENCODE_UPSTREAM.md)
-- [验证记录](VALIDATION.md)
+| 文档 | 内容 |
+| --- | --- |
+| [API 与客户端接入](docs/API_USAGE.md) | Curl、OpenAI SDK、流式请求、错误格式和模型能力字段。 |
+| [部署与升级指南](DEPLOYMENT.md) | 本地运行、Cloudflare 部署、资源、Secret、migration 与排障。 |
+| [管理台说明](docs/ADMIN_UI.md) | 页面职责、账号与供应商边界、路由和登录架构。 |
+| [代理与出口策略](docs/PROVIDER_PROXY.md) | 账号/供应商/系统代理优先级、协议和失败行为。 |
+| [模型、配额与 OpenCode](docs/MODELS_QUOTAS_OPENCODE.md) | 动态模型、能力元数据、额度快照和 OpenCode 双向概念。 |
+| [Codex 授权](docs/CODEX_LOCAL_AUTH.md) | 管理台 PKCE、本地助手、CLI 同步与代理。 |
+| [OpenCode Zen 适配](docs/OPENCODE_UPSTREAM.md) | 多协议转换、匿名模型、官方/镜像故障转移。 |
+| [CLIProxyAPI 对齐记录](COPY.md) | 行为参考范围、明确差异和后续同步规则。 |
+| [变更记录](CHANGELOG.md) | 已发布版本与 `dev` 分支开发变化。 |
 
-## 安全
+## 项目边界
 
-- 上游 Token、API Key 和 Proxy URL 使用 `MASTER_KEY` 进行 AES-GCM 加密。
-- 网关 Key 仅保存哈希。
-- 管理登录使用 HttpOnly Cookie。
-- 默认不保存完整提示词和输出。
-- 内置渠道配置由代码注册表固定，数据库中的端点篡改不会进入运行时。
+CFlareAIProxy 关注的是 **Cloudflare 原生部署、统一 OpenAI-compatible 接口、多账号调度和可视化运维**。它不会机械复制本地 Go 网关的所有能力，也不会把尚未完整实现的 Claude、Gemini、Grok 或 Responses WebSocket 宣称为兼容。
+
+## License
+
+本项目按 [LICENSE](LICENSE) 中的条款发布。
