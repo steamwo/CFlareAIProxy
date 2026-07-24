@@ -4,10 +4,11 @@ import { createAdminApp } from "./admin";
 import { AccountPool } from "./account-pool";
 import { authenticateGatewayKey, insertUsage, listModels } from "./db";
 import { GatewayError, errorResponse } from "./errors";
+import { enrichModelsWithCapabilities } from "./model-capabilities";
 import { exchangeOAuthCode } from "./oauth";
 import { ensureOpenCodeAnonymousModels, refreshCredentialModels } from "./models";
+import { proxyGeneration } from "./proxy-v2";
 import { refreshCredentialQuota } from "./quota";
-import { proxyGeneration } from "./proxy";
 import { RateLimiter } from "./rate-limiter";
 import type { Env, UsageEvent } from "./types";
 import { parseJson } from "./utils";
@@ -50,7 +51,8 @@ app.get("/v1/models", async (c) => {
     const gatewayKey = await authenticateGatewayKey(c.env, match[1]);
     const allowedModels = parseJson<string[]>(gatewayKey.allowed_models_json, []);
     await ensureOpenCodeAnonymousModels(c.env).catch(() => null);
-    return c.json({ object: "list", data: await listModels(c.env, allowedModels) });
+    const models = await listModels(c.env, allowedModels);
+    return c.json({ object: "list", data: await enrichModelsWithCapabilities(c.env, models) });
   } catch (error) {
     return errorResponse(error);
   }
@@ -61,12 +63,8 @@ app.post("/v1/chat/completions", (c) => proxyGeneration(c, "chat"));
 app.post("/v1/completions", (c) => proxyGeneration(c, "completions"));
 
 app.get("/", (c) => c.redirect("/admin", 302));
-// createAdminApp() already owns the /admin base path. Registering it at /
-// keeps the final paths explicit and makes /admin work with or without a slash.
 app.route("/", createAdminApp());
 
-// Optional callback for providers that allow an HTTPS Worker redirect URI.
-// Codex's seeded configuration uses the bundled localhost callback helper instead.
 app.get("/oauth/callback/:provider", async (c) => {
   try {
     const result = await exchangeOAuthCode(c.env, c.req.param("provider"), {
