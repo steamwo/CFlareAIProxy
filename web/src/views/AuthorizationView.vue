@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { NAlert, NButton, NCard, NEmpty, NForm, NFormItem, NInput, NModal, NPagination, NSelect, NSpace, NSpin, NTag, useMessage } from "naive-ui";
 import { FileJson, KeyRound, RefreshCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
@@ -7,6 +8,7 @@ import ProviderIcon from "../components/ProviderIcon.vue";
 import { api, jsonBody } from "../api";
 import type { Channel } from "../types";
 
+const route = useRoute();
 const channels = ref<Channel[]>([]);
 const loading = ref(false);
 const importModal = ref(false);
@@ -14,7 +16,7 @@ const oauthModal = ref(false);
 const page = ref(1);
 const pageSize = ref(6);
 const message = useMessage();
-const importForm = reactive({ providerId: "", label: "", json: "" });
+const importForm = reactive({ providerId: "", label: "", json: "", filename: "" });
 const oauth = reactive({
   providerId: "",
   providerName: "",
@@ -144,26 +146,73 @@ async function exchangeOauth() {
     oauth.exchanging = false;
   }
 }
+function parsedImport(): { auth: Record<string, unknown>; providerId: string; label: string } {
+  const parsed = JSON.parse(importForm.json) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("认证文件必须是 JSON 对象");
+  const nested = parsed.auth && typeof parsed.auth === "object" && !Array.isArray(parsed.auth)
+    ? parsed.auth as Record<string, unknown>
+    : parsed;
+  const detectedProvider = [
+    importForm.providerId,
+    parsed.providerId,
+    parsed.provider_id,
+    nested.providerId,
+    nested.provider_id,
+    nested.type,
+  ].find((value): value is string => typeof value === "string" && value.trim().length > 0)?.trim() ?? "";
+  const detectedLabel = importForm.label.trim()
+    || (typeof parsed.label === "string" ? parsed.label.trim() : "")
+    || importForm.filename.replace(/\.json$/i, "")
+    || "导入授权文件";
+  return { auth: nested, providerId: detectedProvider, label: detectedLabel };
+}
+async function readImportFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    importForm.filename = file.name;
+    importForm.json = await file.text();
+    const parsed = parsedImport();
+    if (!importForm.providerId && authChannels.value.some((channel) => channel.id === parsed.providerId)) {
+      importForm.providerId = parsed.providerId;
+    }
+    if (!importForm.label) importForm.label = parsed.label;
+    message.success(`已读取 ${file.name}`);
+  } catch (error) {
+    importForm.json = "";
+    message.error(error instanceof Error ? error.message : String(error));
+  } finally {
+    input.value = "";
+  }
+}
 async function importJson() {
   try {
-    const auth = JSON.parse(importForm.json);
-    await api("/auth-files/import", { method: "POST", body: jsonBody({ providerId: importForm.providerId, label: importForm.label || "导入授权文件", auth }) });
+    const parsed = parsedImport();
+    if (!parsed.providerId) throw new Error("请选择内置渠道，或使用包含 type/provider_id 的认证文件");
+    await api("/auth-files/import", {
+      method: "POST",
+      body: jsonBody({ providerId: parsed.providerId, label: parsed.label, auth: parsed.auth }),
+    });
     message.success("授权文件已导入账号池");
     importModal.value = false;
-    Object.assign(importForm, { providerId: "", label: "", json: "" });
+    Object.assign(importForm, { providerId: "", label: "", json: "", filename: "" });
     await load();
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
   }
 }
 watch(oauthModal, (open) => { if (!open) stopPolling(); });
-onMounted(load);
+onMounted(async () => {
+  await load();
+  if (route.query.import === "1") importModal.value = true;
+});
 onBeforeUnmount(stopPolling);
 </script>
 
 <template>
   <page-header title="授权" description="集中完成内置渠道 OAuth 和授权文件导入；授权成功后账号会自动进入账号池。">
-    <n-button @click="importModal = true"><template #icon><file-json /></template>导入授权 JSON</n-button>
+    <n-button @click="importModal = true"><template #icon><file-json /></template>导入认证文件</n-button>
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新</n-button>
   </page-header>
 
@@ -183,12 +232,16 @@ onBeforeUnmount(stopPolling);
   </n-spin>
   <div v-if="authChannels.length > pageSize" class="pagination-row"><n-pagination v-model:page="page" v-model:page-size="pageSize" :item-count="authChannels.length" :page-sizes="[6, 12, 24]" show-size-picker /></div>
 
-  <n-modal v-model:show="importModal" preset="card" title="导入授权 JSON" style="width:min(680px,calc(100vw - 32px))">
+  <n-modal v-model:show="importModal" preset="card" title="导入认证文件" style="width:min(680px,calc(100vw - 32px))">
     <n-form label-placement="top">
-      <n-form-item label="内置渠道"><n-select v-model:value="importForm.providerId" :options="channelOptions" filterable /></n-form-item>
+      <n-alert type="warning" :bordered="false" style="margin-bottom:16px">认证文件包含可登录账号的敏感 Token。仅导入可信文件，导入后不要上传到代码仓库或公开分享。</n-alert>
+      <n-form-item label="选择 JSON 文件">
+        <input class="auth-file-input" type="file" accept=".json,application/json" @change="readImportFile" />
+      </n-form-item>
+      <n-form-item label="内置渠道"><n-select v-model:value="importForm.providerId" :options="channelOptions" filterable placeholder="可从文件的 type/provider_id 自动识别" /></n-form-item>
       <n-form-item label="标签"><n-input v-model:value="importForm.label" placeholder="例如 工作账号 / 组织账号" /></n-form-item>
-      <n-form-item label="JSON 内容"><n-input v-model:value="importForm.json" type="textarea" :rows="10" placeholder='{"access_token":"...","refresh_token":"..."}' /></n-form-item>
-      <n-space justify="end"><n-button @click="importModal = false">取消</n-button><n-button type="primary" :disabled="!importForm.providerId || !importForm.json.trim()" @click="importJson">导入</n-button></n-space>
+      <n-form-item label="JSON 内容"><n-input v-model:value="importForm.json" type="textarea" :rows="10" placeholder='选择 JSON 文件，或粘贴 {"access_token":"...","refresh_token":"..."}' /></n-form-item>
+      <n-space justify="end"><n-button @click="importModal = false">取消</n-button><n-button type="primary" :disabled="!importForm.json.trim()" @click="importJson">导入</n-button></n-space>
     </n-form>
   </n-modal>
 
@@ -213,4 +266,5 @@ onBeforeUnmount(stopPolling);
 .auth-card__id { margin-top: 2px; font-size: 12px; font-family: "SFMono-Regular", Consolas, monospace; }
 .auth-card__description { min-height: 42px; margin: 16px 0 20px; }
 .auth-card__footer { padding-top: 14px; border-top: 1px solid var(--n-border-color); }
+.auth-file-input { width: 100%; padding: 10px 12px; border: 1px dashed var(--n-border-color); border-radius: 8px; background: var(--n-color); color: var(--n-text-color); }
 </style>
