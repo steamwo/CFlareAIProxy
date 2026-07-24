@@ -13,9 +13,6 @@
   </p>
 </div>
 
-> [!IMPORTANT]
-> 本文档对应 **`dev` 分支**。该分支可能领先于 `main`，适合测试最新路由、协议适配和管理端能力；生产升级前请先阅读 [部署与升级指南](DEPLOYMENT.md) 并执行完整校验。
-
 ## CFlareAIProxy 能做什么
 
 CFlareAIProxy 把不同上游的授权方式、请求协议、账号池和故障语义收敛成统一的 OpenAI-compatible API。客户端只持有网关 Key，上游 OAuth Token、API Key 和代理地址均由服务端加密保存。
@@ -77,16 +74,15 @@ flowchart LR
 
 ## 快速开始
 
-### 环境要求
+### 环境建议
 
-- Node.js `>= 20.19`
+- 推荐 Node.js `22.13.0` 或更高版本；仓库固定使用 pnpm `11.9.x`，该建议来自构建工具链，不是 Cloudflare Worker 运行时的硬性要求
 - pnpm `11.9.x`
 - 一个可用的 Cloudflare 账号（远程部署时）
 
 ```bash
 git clone https://github.com/steamwo/CFlareAIProxy.git
 cd CFlareAIProxy
-git switch dev
 pnpm install
 pnpm run doctor
 pnpm run dev
@@ -213,7 +209,7 @@ pnpm run deploy
 Cloudflare Git 连接推荐配置：
 
 ```text
-Production branch: main（或你明确用于生产的分支）
+Production branch: 你的生产分支
 Root directory: /
 Build command: pnpm run build
 Deploy command: node scripts/deploy.mjs
@@ -285,7 +281,7 @@ pnpm run smoke:admin
 | [Codex 授权](docs/CODEX_LOCAL_AUTH.md) | 管理台 PKCE、本地助手、CLI 同步与代理。 |
 | [OpenCode Zen 适配](docs/OPENCODE_UPSTREAM.md) | 多协议转换、匿名模型、官方/镜像故障转移。 |
 | [CLIProxyAPI 对齐记录](COPY.md) | 行为参考范围、明确差异和后续同步规则。 |
-| [变更记录](CHANGELOG.md) | 已发布版本与 `dev` 分支开发变化。 |
+| [变更记录](CHANGELOG.md) | 已发布版本与尚未发布的变化。 |
 
 ## 项目边界
 
