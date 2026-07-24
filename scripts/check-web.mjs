@@ -21,6 +21,7 @@ const router=readFileSync(join(root,"web/src/router.ts"),"utf8");
 if(!router.includes('path: "authorization"')||!router.includes("AuthorizationView.vue")) errors.push("独立授权页面未接入路由");
 const accounts=readFileSync(join(root,"web/src/views/AccountsView.vue"),"utf8");
 if(accounts.includes("添加账号 / API Key")||accounts.includes('api<{ data: Provider[] }>("/providers")')) errors.push("账号池仍暴露自定义供应商 API Key 管理入口");
+if(!accounts.includes("只展示通过内置渠道 OAuth")||!accounts.includes("前往授权")) errors.push("账号池未明确限定内置渠道授权账号");
 const worker=readFileSync(join(root,"src/index.ts"),"utf8");
 if(!worker.includes("ACCOUNT_POOL_PROVIDER_IDS")||!worker.includes("provider_id IN")) errors.push("账号池分页接口未限制为内置渠道");
 const models=readFileSync(join(root,"web/src/views/ModelsView.vue"),"utf8");
