@@ -9,13 +9,19 @@ export type ProviderKind =
 export type GatewayEndpoint = "responses" | "chat" | "completions";
 export type PoolStrategy = "round_robin" | "fill_first" | "weighted" | "least_inflight";
 export type ProxyProtocol = "http" | "https" | "socks" | "socks4" | "socks4a" | "socks5" | "socks5h";
+export type LogLevel = "error" | "warn" | "info" | "debug";
+
+export interface LoggingSettings {
+  requestLoggingEnabled: boolean;
+  level: LogLevel;
+}
 
 export interface Env {
   DB: D1Database;
   CONFIG_CACHE: KVNamespace;
   ACCOUNT_POOL: DurableObjectNamespace;
   RATE_LIMITER: DurableObjectNamespace;
-  USAGE_QUEUE: Queue<UsageEvent>;
+  USAGE_QUEUE: Queue<UsageQueueEvent>;
   ASSETS: Fetcher;
   MASTER_KEY: string;
   ADMIN_TOKEN: string;
@@ -47,7 +53,6 @@ export interface ProviderRow {
   created_at: number;
   updated_at: number;
 }
-
 
 export interface ProviderProxyRow {
   provider_id: string;
@@ -246,6 +251,36 @@ export interface UsageEvent {
   errorMessage?: string;
   createdAt: number;
 }
+
+export interface UsageAggregateEvent {
+  kind: "aggregate";
+  bucket: number;
+  sourceId: string;
+  gatewayKeyId: string;
+  providerId: string;
+  credentialId: string;
+  publicModel: string;
+  upstreamModel: string;
+  endpoint: string;
+  requests: number;
+  successes: number;
+  failures: number;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+  totalTokens: number;
+  latencySumMs: number;
+  firstTokenSumMs: number;
+  firstTokenSamples: number;
+  updatedAt: number;
+}
+
+export interface UsageErrorEvent {
+  kind: "error";
+  event: UsageEvent;
+}
+
+export type UsageQueueEvent = UsageAggregateEvent | UsageErrorEvent;
 
 export type UpstreamResponseMode =
   | "passthrough"
