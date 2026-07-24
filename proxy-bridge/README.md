@@ -1,8 +1,26 @@
-# CFlareAIProxy Proxy Bridge
+# CFlareAIProxy Proxy Bridge（旧部署兼容）
 
-CFlareAIProxy 供应商级代理桥接服务。Cloudflare Worker 将签名后的 HTTP 请求发送到 Bridge，Bridge 再通过指定的 HTTP、HTTPS 或 SOCKS 代理访问供应商，并把响应流原样转回 Worker。
+> [!WARNING]
+> 当前 `dev` 分支的 Cloudflare Worker 已原生支持 HTTP CONNECT 与 SOCKS5 代理。**新部署不需要 Proxy Bridge，也不应默认配置 `PROXY_BRIDGE_URL` / `PROXY_BRIDGE_TOKEN`。**
 
-## 支持的代理 URL
+本目录只为仍在维护旧版本 Worker 的用户保留。旧 Worker 会把签名后的 HTTP 请求发送到 Bridge，Bridge 再通过指定的 HTTP、HTTPS 或 SOCKS 代理访问上游，并把响应流转回 Worker。
+
+当前原生代理文档见：
+
+- [代理与出口策略](../docs/PROVIDER_PROXY.md)
+- [部署与升级指南](../DEPLOYMENT.md)
+
+## 什么时候才需要使用
+
+仅在以下情况考虑 Bridge：
+
+- 仍运行不支持 Worker 原生 Socket 代理的旧版本；
+- 旧部署配置和运维流程暂时无法升级；
+- 已明确确认当前 Worker 代码仍会读取并调用 Bridge。
+
+不要为了普通 HTTP / SOCKS5 代理在新版本中新增一个 Node.js 转发服务。它会增加凭据、网络、部署、监控和攻击面。
+
+## 旧版支持的代理 URL
 
 ```text
 http://user:pass@host:port
@@ -16,7 +34,7 @@ socks5h://user:pass@host:port
 
 推荐远程 DNS 解析时使用 `socks5h://`。
 
-## 启动
+## 启动旧 Bridge
 
 ```bash
 npm install
@@ -48,29 +66,31 @@ docker compose up -d --build
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `PORT` | `9090` | 监听端口 |
-| `CFLARE_PROXY_TOKEN` | 无 | 必填，和管理台中的 Bridge Token 一致 |
-| `CFLARE_PROXY_TOKENS` | 无 | 可选，逗号分隔的多 Token，用于轮换 |
-| `CFLARE_PROXY_ALLOWED_HOSTS` | 所有 | 可选，允许访问的上游域名列表，例如 `auth.openai.com,chatgpt.com,api.openai.com` |
-| `CFLARE_PROXY_MAX_BODY_BYTES` | `16777216` | 最大请求体大小 |
-| `CFLARE_PROXY_MAX_CLOCK_SKEW_SECONDS` | `300` | 签名时间允许偏差 |
+| --- | ---: | --- |
+| `PORT` | `9090` | 监听端口。 |
+| `CFLARE_PROXY_TOKEN` | 无 | 必填，和旧 Worker 中的 Bridge Token 一致。 |
+| `CFLARE_PROXY_TOKENS` | 无 | 可选，逗号分隔的多 Token，用于轮换。 |
+| `CFLARE_PROXY_ALLOWED_HOSTS` | 所有 | 可选，允许访问的上游域名列表。 |
+| `CFLARE_PROXY_MAX_BODY_BYTES` | `16777216` | 最大请求体大小。 |
+| `CFLARE_PROXY_MAX_CLOCK_SKEW_SECONDS` | `300` | 签名时间允许偏差。 |
 
-## 生产部署
+## 旧版生产部署
 
-Bridge 是 Node.js 服务，不运行在 Workers 中。部署到带 HTTPS 的 VPS、容器平台或内网机器，并通过反向代理或 Cloudflare Tunnel 暴露 HTTPS 地址。管理台填写的是 Bridge 基址，例如：
+Bridge 是 Node.js 服务，不运行在 Workers 中。应部署到带 HTTPS 的 VPS、容器平台或内网机器，并通过反向代理或 Cloudflare Tunnel 暴露 HTTPS 地址。
+
+旧 Worker 中的 Bridge 基址示例：
 
 ```text
 https://proxy-bridge.example.com
 ```
 
-也可以填写完整路径：
+或完整路径：
 
 ```text
 https://proxy-bridge.example.com/v1/forward
 ```
 
-本地 Worker 开发可以使用：
+本地旧 Worker 开发可以使用：
 
 ```text
 http://127.0.0.1:9090
@@ -81,5 +101,7 @@ http://127.0.0.1:9090
 - Bridge 必须使用强随机 Token；
 - 生产环境必须使用 HTTPS；
 - 尽量设置 `CFLARE_PROXY_ALLOWED_HOSTS`；
-- 不要在日志中输出代理 URL，其中可能包含用户名和密码；
-- Bridge 不接受任意客户端请求，所有转发请求都必须通过 HMAC 签名验证。
+- 不要在日志中输出代理 URL；
+- 所有转发请求必须通过 HMAC 签名验证；
+- 不再需要 Bridge 后，应删除 Worker 变量、关闭服务并撤销 Token；
+- 升级到原生代理后，使用管理台“验证出口 IP”确认新链路再下线旧 Bridge。
