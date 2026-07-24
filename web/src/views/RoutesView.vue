@@ -87,8 +87,6 @@ const displayRows = computed<RouteDisplay[]>(() => {
     if (!existing.endpoints.includes(row.endpoint)) existing.endpoints.push(row.endpoint);
     existing.routeIds.push(row.id);
     existing.endpointStates.push({ endpoint: row.endpoint, availability: row.availability });
-    existing.created_at = Math.min(existing.created_at, row.created_at);
-    existing.updated_at = Math.max(existing.updated_at, row.updated_at);
   }
   return output.map((row) => ({
     ...row,
