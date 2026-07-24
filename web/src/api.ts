@@ -21,7 +21,8 @@ async function parseResponse<T>(response: Response): Promise<T> {
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
-  const response = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials: "same-origin" });
+  const resolvedPath = path === "/overview" ? "/overview-v2" : path;
+  const response = await fetch(`${API_BASE}${resolvedPath}`, { ...init, headers, credentials: "same-origin" });
   return parseResponse<T>(response);
 }
 
