@@ -28,7 +28,10 @@ export function openCodeAnonymousCredentialRow(): CredentialRow {
     enabled: 1,
     priority: 1000,
     weight: 1,
-    max_concurrency: 2,
+    // The public mirror chain is not a scarce account credential. Keep the
+    // pool guard high enough that normal concurrent OpenCode sessions do not
+    // get rejected as "busy" before mirror failover can run.
+    max_concurrency: 1000,
     metadata_json: JSON.stringify({ anonymous: true }),
     last_error: null,
     last_used_at: null,
