@@ -85,6 +85,47 @@ app.get("/oauth/callback/:provider", async (c) => {
   }
 });
 
+// A browser tab can keep an old Vite entry bundle open across deployments. If
+// that bundle requests a fingerprinted route chunk which no longer exists,
+// Workers Static Assets falls through to the Worker. Return a tiny valid module
+// which refreshes the SPA shell instead of leaving navigation permanently stuck.
+app.get("/admin/assets/*", (c) => {
+  const pathname = new URL(c.req.url).pathname;
+  if (!pathname.endsWith(".js")) {
+    return c.json({ error: { message: "Asset not found", type: "invalid_request_error", code: "ASSET_NOT_FOUND" } }, 404, {
+      "cache-control": "no-store",
+    });
+  }
+
+  const recoveryModule = `
+const key = "cflare:chunk-reload-at";
+const parameter = "__asset_reload";
+const now = Date.now();
+try {
+  const previous = Number(window.sessionStorage.getItem(key)) || 0;
+  if (now - previous > 30000) {
+    window.sessionStorage.setItem(key, String(now));
+    const url = new URL(window.location.href);
+    url.searchParams.set(parameter, String(now));
+    window.location.replace(url.toString());
+  }
+} catch {
+  window.location.reload();
+}
+console.error("A stale CFlareAIProxy asset was requested; refreshing the application.", import.meta.url);
+export default { render: () => null };
+`;
+
+  return new Response(recoveryModule, {
+    status: 200,
+    headers: {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
+});
+
 app.notFound((c) => c.json({ error: { message: "Not found", type: "invalid_request_error", code: "NOT_FOUND" } }, 404));
 app.onError((error) => errorResponse(error));
 
