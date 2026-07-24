@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (`dev`)
+## Unreleased
 
 ### Gateway runtime
 
