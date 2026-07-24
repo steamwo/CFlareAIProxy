@@ -77,13 +77,13 @@ onMounted(load);
         开启后，成功和失败请求先在 RateLimiter Durable Object 中按 5 分钟聚合，再以聚合消息写入 Queue；成功请求不会永久保存明细，失败请求才会进入错误日志表。
       </n-alert>
       <n-alert type="warning" :bordered="false" class="settings-alert">
-        关闭后不会产生新的请求统计，账号池近 2 小时状态和概览调用量将逐渐变为空。调试级别还会增加 Workers Logs 写入量，免费版不建议长期启用。
+        关闭后会停止新的请求统计、错误明细和本功能产生的结构化运行日志；账号池近 2 小时状态和概览调用量将逐渐变为空。调试级别日志量最大，免费版不建议长期启用。
       </n-alert>
-      <n-form-item label="记录请求统计">
+      <n-form-item label="开启请求日志与统计">
         <n-switch v-model:value="logging.requestLoggingEnabled" />
       </n-form-item>
       <n-form-item label="运行日志级别">
-        <n-select v-model:value="logging.level" :options="levelOptions" />
+        <n-select v-model:value="logging.level" :options="levelOptions" :disabled="!logging.requestLoggingEnabled" />
       </n-form-item>
       <n-button type="primary" :loading="savingLogging" @click="saveLogging">
         <template #icon><save /></template>保存日志设置
