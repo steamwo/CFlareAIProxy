@@ -93,16 +93,34 @@ export function validateModelCapabilities(body: Record<string, unknown>, capabil
 }
 
 export async function enrichModelsWithCapabilities(env: Env, models: Array<Record<string, unknown>>): Promise<Array<Record<string, unknown>>> {
-  const result = await env.DB.prepare(
-    `SELECT provider_id,model_id,capabilities_json,MAX(discovered_at) AS discovered_at
-     FROM discovered_models WHERE enabled=1 GROUP BY provider_id,model_id`,
-  ).all<{ provider_id: string; model_id: string; capabilities_json: string; discovered_at: number }>().catch(() => ({ results: [] }));
-  const discovered = new Map<string, ModelCapabilities>(result.results.map((row) => [`${row.provider_id}/${row.model_id}`, normalizeCapabilities(parseJson(row.capabilities_json, {}))] as const));
+  const [discoveredResult, routeResult] = await Promise.all([
+    env.DB.prepare(
+      `SELECT provider_id,model_id,capabilities_json,MAX(discovered_at) AS discovered_at
+       FROM discovered_models WHERE enabled=1 GROUP BY provider_id,model_id`,
+    ).all<{ provider_id: string; model_id: string; capabilities_json: string; discovered_at: number }>().catch(() => ({ results: [] })),
+    env.DB.prepare(
+      `SELECT public_model,provider_id,upstream_model,options_json
+       FROM model_routes WHERE enabled=1 ORDER BY priority ASC,created_at ASC`,
+    ).all<{ public_model: string; provider_id: string; upstream_model: string; options_json: string }>().catch(() => ({ results: [] })),
+  ]);
+  const discovered = new Map<string, ModelCapabilities>(discoveredResult.results.map((row) => [
+    `${row.provider_id}/${row.model_id}`,
+    normalizeCapabilities(parseJson(row.capabilities_json, {})),
+  ] as const));
+  const routed = new Map<string, ModelCapabilities>();
+  for (const route of routeResult.results) {
+    if (routed.has(route.public_model)) continue;
+    const options = parseJson<Record<string, unknown>>(route.options_json, {});
+    const configured = normalizeCapabilities(options.capabilities ?? options.model_capabilities);
+    const upstream = discovered.get(`${route.provider_id}/${route.upstream_model}`) ?? {};
+    routed.set(route.public_model, mergeCapabilities(configured, upstream));
+  }
   return models.map((model) => {
-    const key = typeof model.x_cflare_provider === "string" && typeof model.x_cflare_upstream_model === "string"
+    const directKey = typeof model.x_cflare_provider === "string" && typeof model.x_cflare_upstream_model === "string"
       ? `${model.x_cflare_provider}/${model.x_cflare_upstream_model}`
-      : typeof model.id === "string" ? model.id : "";
-    const capabilities = discovered.get(key);
+      : "";
+    const publicModel = typeof model.id === "string" ? model.id : "";
+    const capabilities = (directKey ? discovered.get(directKey) : undefined) ?? routed.get(publicModel);
     return capabilities && Object.values(capabilities).some((value) => value !== undefined)
       ? { ...model, x_cflare_capabilities: capabilities }
       : model;
