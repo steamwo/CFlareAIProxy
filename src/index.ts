@@ -10,7 +10,7 @@ import { ensureOpenCodeAnonymousModels, refreshCredentialModels } from "./models
 import { proxyGeneration } from "./proxy-v2";
 import { refreshCredentialQuota } from "./quota";
 import { RateLimiter } from "./rate-limiter";
-import type { Env, UsageEvent } from "./types";
+import type { CredentialRow, Env, QuotaSnapshot, QuotaSnapshotRow, UsageEvent } from "./types";
 import { parseJson } from "./utils";
 
 export { AccountPool, RateLimiter };
@@ -63,7 +63,67 @@ app.post("/v1/chat/completions", (c) => proxyGeneration(c, "chat"));
 app.post("/v1/completions", (c) => proxyGeneration(c, "completions"));
 
 app.get("/", (c) => c.redirect("/admin", 302));
-app.route("/", createAdminApp());
+
+const adminApp = createAdminApp();
+
+// Keep the original /credentials response backward-compatible while giving the
+// account-pool UI a real D1-backed paginated query. The existing /api/* admin
+// middleware on adminApp also protects routes registered after construction.
+adminApp.get("/api/credentials/paged", async (c) => {
+  const queryInteger = (value: string | undefined, fallback: number, maximum: number): number => {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
+  };
+
+  const requestedPage = queryInteger(c.req.query("page"), 1, 1_000_000);
+  const pageSize = queryInteger(c.req.query("pageSize"), 9, 100);
+  const provider = c.req.query("provider")?.trim() || "";
+  const countStatement = provider
+    ? c.env.DB.prepare("SELECT COUNT(*) AS total FROM credentials WHERE provider_id=?").bind(provider)
+    : c.env.DB.prepare("SELECT COUNT(*) AS total FROM credentials");
+  const count = await countStatement.first<{ total: number }>();
+  const total = Number(count?.total ?? 0);
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, pageCount);
+  const offset = (page - 1) * pageSize;
+  const dataStatement = provider
+    ? c.env.DB.prepare("SELECT * FROM credentials WHERE provider_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(provider, pageSize, offset)
+    : c.env.DB.prepare("SELECT * FROM credentials ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(pageSize, offset);
+  const result = await dataStatement.all<CredentialRow>();
+  const data = result.results.map(({ secret_ciphertext, refresh_ciphertext, metadata_json, ...row }) => ({
+    ...row,
+    metadata_json,
+    has_refresh_token: Boolean(refresh_ciphertext),
+    key_hint: secret_ciphertext ? "AES-GCM" : "",
+    metadata: parseJson<Record<string, unknown>>(metadata_json, {}),
+  }));
+
+  let quotas: Array<QuotaSnapshotRow & { snapshot: QuotaSnapshot; credential_label: string; provider_name: string }> = [];
+  if (data.length) {
+    const placeholders = data.map(() => "?").join(",");
+    const quotaResult = await c.env.DB.prepare(
+      `SELECT q.*, c.label AS credential_label, p.name AS provider_name
+       FROM quota_snapshots q
+       JOIN credentials c ON c.id=q.credential_id
+       JOIN providers p ON p.id=q.provider_id
+       WHERE q.credential_id IN (${placeholders})
+       ORDER BY p.name,c.priority,c.created_at`,
+    ).bind(...data.map((row) => row.id)).all<QuotaSnapshotRow & { credential_label: string; provider_name: string }>();
+    quotas = quotaResult.results.map((row) => ({
+      ...row,
+      snapshot: parseJson<QuotaSnapshot>(row.quota_json, {
+        provider: row.provider_id,
+        status: row.status,
+        windows: [],
+        source: "configured",
+      }),
+    }));
+  }
+
+  return c.json({ data, quotas, total, page, pageSize, pageCount });
+});
+
+app.route("/", adminApp);
 
 app.get("/oauth/callback/:provider", async (c) => {
   try {
