@@ -18,7 +18,8 @@ export { AccountPool, RateLimiter };
 
 const app = new Hono<{ Bindings: Env }>({ strict: false });
 const ACCOUNT_POOL_PROVIDER_IDS = BUILTIN_CHANNELS.map((channel) => channel.id);
-const DAY_SECONDS = 24 * 60 * 60;
+const ACTIVITY_BUCKET_SECONDS = 5 * 60;
+const ACTIVITY_BUCKET_COUNT = 24;
 
 app.use("/v1/*", cors({
   origin: "*",
@@ -99,7 +100,7 @@ adminApp.get("/api/credentials/paged", async (c) => {
   };
 
   const requestedPage = queryInteger(c.req.query("page"), 1, 1_000_000);
-  const pageSize = queryInteger(c.req.query("pageSize"), 9, 100);
+  const pageSize = queryInteger(c.req.query("pageSize"), 6, 100);
   const provider = c.req.query("provider")?.trim() || "";
   if (provider && !ACCOUNT_POOL_PROVIDER_IDS.some((id) => id === provider)) {
     return c.json({ data: [], quotas: [], activity: {}, total: 0, page: 1, pageSize, pageCount: 1 });
@@ -128,45 +129,66 @@ adminApp.get("/api/credentials/paged", async (c) => {
   }));
 
   let quotas: Array<QuotaSnapshotRow & { snapshot: QuotaSnapshot; credential_label: string; provider_name: string }> = [];
-  const activity: Record<string, Array<{
-    day: number;
-    requests: number;
-    successes: number;
-    failures: number;
-    tokens: number;
-  }>> = {};
+  const activity: Record<string, {
+    buckets: Array<{
+      bucket: number;
+      requests: number;
+      successes: number;
+      failures: number;
+      tokens: number;
+    }>;
+    totals: {
+      requests: number;
+      successes: number;
+      failures: number;
+    };
+  }> = {};
   if (data.length) {
     const credentialIds = data.map((row) => row.id);
-    const quotaPlaceholders = credentialIds.map(() => "?").join(",");
-    const today = Math.floor(Math.floor(Date.now() / 1000) / DAY_SECONDS) * DAY_SECONDS;
-    const activitySince = today - 27 * DAY_SECONDS;
-    const [quotaResult, activityResult] = await Promise.all([
+    const credentialPlaceholders = credentialIds.map(() => "?").join(",");
+    const currentBucket = Math.floor(Math.floor(Date.now() / 1000) / ACTIVITY_BUCKET_SECONDS) * ACTIVITY_BUCKET_SECONDS;
+    const activitySince = currentBucket - (ACTIVITY_BUCKET_COUNT - 1) * ACTIVITY_BUCKET_SECONDS;
+    const [quotaResult, recentActivityResult, totalActivityResult] = await Promise.all([
       c.env.DB.prepare(
         `SELECT q.*, c.label AS credential_label, p.name AS provider_name
          FROM quota_snapshots q
          JOIN credentials c ON c.id=q.credential_id
          JOIN providers p ON p.id=q.provider_id
-         WHERE q.credential_id IN (${quotaPlaceholders})
+         WHERE q.credential_id IN (${credentialPlaceholders})
          ORDER BY p.name,c.priority,c.created_at`,
       ).bind(...credentialIds).all<QuotaSnapshotRow & { credential_label: string; provider_name: string }>(),
       c.env.DB.prepare(
         `SELECT credential_id,
-           CAST(created_at / ${DAY_SECONDS} AS INTEGER) * ${DAY_SECONDS} AS day,
+           CAST(created_at / ${ACTIVITY_BUCKET_SECONDS} AS INTEGER) * ${ACTIVITY_BUCKET_SECONDS} AS bucket,
            COUNT(*) AS requests,
            SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) AS successes,
-           SUM(CASE WHEN status_code < 200 OR status_code >= 400 THEN 1 ELSE 0 END) AS failures,
+           SUM(CASE WHEN status_code IS NULL OR status_code < 200 OR status_code >= 400 THEN 1 ELSE 0 END) AS failures,
            COALESCE(SUM(total_tokens), 0) AS tokens
          FROM request_logs
-         WHERE credential_id IN (${quotaPlaceholders}) AND created_at >= ?
-         GROUP BY credential_id, day
-         ORDER BY credential_id, day`,
+         WHERE credential_id IN (${credentialPlaceholders}) AND created_at >= ?
+         GROUP BY credential_id, bucket
+         ORDER BY credential_id, bucket`,
       ).bind(...credentialIds, activitySince).all<{
         credential_id: string;
-        day: number;
+        bucket: number;
         requests: number;
         successes: number | null;
         failures: number | null;
         tokens: number;
+      }>(),
+      c.env.DB.prepare(
+        `SELECT credential_id,
+           COUNT(*) AS requests,
+           SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) AS successes,
+           SUM(CASE WHEN status_code IS NULL OR status_code < 200 OR status_code >= 400 THEN 1 ELSE 0 END) AS failures
+         FROM request_logs
+         WHERE credential_id IN (${credentialPlaceholders})
+         GROUP BY credential_id`,
+      ).bind(...credentialIds).all<{
+        credential_id: string;
+        requests: number;
+        successes: number | null;
+        failures: number | null;
       }>(),
     ]);
     quotas = quotaResult.results.map((row) => ({
@@ -178,14 +200,24 @@ adminApp.get("/api/credentials/paged", async (c) => {
         source: "configured",
       }),
     }));
-    for (const row of activityResult.results) {
-      (activity[row.credential_id] ??= []).push({
-        day: Number(row.day),
+    for (const id of credentialIds) {
+      activity[id] = { buckets: [], totals: { requests: 0, successes: 0, failures: 0 } };
+    }
+    for (const row of recentActivityResult.results) {
+      activity[row.credential_id]?.buckets.push({
+        bucket: Number(row.bucket),
         requests: Number(row.requests),
         successes: Number(row.successes ?? 0),
         failures: Number(row.failures ?? 0),
         tokens: Number(row.tokens ?? 0),
       });
+    }
+    for (const row of totalActivityResult.results) {
+      activity[row.credential_id].totals = {
+        requests: Number(row.requests),
+        successes: Number(row.successes ?? 0),
+        failures: Number(row.failures ?? 0),
+      };
     }
   }
 
