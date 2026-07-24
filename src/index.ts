@@ -75,7 +75,7 @@ const adminApp = createAdminApp();
 
 adminApp.get("/api/settings/logging", async (c) => c.json({ data: await getLoggingSettings(c.env) }));
 adminApp.put("/api/settings/logging", async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({}));
   const level = typeof body.level === "string" && LOG_LEVELS.has(body.level as LogLevel)
     ? body.level as LogLevel
     : undefined;
