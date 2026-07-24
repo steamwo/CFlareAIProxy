@@ -1,6 +1,6 @@
 # 验证与发布检查
 
-本文档是 `dev` 分支的可重复验证清单。它不把某一次沙箱运行结果当作永久结论；每次准备合并或发布时都应重新执行，并在 PR / Release 中记录真实输出。
+本文档是一份可重复执行的验证清单，不把某一次沙箱运行结果当作永久结论。每次准备合并或发布时都应重新执行，并在 PR / Release 中记录真实输出。
 
 ## 1. 一键检查
 
@@ -38,7 +38,7 @@ pnpm run smoke:admin
 7. Wrangler dry-run；
 8. 汇总步骤结果并在任一步骤失败时让 Job 失败。
 
-CI 使用 Node.js 22 与 pnpm 11.9。Cloudflare Builds 也应使用 Node.js 20.19 或更高版本。
+CI 使用 Node.js 22.13 与 pnpm 11.9。使用仓库固定的 pnpm 11.9 时，推荐本地和 Cloudflare Builds 使用 Node.js 22.13.0 或更高版本；这是构建工具链建议，不是 Worker 运行时的硬性要求。
 
 ## 3. 配置与构建检查
 
