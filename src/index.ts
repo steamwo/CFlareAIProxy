@@ -3,15 +3,17 @@ import { cors } from "hono/cors";
 import { createAdminApp } from "./admin";
 import { AccountPool } from "./account-pool";
 import { BUILTIN_CHANNELS } from "./builtin-channels";
-import { authenticateGatewayKey, getCredential, insertUsage, listModels } from "./db";
+import { authenticateGatewayKey, getCredential, listModels } from "./db";
 import { GatewayError, errorResponse } from "./errors";
+import { getLoggingSettings, runtimeLog, updateLoggingSettings } from "./logging-settings";
 import { enrichModelsWithCapabilities } from "./model-capabilities";
 import { exchangeOAuthCode } from "./oauth";
 import { ensureOpenCodeAnonymousModels, refreshCredentialModels } from "./models";
 import { proxyGeneration } from "./proxy-v2";
 import { refreshCredentialQuota } from "./quota";
 import { RateLimiter } from "./rate-limiter";
-import type { CredentialRow, Env, QuotaSnapshot, QuotaSnapshotRow, UsageEvent } from "./types";
+import type { CredentialRow, Env, LogLevel, QuotaSnapshot, QuotaSnapshotRow, UsageQueueEvent } from "./types";
+import { persistUsageQueueBatch } from "./usage-storage";
 import { parseJson } from "./utils";
 
 export { AccountPool, RateLimiter };
@@ -20,6 +22,7 @@ const app = new Hono<{ Bindings: Env }>({ strict: false });
 const ACCOUNT_POOL_PROVIDER_IDS = BUILTIN_CHANNELS.map((channel) => channel.id);
 const ACTIVITY_BUCKET_SECONDS = 5 * 60;
 const ACTIVITY_BUCKET_COUNT = 24;
+const LOG_LEVELS = new Set<LogLevel>(["error", "warn", "info", "debug"]);
 
 app.use("/v1/*", cors({
   origin: "*",
@@ -69,6 +72,92 @@ app.post("/v1/completions", (c) => proxyGeneration(c, "completions"));
 app.get("/", (c) => c.redirect("/admin", 302));
 
 const adminApp = createAdminApp();
+
+adminApp.get("/api/settings/logging", async (c) => c.json({ data: await getLoggingSettings(c.env) }));
+adminApp.put("/api/settings/logging", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const level = typeof body.level === "string" && LOG_LEVELS.has(body.level as LogLevel)
+    ? body.level as LogLevel
+    : undefined;
+  if (body.level !== undefined && !level) {
+    throw new GatewayError(400, "LOG_LEVEL_INVALID", "日志级别必须为 error、warn、info 或 debug", "invalid_request_error");
+  }
+  const requestLoggingEnabled = typeof body.requestLoggingEnabled === "boolean"
+    ? body.requestLoggingEnabled
+    : undefined;
+  return c.json({
+    ok: true,
+    data: await updateLoggingSettings(c.env, { requestLoggingEnabled, level }),
+  });
+});
+
+adminApp.get("/api/overview-v2", async (c) => {
+  const now = Math.floor(Date.now() / 1000);
+  const since = now - 24 * 60 * 60;
+  const availabilitySince = now - 7 * 24 * 60 * 60;
+  const [providerCounts, credentialCounts, routeCounts, keyCounts, usage, providerUsage, modelUsage, availability] = await Promise.all([
+    c.env.DB.prepare("SELECT COUNT(*) total, SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) enabled FROM providers").first<{ total: number; enabled: number | null }>(),
+    c.env.DB.prepare("SELECT COUNT(*) total, SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) enabled, SUM(CASE WHEN last_error IS NOT NULL AND last_error<>'' THEN 1 ELSE 0 END) errors FROM credentials").first<{ total: number; enabled: number | null; errors: number | null }>(),
+    c.env.DB.prepare("SELECT COUNT(*) total, SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) enabled FROM model_routes").first<{ total: number; enabled: number | null }>(),
+    c.env.DB.prepare("SELECT COUNT(*) total, SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) enabled FROM gateway_keys").first<{ total: number; enabled: number | null }>(),
+    c.env.DB.prepare(
+      `SELECT COALESCE(SUM(requests),0) requests,
+        COALESCE(SUM(successes),0) successes,
+        COALESCE(SUM(total_tokens),0) tokens,
+        COALESCE(SUM(cost_micros),0) cost_micros,
+        COALESCE(SUM(latency_sum_ms)*1.0/NULLIF(SUM(requests),0),0) average_latency_ms,
+        COALESCE(SUM(first_token_sum_ms)*1.0/NULLIF(SUM(first_token_samples),0),0) average_first_token_ms
+       FROM request_activity_5m WHERE bucket>=?`,
+    ).bind(since).first<{ requests: number; successes: number; tokens: number; cost_micros: number; average_latency_ms: number; average_first_token_ms: number }>(),
+    c.env.DB.prepare(
+      `SELECT provider_id, COALESCE(SUM(requests),0) requests, COALESCE(SUM(total_tokens),0) tokens
+       FROM request_activity_5m WHERE bucket>=? GROUP BY provider_id ORDER BY requests DESC LIMIT 10`,
+    ).bind(since).all<{ provider_id: string; requests: number; tokens: number }>(),
+    c.env.DB.prepare(
+      `SELECT public_model, COALESCE(SUM(requests),0) requests, COALESCE(SUM(total_tokens),0) tokens
+       FROM request_activity_5m WHERE bucket>=? GROUP BY public_model ORDER BY requests DESC LIMIT 10`,
+    ).bind(since).all<{ public_model: string; requests: number; tokens: number }>(),
+    c.env.DB.prepare(
+      `SELECT CAST(bucket/3600 AS INTEGER)*3600 AS bucket,
+        COALESCE(SUM(requests),0) requests,
+        COALESCE(SUM(successes),0) successes,
+        COALESCE(SUM(latency_sum_ms)*1.0/NULLIF(SUM(requests),0),0) average_latency_ms
+       FROM request_activity_5m WHERE bucket>=?
+       GROUP BY CAST(bucket/3600 AS INTEGER) ORDER BY bucket`,
+    ).bind(availabilitySince).all<{ bucket: number; requests: number; successes: number; average_latency_ms: number }>(),
+  ]);
+  const requests = Number(usage?.requests ?? 0);
+  const successes = Number(usage?.successes ?? 0);
+  return c.json({
+    service: c.env.APP_NAME ?? "CFlareAIProxy",
+    publicBaseUrl: c.env.PUBLIC_BASE_URL || new URL(c.req.url).origin,
+    now,
+    counts: {
+      providers: providerCounts ?? { total: 0, enabled: 0 },
+      credentials: credentialCounts ?? { total: 0, enabled: 0, errors: 0 },
+      routes: routeCounts ?? { total: 0, enabled: 0 },
+      keys: keyCounts ?? { total: 0, enabled: 0 },
+    },
+    usage24h: {
+      requests,
+      successes,
+      successRate: requests > 0 ? successes / requests * 100 : 0,
+      tokens: Number(usage?.tokens ?? 0),
+      costMicros: Number(usage?.cost_micros ?? 0),
+      averageLatencyMs: Number(usage?.average_latency_ms ?? 0),
+      averageFirstTokenMs: Number(usage?.average_first_token_ms ?? 0),
+    },
+    providerUsage: providerUsage.results,
+    modelUsage: modelUsage.results,
+    availability: availability.results.map((row) => ({
+      bucket: Number(row.bucket),
+      requests: Number(row.requests),
+      successes: Number(row.successes),
+      successRate: Number(row.requests) > 0 ? Number(row.successes) / Number(row.requests) * 100 : 0,
+      averageLatencyMs: Number(row.average_latency_ms ?? 0),
+    })),
+  });
+});
 
 adminApp.get("/api/auth-files/:id/export", async (c) => {
   const credential = await getCredential(c.env, c.req.param("id"));
@@ -158,22 +247,21 @@ adminApp.get("/api/credentials/paged", async (c) => {
          ORDER BY p.name,c.priority,c.created_at`,
       ).bind(...credentialIds).all<QuotaSnapshotRow & { credential_label: string; provider_name: string }>(),
       c.env.DB.prepare(
-        `SELECT credential_id,
-           CAST(created_at / ${ACTIVITY_BUCKET_SECONDS} AS INTEGER) * ${ACTIVITY_BUCKET_SECONDS} AS bucket,
-           COUNT(*) AS requests,
-           SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) AS successes,
-           SUM(CASE WHEN status_code IS NULL OR status_code < 200 OR status_code >= 400 THEN 1 ELSE 0 END) AS failures,
-           COALESCE(SUM(total_tokens), 0) AS tokens
-         FROM request_logs
-         WHERE credential_id IN (${credentialPlaceholders}) AND created_at >= ?
-         GROUP BY credential_id, bucket
-         ORDER BY credential_id, bucket`,
+        `SELECT credential_id,bucket,
+           COALESCE(SUM(requests),0) AS requests,
+           COALESCE(SUM(successes),0) AS successes,
+           COALESCE(SUM(failures),0) AS failures,
+           COALESCE(SUM(total_tokens),0) AS tokens
+         FROM request_activity_5m
+         WHERE credential_id IN (${credentialPlaceholders}) AND bucket >= ?
+         GROUP BY credential_id,bucket
+         ORDER BY credential_id,bucket`,
       ).bind(...credentialIds, activitySince).all<{
         credential_id: string;
         bucket: number;
         requests: number;
-        successes: number | null;
-        failures: number | null;
+        successes: number;
+        failures: number;
         tokens: number;
       }>(),
     ]);
@@ -279,19 +367,29 @@ export default { render: () => null };
 app.notFound((c) => c.json({ error: { message: "Not found", type: "invalid_request_error", code: "NOT_FOUND" } }, 404));
 app.onError((error) => errorResponse(error));
 
-const handler: ExportedHandler<Env, UsageEvent> = {
+const handler: ExportedHandler<Env, UsageQueueEvent> = {
   fetch(request, env, ctx) {
     return app.fetch(request, env, ctx);
   },
-  async queue(batch: MessageBatch<UsageEvent>, env: Env): Promise<void> {
-    for (const message of batch.messages) {
-      try {
-        await insertUsage(env, message.body);
-        message.ack();
-      } catch (error) {
-        console.error(JSON.stringify({ event: "usage_insert_failed", request_id: message.body.requestId, error: error instanceof Error ? error.message : String(error) }));
-        message.retry();
-      }
+  async queue(batch: MessageBatch<UsageQueueEvent>, env: Env): Promise<void> {
+    try {
+      await persistUsageQueueBatch(env, batch.messages.map((message) => message.body));
+      for (const message of batch.messages) message.ack();
+      const logging = await getLoggingSettings(env);
+      runtimeLog(logging, "info", {
+        event: "usage_batch_persisted",
+        messages: batch.messages.length,
+        aggregates: batch.messages.filter((message) => message.body.kind === "aggregate").length,
+        errors: batch.messages.filter((message) => message.body.kind === "error").length,
+      });
+    } catch (error) {
+      const logging = await getLoggingSettings(env);
+      runtimeLog(logging, "error", {
+        event: "usage_batch_failed",
+        messages: batch.messages.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      for (const message of batch.messages) message.retry();
     }
   },
 };
