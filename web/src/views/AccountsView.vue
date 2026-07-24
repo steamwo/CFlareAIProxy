@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   NAlert, NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NModal,
   NPagination, NPopconfirm, NProgress, NSelect, NSpace, NSpin, NSwitch, NTag, useMessage,
@@ -22,18 +22,38 @@ interface ParsedQuota {
   windows: QuotaWindow[];
   credits?: { balance?: string | number; unlimited?: boolean; hasCredits?: boolean };
 }
+interface CredentialPage {
+  data: Credential[];
+  quotas: QuotaSnapshot[];
+  total: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+}
+
+const allowedPageSizes = [9, 18, 36];
+const route = useRoute();
+const router = useRouter();
+const message = useMessage();
+const queryInteger = (value: unknown, fallback: number): number => {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const parsed = typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+const sourceQuery = (): string => typeof route.query.source === "string" ? route.query.source : "";
+const page = ref(queryInteger(route.query.page, 1));
+const initialPageSize = queryInteger(route.query.pageSize, 9);
+const pageSize = ref(allowedPageSizes.includes(initialPageSize) ? initialPageSize : 9);
+const activeSource = ref(sourceQuery());
 
 const credentials = ref<Credential[]>([]);
 const channels = ref<Channel[]>([]);
 const providers = ref<Provider[]>([]);
 const quotas = ref<QuotaSnapshot[]>([]);
+const total = ref(0);
 const loading = ref(false);
 const modal = ref(false);
 const editing = ref<Credential | null>(null);
-const page = ref(1);
-const pageSize = ref(9);
-const message = useMessage();
-const route = useRoute();
 const form = reactive({ providerId: "", label: "", secret: "", enabled: true, priority: 100, weight: 1, maxConcurrency: 4 });
 
 const sources = computed<SourceOption[]>(() => [
@@ -45,9 +65,6 @@ const sourceNames = computed(() => new Map([
   ...providers.value.map((provider) => [provider.id, provider.name] as const),
 ]));
 const quotaMap = computed(() => new Map(quotas.value.map((quota) => [quota.credential_id, quota])));
-const pageCount = computed(() => Math.max(1, Math.ceil(credentials.value.length / pageSize.value)));
-const pagedCredentials = computed(() => credentials.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
-watch(pageCount, (count) => { if (page.value > count) page.value = count; });
 
 function parseQuota(row?: QuotaSnapshot): ParsedQuota {
   if (row?.snapshot) return { plan: row.snapshot.plan, windows: row.snapshot.windows ?? [], credits: row.snapshot.credits };
@@ -99,28 +116,48 @@ function quotaStatusType(status?: string): "success" | "error" | "warning" | "de
   if (status === "unsupported") return "warning";
   return "default";
 }
+function paginationQuery(nextPage = page.value, nextPageSize = pageSize.value) {
+  return { ...route.query, page: String(nextPage), pageSize: String(nextPageSize) };
+}
+async function changePage(value: number) {
+  await router.push({ query: paginationQuery(value, pageSize.value) });
+}
+async function changePageSize(value: number) {
+  await router.push({ query: paginationQuery(1, value) });
+}
+async function normalizePaginationQuery() {
+  const currentPage = typeof route.query.page === "string" ? route.query.page : "";
+  const currentPageSize = typeof route.query.pageSize === "string" ? route.query.pageSize : "";
+  if (currentPage !== String(page.value) || currentPageSize !== String(pageSize.value)) {
+    await router.replace({ query: paginationQuery() });
+  }
+}
 async function load() {
   loading.value = true;
   try {
-    const [channelResult, providerResult, accountResult, quotaResult] = await Promise.all([
+    const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) });
+    if (activeSource.value) params.set("provider", activeSource.value);
+    const [channelResult, providerResult, accountResult] = await Promise.all([
       api<{ data: Channel[] }>("/channels"),
       api<{ data: Provider[] }>("/providers"),
-      api<{ data: Credential[] }>("/credentials"),
-      api<{ data: QuotaSnapshot[] }>("/quotas"),
+      api<CredentialPage>(`/credentials/paged?${params.toString()}`),
     ]);
     channels.value = channelResult.data;
     providers.value = providerResult.data;
     credentials.value = accountResult.data;
-    quotas.value = quotaResult.data;
-    const query = typeof route.query.source === "string" ? route.query.source : "";
-    if (query && !form.providerId) form.providerId = query;
+    quotas.value = accountResult.quotas;
+    total.value = accountResult.total;
+    page.value = accountResult.page;
+    pageSize.value = accountResult.pageSize;
+    if (activeSource.value && !form.providerId) form.providerId = activeSource.value;
+    await normalizePaginationQuery();
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
   } finally { loading.value = false; }
 }
 function openCreate() {
   editing.value = null;
-  Object.assign(form, { providerId: typeof route.query.source === "string" ? route.query.source : "", label: "", secret: "", enabled: true, priority: 100, weight: 1, maxConcurrency: 4 });
+  Object.assign(form, { providerId: activeSource.value, label: "", secret: "", enabled: true, priority: 100, weight: 1, maxConcurrency: 4 });
   modal.value = true;
 }
 function openEdit(row: Credential) {
@@ -135,7 +172,8 @@ async function save() {
     else await api("/credentials", { method: "POST", body: jsonBody({ ...body, authType: "api_key" }) });
     message.success(editing.value ? "账号已更新" : "账号已添加，正在后台刷新模型与额度");
     modal.value = false;
-    await load();
+    if (!editing.value && page.value !== 1) await router.replace({ query: paginationQuery(1, pageSize.value) });
+    else await load();
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
 }
 async function remove(id: string) {
@@ -161,6 +199,21 @@ async function refreshOne(id: string) {
     await load();
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
 }
+
+watch(
+  () => [route.query.page, route.query.pageSize, route.query.source] as const,
+  () => {
+    const nextPage = queryInteger(route.query.page, 1);
+    const requestedPageSize = queryInteger(route.query.pageSize, 9);
+    const nextPageSize = allowedPageSizes.includes(requestedPageSize) ? requestedPageSize : 9;
+    const nextSource = sourceQuery();
+    const changed = nextPage !== page.value || nextPageSize !== pageSize.value || nextSource !== activeSource.value;
+    page.value = nextPage;
+    pageSize.value = nextPageSize;
+    activeSource.value = nextSource;
+    if (changed) void load();
+  },
+);
 onMounted(load);
 </script>
 
@@ -171,8 +224,8 @@ onMounted(load);
   </page-header>
 
   <n-spin :show="loading">
-    <div v-if="pagedCredentials.length" class="account-grid">
-      <n-card v-for="row in pagedCredentials" :key="row.id" class="account-card" size="small">
+    <div v-if="credentials.length" class="account-grid">
+      <n-card v-for="row in credentials" :key="row.id" class="account-card" size="small">
         <template #header>
           <div class="account-card__heading">
             <div class="account-card__title-row">
@@ -215,7 +268,18 @@ onMounted(load);
     </div>
     <n-card v-else><n-empty description="账号池还是空的，可添加 API Key，或从“授权”菜单登录内置渠道" /></n-card>
   </n-spin>
-  <div v-if="credentials.length > pageSize" class="pagination-row"><n-pagination v-model:page="page" v-model:page-size="pageSize" :item-count="credentials.length" :page-sizes="[9, 18, 36]" show-size-picker /></div>
+  <div v-if="total > 0" class="pagination-row">
+    <n-pagination
+      :page="page"
+      :page-size="pageSize"
+      :item-count="total"
+      :page-sizes="allowedPageSizes"
+      show-size-picker
+      show-quick-jumper
+      @update:page="changePage"
+      @update:page-size="changePageSize"
+    />
+  </div>
 
   <n-modal v-model:show="modal" preset="card" :title="editing ? '编辑账号' : '添加账号 / API Key'" style="width:min(680px,calc(100vw - 32px))">
     <n-form label-placement="top">
