@@ -167,7 +167,7 @@ onBeforeUnmount(stopPolling);
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新</n-button>
   </page-header>
 
-  <n-alert type="info" :bordered="false" style="margin-bottom:16px">API Key 类型账号仍在“账号池”中添加；这里仅处理需要浏览器确认、设备码或授权文件的登录流程。</n-alert>
+  <n-alert type="info" :bordered="false" style="margin-bottom:16px">账号池只展示内置渠道授权账号；OpenAI-compatible 供应商 API Key 请在“供应商”配置中添加和管理。</n-alert>
   <n-spin :show="loading">
     <div v-if="pagedChannels.length" class="entity-grid">
       <n-card v-for="channel in pagedChannels" :key="channel.id" class="entity-card">
