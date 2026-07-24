@@ -5,9 +5,9 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: 42f36b94e0805a9897c3aa3be46a2b124be0057e -->
+<!-- upstream-ref: 35ebe3f3ed1e74ffb49da399ea371f27db8e926b -->
 <!-- local-implementation-ref: 4e20ae6b49ea874a8f6c1a4640645677f58b36d9 -->
-<!-- last-reviewed: 2026-07-24 -->
+<!-- last-reviewed: 2026-07-25 -->
 
 ## 1. 当前基线
 
@@ -15,21 +15,23 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `42f36b94e0805a9897c3aa3be46a2b124be0057e` |
+| 已审阅上游提交 | `35ebe3f3ed1e74ffb49da399ea371f27db8e926b` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `4e20ae6b49ea874a8f6c1a4640645677f58b36d9` |
-| 审阅日期 | 2026-07-24 |
+| 审阅日期 | 2026-07-25 |
 
-上游基线提交的主题是规范化 Token 统计。它包含部分桶统计、缓存 Token、工具调用 Token、异常/溢出数据和统计质量分类等修正；CFlareAIProxy 当前仅完成基础 prompt/completion/cached/total 统计，因此该项仍属于待跟进范围。
+上一基线 `42f36b94` 的主题是规范化 Token 统计。它包含部分桶统计、缓存 Token、工具调用 Token、异常/溢出数据和统计质量分类等修正；CFlareAIProxy 当前仅完成基础 prompt/completion/cached/total 统计，因此该项仍属于待跟进范围。
+
+本次新增审阅范围为 `42f36b94..35ebe3f3`。其中 credential concurrency 相关提交仅重构测试 fixture，没有实质行为变化；主要新增能力是可选的 Codex Multi-Agent V2 优化。该功能会重写 `spawn_agent` 工具、注入模型/reasoning/service-tier 信息、规范化 `agent_message`、处理 collaboration namespace，并影响 Codex client models。它属于重大架构能力，已记录为 Issue #16，本轮不直接移植。
 
 ## 2. 对齐程度
 
 以下比例是工程估算，用来表达工作量和行为覆盖，不是官方兼容认证，也不是逐测试用例的通过率。
 
-- **当前目标范围（暂不包含 Claude 协议）：约 75%，属于“大体对齐”。**
-- **相对 CLIProxyAPI 全部产品能力：约 45%，属于“部分对齐”。**
+- **当前目标范围（暂不包含 Claude 协议）：约 73%，属于“大体对齐”。**
+- **相对 CLIProxyAPI 全部产品能力：约 44%，属于“部分对齐”。**
 
-整体比例较低的主要原因是 CLIProxyAPI 还包含 Claude、Gemini、Grok、Interactions、Responses WebSocket、Go SDK 和本地 CLI 登录等能力；这些能力并非当前 CFlareAIProxy 的全部目标。
+整体比例较低的主要原因是 CLIProxyAPI 还包含 Claude、Gemini、Grok、Interactions、Responses WebSocket、Codex Multi-Agent V2、Go SDK 和本地 CLI 登录等能力；这些能力并非当前 CFlareAIProxy 的全部目标。
 
 等级定义：
 
@@ -55,6 +57,7 @@
 | Codex `response.failed/error` | 已对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误 | 对比上游新增 code/type 分类 |
 | Codex 中断流检测 | 已对齐 | 未收到 `response.completed/incomplete` 时视为失败，不伪造成功 | 跟进上游中断流恢复策略 |
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
+| Codex Multi-Agent V2 | 未对齐 | 尚未重写 `spawn_agent`、`agent_message`、collaboration namespace 和客户端模型目录 | 重大架构项，跟进 Issue #16；默认关闭设计后再实现 |
 | Codex reasoning replay/signature cache | 未对齐 | 尚未实现跨请求 reasoning/signature 重放缓存 | 上游变化时评估 Workers KV/DO 实现 |
 | Codex Responses WebSocket | 未对齐 | Workers 网关当前仅实现 HTTP/SSE | 暂不自动移植；单独设计状态与连接生命周期 |
 | Codex Alpha Search / 特殊路由插件 | 未对齐 | 尚未实现插件式模型选择 | 有真实使用需求后再跟进 |
@@ -65,7 +68,7 @@
 | Provider/System 代理 | 已对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连 | 持续跟进 Workers Socket 限制 |
 | OpenAI-compatible 自定义上游 | 已对齐 | 可配置 base URL、API mode、模型、权重、Key 和代理 | 跟进上游通用 provider 配置能力 |
 | 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名 | 补强不同供应商模型响应解析 |
-| 模型能力元数据 | 部分对齐 | 支持 tools、images、reasoning levels、输入/输出模态和模型名回写 | 对齐上游 registry 的新增能力字段 |
+| 模型能力元数据 | 部分对齐 | 支持 tools、images、reasoning levels、输入/输出模态和模型名回写 | 对齐上游 registry 的新增能力字段；Multi-Agent V2 复用现有公开路由 |
 | Usage/Token 规范化 | 部分对齐 | 已记录 prompt/completion/cached/total 和费用 | 优先跟进 canonical breakdown、partial/unclassified/inconsistent 状态 |
 | 请求级日志与费用 | 项目差异 | CFlareAIProxy 使用 D1/Queue 内建；CLIProxyAPI 已将主要统计交给外部管理项目 | 不要求结构一致，只保证 Token 语义可靠 |
 | 管理界面 | 项目差异 | CFlareAIProxy 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构 |
@@ -100,6 +103,8 @@
 - `internal/runtime/executor/codex_executor*_test.go`
 - `internal/auth/codex/**`
 - Codex 相关 `sdk/translator/**`
+- `internal/client/codex/optimize-multi-agent-v2/**`
+- `internal/runtime/executor/helps/codex_multi_agent_v2.go`
 - Responses WebSocket、reasoning replay、signature/cache 相关实现
 
 重点关键词：
@@ -111,6 +116,7 @@
 - incomplete/disconnected stream
 - usage limit、capacity、context length
 - reasoning replay/signature
+- `spawn_agent`、`agent_message`、collaboration namespace
 - WebSocket continuity/tool cache
 
 ### 通用 P1
@@ -181,6 +187,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-25 | `42f36b94..35ebe3f3` | 文档更新；Issue #16 | credential concurrency 仅重构测试，无行为变化；新增 Codex Multi-Agent V2 属于重大架构能力，不直接合入，已建立设计跟进 Issue。 |
 | 2026-07-24 | 至 `42f36b94` | `4e20ae6b` | Kimi/Codex HTTP 核心与 P1 调度、错误、模型能力已大体对齐；Token canonical breakdown、Codex WebSocket/replay cache、完整多供应商范围仍未对齐。 |
 
 ## 9. 许可证与署名
