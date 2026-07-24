@@ -5,7 +5,7 @@ import {
   NAlert, NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NModal,
   NPagination, NPopconfirm, NProgress, NSpace, NSpin, NSwitch, NTag, useMessage,
 } from "naive-ui";
-import { KeyRound, RefreshCw } from "@lucide/vue";
+import { Download, FileJson, KeyRound, RefreshCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProviderIcon from "../components/ProviderIcon.vue";
 import { api, jsonBody } from "../api";
@@ -210,6 +210,22 @@ async function refreshOne(id: string) {
     await load();
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
 }
+async function downloadAuth(row: Credential) {
+  try {
+    const payload = await api<Record<string, unknown>>(`/auth-files/${row.id}/export`);
+    const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    const label = row.label.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80) || row.provider_id;
+    anchor.href = url;
+    anchor.download = `${label}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    message.success("认证文件已下载，请妥善保管");
+  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+}
 
 watch(
   () => [route.query.page, route.query.pageSize, route.query.source] as const,
@@ -230,7 +246,8 @@ onMounted(load);
 
 <template>
   <page-header title="账号池" description="只展示通过内置渠道 OAuth 或授权文件加入的账号；OpenAI-compatible 供应商 API Key 请在供应商配置中管理。">
-    <n-button type="primary" @click="router.push({ name: 'authorization' })"><template #icon><key-round /></template>前往授权</n-button>
+    <n-button type="primary" @click="router.push({ name: 'authorization' })"><template #icon><key-round /></template>发起授权</n-button>
+    <n-button @click="router.push({ name: 'authorization', query: { import: '1' } })"><template #icon><file-json /></template>导入认证文件</n-button>
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新</n-button>
   </page-header>
 
@@ -275,6 +292,7 @@ onMounted(load);
         <n-alert v-else-if="quotaMap.get(row.id)?.error_message" type="warning" :bordered="false" class="account-error">{{ quotaMap.get(row.id)?.error_message }}</n-alert>
         <div class="account-actions">
           <n-button size="small" @click="refreshOne(row.id)"><template #icon><refresh-cw /></template>刷新模型与额度</n-button>
+          <n-button size="small" @click="downloadAuth(row)"><template #icon><download /></template>下载认证文件</n-button>
           <n-button size="small" @click="openEdit(row)">编辑调度</n-button>
           <n-popconfirm @positive-click="remove(row.id)"><template #trigger><n-button size="small" type="error" secondary>删除</n-button></template>删除该授权账号、模型缓存和额度快照？</n-popconfirm>
         </div>
