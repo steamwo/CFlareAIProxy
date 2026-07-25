@@ -8,6 +8,18 @@ export interface CodexClientCatalogContext {
   providerKinds: Map<string, ProviderKind>;
 }
 
+export interface CodexClientProviderSource {
+  id: string;
+  kind: ProviderKind;
+  options_json: string;
+}
+
+export interface CodexClientRouteSource {
+  public_model: string;
+  provider_id: string;
+  route_options_json: string;
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -64,23 +76,18 @@ function featureFlag(options: Record<string, unknown>): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
-export async function loadCodexClientCatalogContext(env: Env, models: Array<Record<string, unknown>>): Promise<CodexClientCatalogContext> {
-  const [providerResult, routeResult] = await Promise.all([
-    env.DB.prepare("SELECT id,kind,options_json FROM providers WHERE enabled=1")
-      .all<{ id: string; kind: ProviderKind; options_json: string }>().catch(() => ({ results: [] })),
-    env.DB.prepare(
-      `SELECT r.public_model,r.provider_id,r.options_json AS route_options_json,p.options_json AS provider_options_json
-       FROM model_routes r JOIN providers p ON p.id=r.provider_id AND p.enabled=1
-       WHERE r.enabled=1 AND r.endpoint='responses' ORDER BY r.public_model,r.priority,r.created_at`,
-    ).all<{ public_model: string; provider_id: string; route_options_json: string; provider_options_json: string }>().catch(() => ({ results: [] })),
-  ]);
-  const providerKinds = new Map(providerResult.results.map((row) => [row.id, row.kind] as const));
-  const providerFlags = new Map(providerResult.results.map((row) => [
+export function resolveCodexClientCatalogContext(
+  models: Array<Record<string, unknown>>,
+  providers: CodexClientProviderSource[],
+  routes: CodexClientRouteSource[],
+): CodexClientCatalogContext {
+  const providerKinds = new Map(providers.map((row) => [row.id, row.kind] as const));
+  const providerFlags = new Map(providers.map((row) => [
     row.id,
     featureFlag(parseJson<Record<string, unknown>>(row.options_json, {})) === true,
   ] as const));
   const routeFlags = new Map<string, boolean[]>();
-  for (const route of routeResult.results) {
+  for (const route of routes) {
     const routeOptions = parseJson<Record<string, unknown>>(route.route_options_json, {});
     const routeFlag = featureFlag(routeOptions) ?? providerFlags.get(route.provider_id) ?? false;
     const flags = routeFlags.get(route.public_model) ?? [];
@@ -92,14 +99,27 @@ export async function loadCodexClientCatalogContext(env: Env, models: Array<Reco
     const id = typeof model.id === "string" ? model.id.trim() : "";
     if (!id) continue;
     const flags = routeFlags.get(id);
-    if (flags?.length && flags.every(Boolean)) {
-      multiAgentModels.add(id);
+    if (flags?.length) {
+      if (flags.every(Boolean)) multiAgentModels.add(id);
       continue;
     }
-    const providers = modelProviders(model);
-    if (providers.length === 1 && providerFlags.get(providers[0]) === true) multiAgentModels.add(id);
+    const modelProviderIds = modelProviders(model);
+    if (modelProviderIds.length === 1 && providerFlags.get(modelProviderIds[0]) === true) multiAgentModels.add(id);
   }
   return { multiAgentModels, providerKinds };
+}
+
+export async function loadCodexClientCatalogContext(env: Env, models: Array<Record<string, unknown>>): Promise<CodexClientCatalogContext> {
+  const [providerResult, routeResult] = await Promise.all([
+    env.DB.prepare("SELECT id,kind,options_json FROM providers WHERE enabled=1")
+      .all<CodexClientProviderSource>().catch(() => ({ results: [] })),
+    env.DB.prepare(
+      `SELECT r.public_model,r.provider_id,r.options_json AS route_options_json
+       FROM model_routes r JOIN providers p ON p.id=r.provider_id AND p.enabled=1
+       WHERE r.enabled=1 AND r.endpoint='responses' ORDER BY r.public_model,r.priority,r.created_at`,
+    ).all<CodexClientRouteSource>().catch(() => ({ results: [] })),
+  ]);
+  return resolveCodexClientCatalogContext(models, providerResult.results, routeResult.results);
 }
 
 function supportsSearchTool(model: Record<string, unknown>, capabilities: Record<string, unknown>, providerKinds: Map<string, ProviderKind>): boolean {
