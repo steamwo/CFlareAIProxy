@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { NButton, NCard, NEmpty, NInput, NSpace, NTag, useMessage } from "naive-ui";
-import { Boxes, RefreshCw, Search, Server, Waypoints } from "@lucide/vue";
+import { NButton, NCard, NCollapse, NCollapseItem, NEmpty, NInput, NSpace, NTag, useMessage } from "naive-ui";
+import { RefreshCw, Search, Server, Waypoints } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProviderIcon from "../components/ProviderIcon.vue";
 import { api } from "../api";
-import type { Channel, DiscoveredModel, Provider, PublicModel } from "../types";
+import type { Channel, DiscoveredModel, Provider } from "../types";
 
 type SourceKind = "channel" | "provider" | "unknown";
 interface SourceMeta { label: string; kind: SourceKind }
@@ -25,10 +25,10 @@ interface SourceGroup {
 }
 
 const discovered = ref<DiscoveredModel[]>([]);
-const publicModels = ref<PublicModel[]>([]);
 const sourceMap = ref<Map<string, SourceMeta>>(new Map());
 const loading = ref(false);
 const query = ref("");
+const expandedSources = ref<string[]>([]);
 const message = useMessage();
 const endpointOrder = new Map([["responses", 0], ["chat", 1], ["completions", 2]]);
 const endpointLabels: Record<string, string> = { responses: "Responses", chat: "Chat", completions: "Completions" };
@@ -37,12 +37,11 @@ async function load() {
   loading.value = true;
   try {
     const [modelResult, channelResult, providerResult] = await Promise.all([
-      api<{ data: DiscoveredModel[]; public: PublicModel[] }>("/models"),
+      api<{ data: DiscoveredModel[] }>("/models"),
       api<{ data: Channel[] }>("/channels"),
       api<{ data: Provider[] }>("/providers"),
     ]);
     discovered.value = modelResult.data;
-    publicModels.value = modelResult.public;
     const nextSourceMap = new Map<string, SourceMeta>();
     for (const item of channelResult.data) nextSourceMap.set(item.id, { label: item.name, kind: "channel" });
     for (const item of providerResult.data) nextSourceMap.set(item.id, { label: item.name, kind: "provider" });
@@ -132,8 +131,6 @@ const sourceGroups = computed<SourceGroup[]>(() => {
     .sort((left, right) => left.sourceLabel.localeCompare(right.sourceLabel));
 });
 
-const availableModelCount = computed(() => groupedDiscovered.value.filter((model) => model.enabled === 1).length);
-const protocolCount = computed(() => new Set(groupedDiscovered.value.flatMap((model) => model.endpoints)).size);
 const sourceTypeLabel = (kind: SourceKind): string => kind === "channel" ? "内置渠道" : kind === "provider" ? "OpenAI 供应商" : "来源";
 const formatDate = (value: number): string => new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
 
@@ -141,36 +138,23 @@ onMounted(load);
 </script>
 
 <template>
-  <page-header title="模型目录" description="按渠道和供应商分区查看上游模型，不再按账号重复展示。">
+  <page-header title="模型目录" description="按渠道和供应商折叠查看上游模型，不再按账号重复展示。">
     <n-button type="primary" :loading="loading" @click="refresh"><template #icon><refresh-cw /></template>刷新全部模型</n-button>
   </page-header>
-
-  <n-card class="catalog-overview" :bordered="false">
-    <div class="catalog-overview__copy">
-      <span class="catalog-kicker"><boxes :size="15" />模型能力目录</span>
-      <h2>{{ groupedDiscovered.length }} 个实际模型，来自 {{ sourceGroups.length }} 个渠道 / 供应商</h2>
-      <p>同一模型的支持端点会合并显示；账号数量不再影响目录行数。</p>
-    </div>
-    <div class="catalog-overview__metrics">
-      <div><strong>{{ publicModels.length }}</strong><span>公开模型</span></div>
-      <div><strong>{{ availableModelCount }}</strong><span>当前可用</span></div>
-      <div><strong>{{ protocolCount }}</strong><span>支持端点类型</span></div>
-    </div>
-  </n-card>
 
   <div class="catalog-toolbar">
     <n-input v-model:value="query" clearable placeholder="搜索模型、渠道、供应商或端点">
       <template #prefix><search /></template>
     </n-input>
-    <n-tag :bordered="false">{{ sourceGroups.length }} 个来源分区</n-tag>
+    <n-tag :bordered="false">{{ sourceGroups.length }} 个来源</n-tag>
   </div>
 
-  <div v-if="sourceGroups.length" class="source-groups">
-    <n-card v-for="group in sourceGroups" :key="group.providerId" class="source-card" :bordered="false">
-      <div class="source-card__head">
+  <n-collapse v-if="sourceGroups.length" v-model:expanded-names="expandedSources" class="source-collapse">
+    <n-collapse-item v-for="group in sourceGroups" :key="group.providerId" :name="group.providerId">
+      <template #header>
         <div class="source-identity">
-          <provider-icon :provider-id="group.providerId" :name="group.sourceLabel" :size="42" />
-          <div>
+          <provider-icon :provider-id="group.providerId" :name="group.sourceLabel" :size="38" />
+          <div class="source-copy">
             <div class="source-title">
               <strong>{{ group.sourceLabel }}</strong>
               <n-tag size="small" :bordered="false" :type="group.sourceKind === 'channel' ? 'info' : 'default'">{{ sourceTypeLabel(group.sourceKind) }}</n-tag>
@@ -178,12 +162,15 @@ onMounted(load);
             <span class="mono muted">{{ group.providerId }}</span>
           </div>
         </div>
+      </template>
+
+      <template #header-extra>
         <div class="source-summary">
           <span><server :size="14" /><b>{{ group.models.length }}</b> 个模型</span>
           <span><waypoints :size="14" /><b>{{ group.endpoints.length }}</b> 类端点</span>
-          <span class="muted">最近刷新 {{ formatDate(group.latestDiscoveredAt) }}</span>
+          <span class="muted">{{ formatDate(group.latestDiscoveredAt) }}</span>
         </div>
-      </div>
+      </template>
 
       <div class="model-lines">
         <div v-for="model in group.models" :key="model.model_id" class="model-line">
@@ -205,35 +192,31 @@ onMounted(load);
           </div>
         </div>
       </div>
-    </n-card>
-  </div>
+    </n-collapse-item>
+  </n-collapse>
+
   <n-card v-else><n-empty description="没有匹配的模型目录" /></n-card>
 </template>
 
 <style scoped>
-.catalog-overview { margin-bottom:16px; border:1px solid var(--n-border-color); background:linear-gradient(120deg,rgba(99,102,241,.09),transparent 48%),var(--n-color); }
-.catalog-overview :deep(.n-card__content) { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:28px; padding:22px 24px; }
-.catalog-kicker { display:flex; align-items:center; gap:7px; color:#6366f1; font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
-.catalog-overview h2 { margin:8px 0 6px; font-size:20px; line-height:1.35; }
-.catalog-overview p { margin:0; color:var(--n-text-color-3); font-size:12px; }
-.catalog-overview__metrics { display:grid; grid-template-columns:repeat(3,minmax(90px,1fr)); gap:10px; }
-.catalog-overview__metrics>div { padding:12px 14px; border:1px solid var(--n-border-color); border-radius:12px; background:color-mix(in srgb,var(--n-color) 82%,transparent); text-align:center; }
-.catalog-overview__metrics strong { display:block; font-size:20px; line-height:1.1; }
-.catalog-overview__metrics span { display:block; margin-top:5px; color:var(--n-text-color-3); font-size:10px; }
 .catalog-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
 .catalog-toolbar :deep(.n-input) { max-width:440px; }
-.source-groups { display:flex; flex-direction:column; gap:14px; }
-.source-card { border:1px solid var(--n-border-color); box-shadow:0 8px 24px rgba(15,23,42,.04); }
-.source-card :deep(.n-card__content) { padding:18px; }
-.source-card__head { display:flex; align-items:center; justify-content:space-between; gap:18px; padding-bottom:14px; }
+.source-collapse { display:flex; flex-direction:column; gap:12px; }
+.source-collapse :deep(.n-collapse-item) { margin:0; overflow:hidden; border:1px solid var(--n-border-color); border-radius:14px; background:var(--n-color); box-shadow:0 6px 18px rgba(15,23,42,.035); }
+.source-collapse :deep(.n-collapse-item__header) { padding:0; }
+.source-collapse :deep(.n-collapse-item__header-main) { min-width:0; padding:15px 18px; }
+.source-collapse :deep(.n-collapse-item__header-extra) { padding:15px 18px 15px 0; }
+.source-collapse :deep(.n-collapse-item__content-wrapper) { border-top:1px solid var(--n-border-color); }
+.source-collapse :deep(.n-collapse-item__content-inner) { padding:0; }
 .source-identity { display:flex; align-items:center; gap:12px; min-width:0; }
+.source-copy { min-width:0; }
 .source-title { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:4px; }
-.source-title strong { font-size:15px; }
-.source-identity .mono { font-size:10px; }
-.source-summary { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:16px; font-size:11px; }
+.source-title strong { overflow:hidden; font-size:15px; text-overflow:ellipsis; white-space:nowrap; }
+.source-copy .mono { display:block; overflow:hidden; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.source-summary { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:14px; font-size:11px; }
 .source-summary>span { display:flex; align-items:center; gap:5px; white-space:nowrap; }
-.model-lines { border:1px solid var(--n-border-color); border-radius:12px; overflow:hidden; }
-.model-line { display:grid; grid-template-columns:minmax(220px,1.15fr) minmax(260px,1fr) auto; align-items:center; gap:20px; min-height:66px; padding:12px 14px; }
+.model-lines { overflow:hidden; }
+.model-line { display:grid; grid-template-columns:minmax(220px,1.15fr) minmax(260px,1fr) auto; align-items:center; gap:20px; min-height:66px; padding:12px 18px; }
 .model-line + .model-line { border-top:1px solid var(--n-border-color); }
 .model-line:hover { background:color-mix(in srgb,var(--n-color-embedded) 58%,transparent); }
 .model-copy { min-width:0; display:flex; flex-direction:column; gap:3px; }
@@ -242,6 +225,19 @@ onMounted(load);
 .model-endpoints { display:flex; align-items:center; gap:10px; min-width:0; }
 .model-label { color:var(--n-text-color-3); font-size:10px; white-space:nowrap; }
 .model-state { display:flex; align-items:flex-end; flex-direction:column; gap:5px; font-size:10px; white-space:nowrap; }
-@media(max-width:900px) { .catalog-overview :deep(.n-card__content) { grid-template-columns:1fr; } .catalog-overview__metrics { width:100%; } .source-card__head { align-items:flex-start; flex-direction:column; } .source-summary { justify-content:flex-start; } .model-line { grid-template-columns:1fr auto; } .model-endpoints { grid-column:1; grid-row:2; } .model-state { grid-column:2; grid-row:1 / 3; } }
-@media(max-width:620px) { .catalog-toolbar { align-items:stretch; flex-direction:column; } .catalog-toolbar :deep(.n-input) { max-width:none; } .catalog-overview__metrics { grid-template-columns:1fr; } .model-line { grid-template-columns:1fr; gap:10px; } .model-endpoints,.model-state { grid-column:auto; grid-row:auto; align-items:flex-start; } }
+@media(max-width:900px) {
+  .source-collapse :deep(.n-collapse-item__header-main) { padding:14px; }
+  .source-collapse :deep(.n-collapse-item__header-extra) { padding:0 14px 14px 62px; }
+  .source-summary { justify-content:flex-start; }
+  .model-line { grid-template-columns:1fr auto; }
+  .model-endpoints { grid-column:1; grid-row:2; }
+  .model-state { grid-column:2; grid-row:1 / 3; }
+}
+@media(max-width:620px) {
+  .catalog-toolbar { align-items:stretch; flex-direction:column; }
+  .catalog-toolbar :deep(.n-input) { max-width:none; }
+  .source-summary .muted { display:none; }
+  .model-line { grid-template-columns:1fr; gap:10px; }
+  .model-endpoints,.model-state { grid-column:auto; grid-row:auto; align-items:flex-start; }
+}
 </style>
