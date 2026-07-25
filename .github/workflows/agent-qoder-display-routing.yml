@@ -17,8 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          fetch-tags: false
+          show-progress: false
           ref: agent/qoder-display-name-routing
+      - name: Apply proposed changes
+        run: |
+          git apply --recount --verbose --check agent-qoder-routing.patch
+          git apply --recount --verbose agent-qoder-routing.patch
+          rm agent-qoder-routing.patch .github/workflows/agent-qoder-display-routing.yml
       - uses: pnpm/action-setup@v4
         with:
           version: 11.9.0
@@ -26,11 +33,6 @@ jobs:
         with:
           node-version: 22.13.0
           cache: pnpm
-      - name: Apply proposed changes
-        run: |
-          git apply --recount --check agent-qoder-routing.patch
-          git apply --recount agent-qoder-routing.patch
-          rm agent-qoder-routing.patch .github/workflows/agent-qoder-display-routing.yml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Run repository checks
