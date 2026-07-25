@@ -20,7 +20,7 @@ const items: MenuOption[] = [
   { label: "OpenAI 供应商", key: "/providers", icon: icon(Network) },
   { label: "授权", key: "/authorization", icon: icon(BadgeCheck) },
   { label: "账号池", key: "/accounts", icon: icon(UsersRound) },
-  { label: "实际模型", key: "/models", icon: icon(Boxes) },
+  { label: "模型目录", key: "/models", icon: icon(Boxes) },
   { label: "模型路由", key: "/routes", icon: icon(ListTree) },
   { label: "网关密钥", key: "/keys", icon: icon(KeyRound) },
   { label: "模型价格", key: "/prices", icon: icon(CircleDollarSign) },

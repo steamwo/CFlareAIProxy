@@ -5,6 +5,7 @@ import type { DataTableColumns } from "naive-ui";
 import { Copy, Plus, RefreshCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import { api, jsonBody } from "../api";
+import { formatTokens } from "../utils/format";
 import type { GatewayKey, PublicModel } from "../types";
 
 const rows = ref<GatewayKey[]>([]);
@@ -46,7 +47,7 @@ async function copy() { await navigator.clipboard.writeText(createdKey.value); m
 const columns: DataTableColumns<GatewayKey> = [
   { title: "名称", key: "name", render: (row) => h("div", [h("strong", row.name), h("div", { class: "mono muted", style: "font-size:12px" }, `${row.key_prefix}…`)]) },
   { title: "限制", key: "limits", render: (row) => `${row.rpm} RPM · ${row.max_concurrency} 并发` },
-  { title: "月 Token", key: "monthly_token_limit", render: (row) => row.monthly_token_limit ? Intl.NumberFormat("zh-CN").format(row.monthly_token_limit) : "不限" },
+  { title: "月 Token", key: "monthly_token_limit", render: (row) => row.monthly_token_limit ? formatTokens(row.monthly_token_limit) : "不限" },
   { title: "模型范围", key: "allowed_models_json", render: (row) => { const allowed = JSON.parse(row.allowed_models_json || "[]"); return h(NTag, { size: "small" }, { default: () => allowed.length ? `${allowed.length} 个模型` : "全部模型" }); } },
   { title: "启用", key: "enabled", render: (row) => h(NSwitch, { value: row.enabled === 1, onUpdateValue: (value: boolean) => api(`/keys/${row.id}`, { method: "PATCH", body: jsonBody({ enabled: value }) }).then(load) }) },
   { title: "操作", key: "actions", render: (row) => h(NSpace, null, { default: () => [h(NButton, { size: "small", onClick: () => edit(row) }, { default: () => "编辑" }), h(NPopconfirm, { onPositiveClick: () => remove(row.id) }, { trigger: () => h(NButton, { size: "small", type: "error", secondary: true }, { default: () => "删除" }), default: () => "删除后客户端将立即无法使用。" })] }) },

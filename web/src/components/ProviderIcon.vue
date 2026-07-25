@@ -9,7 +9,7 @@ const iconSources: Record<string, string> = {
   openai: "https://openai.com/favicon.ico",
   kimi: "https://statics.moonshot.cn/kimi-web-seo/favicon.ico",
   moonshot: "https://statics.moonshot.cn/kimi-web-seo/favicon.ico",
-  qoder: "https://qoder.com/favicon.ico",
+  qoder: "https://img.alicdn.com/imgextra/i3/O1CN01KliT1u1jEq947NlKH_!!6000000004517-55-tps-180-180.svg",
   opencode: "https://opencode.ai/favicon.svg",
   "opencode-zen": "https://opencode.ai/favicon.svg",
 };
