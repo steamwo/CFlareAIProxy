@@ -1,4 +1,4 @@
-import { restoreCodexMultiAgentV2Response } from "./codex-multi-agent-v2";
+import { restoreCodexMultiAgentResponse } from "./codex-multi-agent-response";
 import { prepareCodexResponse } from "./codex-response";
 import { prepareKimiResponse } from "./kimi-response";
 import { rewriteResponseModels } from "./response-utils";
@@ -25,5 +25,5 @@ export async function prepareProviderResponse(context: ProviderResponseContext):
     response = await prepareDownstreamResponse(context.upstream, context.mode, context.requestedStream, context.model, context.requestId);
     if (context.forceResponseModelMapping) response = await rewriteResponseModels(response, context.model);
   }
-  return restoreCodexMultiAgentV2Response(response, context.restoreCodexCollaborationNamespace === true);
+  return restoreCodexMultiAgentResponse(response, context.restoreCodexCollaborationNamespace === true);
 }
