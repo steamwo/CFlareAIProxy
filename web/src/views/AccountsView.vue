@@ -2,13 +2,14 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
-  NAlert, NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NModal,
+  NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NModal,
   NPagination, NPopconfirm, NProgress, NSpace, NSpin, NSwitch, NTag, useMessage,
 } from "naive-ui";
-import { Activity, Clock, Download, FileJson, Gauge, KeyRound, RefreshCw, Settings, Sparkles, Trash2 } from "@lucide/vue";
+import { Activity, AlertTriangle, Clock, Download, FileJson, Gauge, KeyRound, RefreshCw, Settings, Sparkles, Trash2 } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProviderIcon from "../components/ProviderIcon.vue";
 import { api, jsonBody } from "../api";
+import { summarizeAccountError } from "../utils/account-error";
 import { formatTokens } from "../utils/format";
 import type { Channel, Credential, QuotaSnapshot, QuotaWindow } from "../types";
 
@@ -17,27 +18,9 @@ interface ParsedQuota {
   windows: QuotaWindow[];
   credits?: { balance?: string | number; unlimited?: boolean; hasCredits?: boolean };
 }
-interface ActivityBucket {
-  bucket: number;
-  requests: number;
-  successes: number;
-  failures: number;
-  tokens: number;
-}
-interface ActivityTotals {
-  requests: number;
-  successes: number;
-  failures: number;
-}
-interface ActivityRecord {
-  buckets: ActivityBucket[];
-  totals: ActivityTotals;
-}
-interface StatusCell extends ActivityBucket {
-  level: number;
-  status: "idle" | "success" | "mixed" | "failure";
-  title: string;
-}
+interface ActivityBucket { bucket: number; requests: number; successes: number; failures: number; tokens: number }
+interface ActivityTotals { requests: number; successes: number; failures: number }
+interface ActivityRecord { buckets: ActivityBucket[]; totals: ActivityTotals }
 interface CredentialPage {
   data: Credential[];
   quotas: QuotaSnapshot[];
@@ -45,17 +28,15 @@ interface CredentialPage {
   total: number;
   page: number;
   pageSize: number;
-  pageCount: number;
+  pageCount?: number;
 }
 type AccountTagType = "success" | "error" | "warning" | "info" | "default";
 
 const ACTIVITY_BUCKET_SECONDS = 5 * 60;
-const ACTIVITY_BUCKET_COUNT = 24;
-const allowedPageSizes = [6, 12, 24];
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
-
+const allowedPageSizes = [6, 12, 24];
 const queryInteger = (value: unknown, fallback: number): number => {
   const raw = Array.isArray(value) ? value[0] : value;
   const parsed = typeof raw === "string" ? Number(raw) : NaN;
@@ -63,10 +44,9 @@ const queryInteger = (value: unknown, fallback: number): number => {
 };
 const sourceQuery = (): string => typeof route.query.source === "string" ? route.query.source : "";
 const page = ref(queryInteger(route.query.page, 1));
-const initialPageSize = queryInteger(route.query.pageSize, 6);
-const pageSize = ref(allowedPageSizes.includes(initialPageSize) ? initialPageSize : 6);
+const requestedPageSize = queryInteger(route.query.pageSize, 6);
+const pageSize = ref(allowedPageSizes.includes(requestedPageSize) ? requestedPageSize : 6);
 const activeSource = ref(sourceQuery());
-
 const credentials = ref<Credential[]>([]);
 const channels = ref<Channel[]>([]);
 const quotas = ref<QuotaSnapshot[]>([]);
@@ -76,9 +56,8 @@ const loading = ref(false);
 const modal = ref(false);
 const editing = ref<Credential | null>(null);
 const form = reactive({ label: "", enabled: true, priority: 100, weight: 1, maxConcurrency: 4 });
-
 const sourceNames = computed(() => new Map(channels.value.map((channel) => [channel.id, channel.name] as const)));
-const quotaMap = computed(() => new Map(quotas.value.map((quota) => [quota.credential_id, quota])));
+const quotaMap = computed(() => new Map(quotas.value.map((quota) => [quota.credential_id, quota] as const)));
 
 function parseQuota(row?: QuotaSnapshot): ParsedQuota {
   if (row?.snapshot) return { plan: row.snapshot.plan, windows: row.snapshot.windows ?? [], credits: row.snapshot.credits };
@@ -89,25 +68,15 @@ function parseQuota(row?: QuotaSnapshot): ParsedQuota {
     return { windows: [] };
   }
 }
-function quotaFor(credentialId: string): ParsedQuota {
-  return parseQuota(quotaMap.value.get(credentialId));
-}
-function sourceName(providerId: string): string {
-  return sourceNames.value.get(providerId) ?? providerId;
-}
-function providerLabel(providerId: string): string {
-  return ({ codex: "Codex", qoder: "Qoder", kimi: "Kimi" } as Record<string, string>)[providerId]
-    ?? sourceName(providerId);
-}
+const quotaFor = (id: string): ParsedQuota => parseQuota(quotaMap.value.get(id));
+const sourceName = (id: string): string => sourceNames.value.get(id) ?? id;
+const providerLabel = (id: string): string => ({ codex: "Codex", qoder: "Qoder", kimi: "Kimi" } as Record<string, string>)[id] ?? sourceName(id);
 function accountTitle(row: Credential): string {
   const metadata = row.metadata ?? {};
   const value = metadata.email ?? metadata.name ?? metadata.username ?? metadata.user_id ?? metadata.userId;
   return typeof value === "string" && value.trim() ? value.trim() : row.label || providerLabel(row.provider_id);
 }
-function planLabel(value?: string): string {
-  if (!value) return "未识别";
-  return value.length <= 12 ? value.replace(/^./, (letter) => letter.toUpperCase()) : value;
-}
+const planLabel = (value?: string): string => !value ? "未识别" : value.length <= 12 ? value.replace(/^./, (letter) => letter.toUpperCase()) : value;
 function quotaPercentage(window: QuotaWindow): number {
   if (window.limit === 0 && window.remaining === 0) return 0;
   if (typeof window.limit === "number" && window.limit > 0 && typeof window.remaining === "number") {
@@ -125,57 +94,41 @@ function quotaProgressStyle(window: QuotaWindow): Record<string, string> {
     "--quota-gradient": `linear-gradient(90deg,hsl(${Math.max(0, hue - 7)} 82% 43%),hsl(${Math.min(145, hue + 8)} 76% 53%))`,
   };
 }
-function numericAmount(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
-  return undefined;
-}
 function exhaustedWindow(window: QuotaWindow): boolean {
-  if (window.limit === 0 && window.remaining === 0) return true;
-  return (typeof window.remaining === "number" && window.remaining <= 0)
+  return (window.limit === 0 && window.remaining === 0)
+    || (typeof window.remaining === "number" && window.remaining <= 0)
     || (typeof window.remainingPercent === "number" && window.remainingPercent <= 0)
     || (typeof window.usedPercent === "number" && window.usedPercent >= 100);
 }
-function measurableWindows(quota: ParsedQuota): QuotaWindow[] {
-  return quota.windows.filter((window) =>
-    window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined,
-  );
-}
 function quotaExhausted(providerId: string, quota: ParsedQuota): boolean {
   if (quota.credits?.unlimited) return false;
-  const measurable = measurableWindows(quota);
-  if (providerId === "codex" && measurable.length) {
-    const core = measurable.filter((window) => window.key === "primary" || window.key === "secondary");
-    const target = core.length ? core : measurable.filter((window) => !window.key.startsWith("additional_"));
-    return target.length > 0 && target.every(exhaustedWindow);
-  }
-  if (providerId === "qoder" && measurable.length) {
+  const measurable = quota.windows.filter((window) => window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined);
+  if (providerId === "qoder") {
     const pools = measurable.filter((window) => window.key === "user" || window.key === "organization");
     return pools.length > 0 && pools.every(exhaustedWindow);
   }
+  if (providerId === "codex") {
+    const core = measurable.filter((window) => window.key === "primary" || window.key === "secondary");
+    return core.length > 0 ? core.every(exhaustedWindow) : measurable.length > 0 && measurable.every(exhaustedWindow);
+  }
   if (measurable.length) return measurable.every(exhaustedWindow);
-  const balance = numericAmount(quota.credits?.balance);
-  return quota.credits?.hasCredits === false || (balance !== undefined && balance <= 0);
+  const balance = Number(quota.credits?.balance);
+  return quota.credits?.hasCredits === false || (Number.isFinite(balance) && balance <= 0);
 }
 function accountState(row: Credential): { text: string; type: AccountTagType } {
   if (row.enabled !== 1) return { text: "已停用", type: "default" };
   const snapshot = quotaMap.value.get(row.id);
   if (snapshot?.status === "ok" && quotaExhausted(row.provider_id, quotaFor(row.id))) return { text: "额度耗尽", type: "error" };
-  if (row.last_error || snapshot?.status === "error") return { text: "警告", type: "warning" };
+  if (row.last_error || snapshot?.status === "error") return { text: "需要关注", type: "warning" };
   if (snapshot?.status === "unsupported") return { text: "额度未知", type: "warning" };
-  return { text: "启用", type: "success" };
+  return { text: "运行正常", type: "success" };
 }
-function accountWarning(row: Credential): string {
-  return row.last_error || quotaMap.value.get(row.id)?.error_message || "";
-}
-function formatAmount(value: unknown): string {
-  if (typeof value === "number" && Number.isFinite(value)) return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
-  if (typeof value === "string" && value.trim()) return value;
-  return "—";
-}
-function formatCompact(value: number): string {
-  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
-}
+const accountWarning = (row: Credential): string => row.last_error || quotaMap.value.get(row.id)?.error_message || "";
+const accountIssue = (row: Credential) => summarizeAccountError(accountWarning(row));
+const formatAmount = (value: unknown): string => {
+  if (typeof value === "number" && Number.isFinite(value)) return formatTokens(value);
+  return typeof value === "string" && value.trim() ? value : "—";
+};
 function formatTime(value?: number | null, short = false): string {
   if (!value) return short ? "从未调用" : "—";
   const date = new Date(value > 10_000_000_000 ? value : value * 1000);
@@ -183,66 +136,37 @@ function formatTime(value?: number | null, short = false): string {
     ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
     : date.toLocaleString("zh-CN", { hour12: false });
 }
-function activityRecord(credentialId: string): ActivityRecord {
-  return activity.value[credentialId] ?? { buckets: [], totals: { requests: 0, successes: 0, failures: 0 } };
-}
-function activityCells(credentialId: string): StatusCell[] {
-  const rows = activityRecord(credentialId).buckets;
+const activityRecord = (id: string): ActivityRecord => activity.value[id] ?? { buckets: [], totals: { requests: 0, successes: 0, failures: 0 } };
+function activityCells(id: string) {
+  const rows = activityRecord(id).buckets;
   const byBucket = new Map(rows.map((row) => [row.bucket, row] as const));
-  const currentBucket = Math.floor(Math.floor(Date.now() / 1000) / ACTIVITY_BUCKET_SECONDS) * ACTIVITY_BUCKET_SECONDS;
-  const maxRequests = Math.max(0, ...rows.map((row) => row.requests));
-  return Array.from({ length: ACTIVITY_BUCKET_COUNT }, (_, index) => {
-    const bucket = currentBucket - (ACTIVITY_BUCKET_COUNT - 1 - index) * ACTIVITY_BUCKET_SECONDS;
+  const current = Math.floor(Date.now() / 1000 / ACTIVITY_BUCKET_SECONDS) * ACTIVITY_BUCKET_SECONDS;
+  const max = Math.max(0, ...rows.map((row) => row.requests));
+  return Array.from({ length: 24 }, (_, index) => {
+    const bucket = current - (23 - index) * ACTIVITY_BUCKET_SECONDS;
     const row = byBucket.get(bucket) ?? { bucket, requests: 0, successes: 0, failures: 0, tokens: 0 };
-    const level = row.requests === 0 || maxRequests === 0
-      ? 0
-      : Math.max(1, Math.min(4, Math.ceil(Math.log1p(row.requests) / Math.log1p(maxRequests) * 4)));
+    const level = row.requests === 0 || max === 0 ? 0 : Math.max(1, Math.min(4, Math.ceil(Math.log1p(row.requests) / Math.log1p(max) * 4)));
     const status = row.requests === 0 ? "idle" : row.failures === 0 ? "success" : row.successes === 0 ? "failure" : "mixed";
-    const from = new Date(bucket * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-    const to = new Date((bucket + ACTIVITY_BUCKET_SECONDS) * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-    return {
-      ...row,
-      level,
-      status,
-      title: `${from}–${to} · 请求 ${row.requests} · 成功 ${row.successes} · 失败 ${row.failures} · Token ${formatTokens(row.tokens)}`,
-    };
+    return { ...row, level, status };
   });
 }
-function summary(credentialId: string): ActivityTotals & { successRate: number } {
-  const value = activityRecord(credentialId).totals;
+function summary(id: string) {
+  const value = activityRecord(id).totals;
   return { ...value, successRate: value.requests ? value.successes / value.requests * 100 : 0 };
 }
-function successRateClass(credentialId: string): string {
-  const value = summary(credentialId);
+function successRateClass(id: string): string {
+  const value = summary(id);
   return !value.requests ? "status-rate--empty" : value.successRate >= 95 ? "status-rate--high" : value.successRate >= 80 ? "status-rate--medium" : "status-rate--low";
 }
-function paginationQuery(nextPage = page.value, nextPageSize = pageSize.value) {
-  return { ...route.query, page: String(nextPage), pageSize: String(nextPageSize) };
-}
-async function changePage(value: number) {
-  await router.push({ query: paginationQuery(value, pageSize.value) });
-}
-async function changePageSize(value: number) {
-  await router.push({ query: paginationQuery(1, value) });
-}
-async function normalizePaginationQuery() {
-  const currentPage = typeof route.query.page === "string" ? route.query.page : "";
-  const currentPageSize = typeof route.query.pageSize === "string" ? route.query.pageSize : "";
-  if (currentPage !== String(page.value) || currentPageSize !== String(pageSize.value)) {
-    await router.replace({ query: paginationQuery() });
-  }
-}
+const paginationQuery = (nextPage = page.value, nextPageSize = pageSize.value) => ({ ...route.query, page: String(nextPage), pageSize: String(nextPageSize) });
 async function load() {
   loading.value = true;
   try {
     const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) });
     if (activeSource.value) params.set("provider", activeSource.value);
-    const channelRequest = channels.value.length
-      ? Promise.resolve<{ data: Channel[] } | null>(null)
-      : api<{ data: Channel[] }>("/channels");
     const [channelResult, accountResult] = await Promise.all([
-      channelRequest,
-      api<CredentialPage>(`/credentials/paged?${params.toString()}`),
+      channels.value.length ? Promise.resolve(null) : api<{ data: Channel[] }>("/channels"),
+      api<CredentialPage>(`/credentials/paged?${params}`),
     ]);
     if (channelResult) channels.value = channelResult.data;
     credentials.value = accountResult.data;
@@ -251,7 +175,7 @@ async function load() {
     total.value = accountResult.total;
     page.value = accountResult.page;
     pageSize.value = accountResult.pageSize;
-    await normalizePaginationQuery();
+    await router.replace({ query: paginationQuery() });
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
   } finally {
@@ -309,33 +233,25 @@ async function downloadAuth(row: Credential) {
     const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
-    const label = row.label.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80) || row.provider_id;
     anchor.href = url;
-    anchor.download = `${label}.json`;
-    document.body.appendChild(anchor);
+    anchor.download = `${row.label.replace(/[^a-zA-Z0-9._-]+/g, "_") || row.provider_id}.json`;
     anchor.click();
-    anchor.remove();
     URL.revokeObjectURL(url);
-    message.success("认证文件已下载，请妥善保管");
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
   }
 }
-
-watch(
-  () => [route.query.page, route.query.pageSize, route.query.source] as const,
-  () => {
-    const nextPage = queryInteger(route.query.page, 1);
-    const requestedSize = queryInteger(route.query.pageSize, 6);
-    const nextPageSize = allowedPageSizes.includes(requestedSize) ? requestedSize : 6;
-    const nextSource = sourceQuery();
-    const changed = nextPage !== page.value || nextPageSize !== pageSize.value || nextSource !== activeSource.value;
-    page.value = nextPage;
-    pageSize.value = nextPageSize;
-    activeSource.value = nextSource;
-    if (changed) void load();
-  },
-);
+watch(() => [route.query.page, route.query.pageSize, route.query.source] as const, () => {
+  const nextPage = queryInteger(route.query.page, 1);
+  const size = queryInteger(route.query.pageSize, 6);
+  const nextSize = allowedPageSizes.includes(size) ? size : 6;
+  const source = sourceQuery();
+  const changed = nextPage !== page.value || nextSize !== pageSize.value || source !== activeSource.value;
+  page.value = nextPage;
+  pageSize.value = nextSize;
+  activeSource.value = source;
+  if (changed) void load();
+});
 onMounted(load);
 </script>
 
@@ -373,25 +289,34 @@ onMounted(load);
           <span class="meta-time"><clock :size="12" />{{ formatTime(row.last_used_at, true) }}</span>
         </div>
 
-        <n-alert v-if="accountWarning(row)" type="warning" :bordered="false" class="account-warning">{{ accountWarning(row) }}</n-alert>
+        <div v-if="accountIssue(row)" class="account-issue" :class="`account-issue--${accountIssue(row)?.tone}`">
+          <alert-triangle :size="16" />
+          <div class="account-issue__copy">
+            <strong>{{ accountIssue(row)?.label }}</strong>
+            <span>{{ accountIssue(row)?.hint }}</span>
+          </div>
+          <n-tag size="small" :bordered="false" :type="accountIssue(row)?.tone === 'error' ? 'error' : 'warning'">
+            {{ accountIssue(row)?.code }}
+          </n-tag>
+        </div>
 
         <section class="panel">
           <div class="panel-title"><activity :size="13" />近 2 小时健康状态</div>
           <div class="usage-stats">
-            <span class="stat-pill stat-pill--success pill success">成功 <b>{{ formatCompact(activityRecord(row.id).totals.successes) }}</b></span>
-            <span class="stat-pill stat-pill--failure pill failure">失败 <b>{{ formatCompact(activityRecord(row.id).totals.failures) }}</b></span>
+            <span class="stat-pill stat-pill--success">成功 <b>{{ formatTokens(activityRecord(row.id).totals.successes) }}</b></span>
+            <span class="stat-pill stat-pill--failure">失败 <b>{{ formatTokens(activityRecord(row.id).totals.failures) }}</b></span>
             <span class="status-rate" :class="successRateClass(row.id)">{{ summary(row.id).requests ? `${Math.round(summary(row.id).successRate)}%` : '--' }}</span>
           </div>
-          <div class="status-blocks" aria-label="近两小时账号请求状态">
+          <div class="status-blocks">
             <span
               v-for="cell in activityCells(row.id)"
               :key="cell.bucket"
               class="status-block"
               :class="[`status-block--${cell.status}`, `level-${cell.level}`]"
-              :title="cell.title"
+              :title="`${formatTime(cell.bucket)} · ${cell.requests} 次请求 · ${formatTokens(cell.tokens)} Token`"
             />
           </div>
-          <div class="caption">近 2 小时共 {{ summary(row.id).requests }} 次请求</div>
+          <div class="caption">近 2 小时共 {{ formatTokens(summary(row.id).requests) }} 次请求</div>
         </section>
 
         <section class="panel">
@@ -438,8 +363,8 @@ onMounted(load);
       :page-sizes="allowedPageSizes"
       show-size-picker
       show-quick-jumper
-      @update:page="changePage"
-      @update:page-size="changePageSize"
+      @update:page="value => router.push({ query: paginationQuery(value) })"
+      @update:page-size="value => router.push({ query: paginationQuery(1, value) })"
     />
   </div>
 
@@ -461,59 +386,59 @@ onMounted(load);
 </template>
 
 <style scoped>
-.account-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 18px; }
-.account-card { height: 100%; border: 1px solid var(--n-border-color); border-radius: 16px; background: linear-gradient(180deg, rgba(148, 163, 184, .05), transparent 140px), var(--n-color); box-shadow: 0 10px 26px rgba(15, 23, 42, .05); transition: transform .2s ease, box-shadow .2s ease; }
-.account-card:hover { transform: translateY(-2px); box-shadow: 0 18px 34px rgba(15, 23, 42, .08); }
-.account-card--disabled { opacity: .68; filter: grayscale(.25); }
-.account-card--codex { background: linear-gradient(180deg, rgba(124, 101, 255, .06), transparent 140px), var(--n-color); }
-.account-card--qoder { background: linear-gradient(180deg, rgba(34, 197, 94, .05), transparent 140px), var(--n-color); }
-.account-card--kimi { background: linear-gradient(180deg, rgba(59, 130, 246, .05), transparent 140px), var(--n-color); }
-.account-card :deep(.n-card__content) { display: flex; flex-direction: column; min-height: 100%; padding: 18px; }
-.card-header { display: flex; align-items: center; gap: 12px; }
-.header-text { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.header-text > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-.badge-row, .meta-row, .usage-stats, .panel-title, .panel-head, .credit, .toggle { display: flex; align-items: center; }
-.badge-row { gap: 6px; }
-.meta-row { flex-wrap: wrap; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--n-border-color); font-size: 11px; color: var(--n-text-color-3); }
-.meta-row b { color: var(--n-text-color-1); }
-.meta-time { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
-.account-warning { margin-top: 12px; }
-.panel { margin-top: 14px; padding-top: 13px; border-top: 1px dashed var(--n-border-color); }
-.panel-title { gap: 5px; font-size: 11px; font-weight: 700; }
-.panel-head { justify-content: space-between; gap: 8px; margin-bottom: 9px; }
-.usage-stats { gap: 7px; margin: 8px 0; }
-.stat-pill, .pill { padding: 4px 9px; border-radius: 999px; font-size: 11px; }
-.stat-pill--success, .pill.success { color: #15803d; background: rgba(34, 197, 94, .1); }
-.stat-pill--failure, .pill.failure { color: #dc2626; background: rgba(239, 68, 68, .08); }
-.status-rate { margin-left: auto; padding: 5px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; }
-.status-rate--empty { background: var(--n-color-embedded); }
-.status-rate--high { color: #15803d; background: rgba(34, 197, 94, .12); }
-.status-rate--medium { color: #b45309; background: rgba(245, 158, 11, .13); }
-.status-rate--low { color: #dc2626; background: rgba(239, 68, 68, .1); }
-.status-blocks { display: flex; gap: 3px; }
-.status-block { flex: 1; height: 7px; border-radius: 999px; background: rgba(148, 163, 184, .2); transition: transform .14s ease, opacity .14s ease; }
-.status-block:hover { transform: scaleY(1.65); opacity: .9; }
-.status-block--success.level-1 { background: rgba(34, 197, 94, .32); }
-.status-block--success.level-2 { background: rgba(34, 197, 94, .5); }
-.status-block--success.level-3 { background: rgba(34, 197, 94, .7); }
-.status-block--success.level-4 { background: #16a34a; }
-.status-block--mixed { background: #f59e0b; }
-.status-block--failure { background: #dc2626; }
-.caption { margin-top: 6px; color: var(--n-text-color-3); font-size: 10px; }
-.quota-list { display: flex; flex-direction: column; gap: 12px; }
-.quota-row { display: flex; flex-direction: column; gap: 5px; }
-.quota-row :deep(.n-progress-graph-line-fill) { background: var(--quota-gradient) !important; box-shadow: 0 0 8px color-mix(in srgb, var(--quota-color) 24%, transparent); }
-.quota-head { display: flex; justify-content: space-between; font-size: 12px; }
-.credit { justify-content: space-between; padding: 10px 12px; border-radius: 10px; background: var(--n-color-embedded); font-size: 12px; }
-.credit span { display: flex; align-items: center; gap: 6px; }
-.quota-refresh { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 9px; border: 1px dashed var(--n-border-color); border-radius: 10px; background: transparent; color: var(--n-text-color-3); cursor: pointer; }
-.card-actions { display: flex; align-items: center; justify-content: space-between; margin-top: auto; padding-top: 15px; border-top: 1px solid var(--n-border-color); }
-.toggle { gap: 8px; font-size: 11px; color: var(--n-text-color-3); }
-.pagination-row { justify-content: center; margin-top: 22px; }
-.account-form-grid { grid-template-columns: repeat(3, 1fr); }
-@media (max-width: 820px) { .account-grid { grid-template-columns: 1fr; } }
-@media (max-width: 520px) {
-  .meta-time { margin-left: 0; flex-basis: 100%; }
-  .account-form-grid { grid-template-columns: 1fr; }
-}
+.account-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:18px; }
+.account-card { height:100%; border:1px solid var(--n-border-color); border-radius:16px; background:linear-gradient(180deg,rgba(148,163,184,.045),transparent 140px),var(--n-color); box-shadow:0 10px 28px rgba(15,23,42,.045); transition:transform .18s ease,box-shadow .18s ease; }
+.account-card:hover { transform:translateY(-2px); box-shadow:0 18px 34px rgba(15,23,42,.075); }
+.account-card--disabled { opacity:.68; filter:grayscale(.25); }
+.account-card--codex { background:linear-gradient(180deg,rgba(124,101,255,.055),transparent 140px),var(--n-color); }
+.account-card--qoder { background:linear-gradient(180deg,rgba(34,197,94,.05),transparent 140px),var(--n-color); }
+.account-card--kimi { background:linear-gradient(180deg,rgba(59,130,246,.05),transparent 140px),var(--n-color); }
+.account-card :deep(.n-card__content) { display:flex; flex-direction:column; min-height:100%; padding:18px; }
+.card-header { display:flex; align-items:center; gap:12px; }
+.header-text { min-width:0; display:flex; flex-direction:column; gap:6px; }
+.header-text>strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; font-weight:650; }
+.badge-row,.meta-row,.usage-stats,.panel-title,.panel-head,.credit,.toggle { display:flex; align-items:center; }
+.badge-row { gap:6px; }
+.meta-row { flex-wrap:wrap; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid var(--n-border-color); font-size:11px; color:var(--n-text-color-3); }
+.meta-row b { color:var(--n-text-color-1); }
+.meta-time { display:inline-flex; align-items:center; gap:4px; margin-left:auto; }
+.account-issue { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; min-height:54px; margin-top:12px; padding:10px 11px; border:1px solid rgba(245,158,11,.22); border-radius:11px; background:rgba(245,158,11,.07); color:#b45309; }
+.account-issue--error { border-color:rgba(239,68,68,.2); background:rgba(239,68,68,.065); color:#dc2626; }
+.account-issue__copy { min-width:0; display:flex; flex-direction:column; gap:2px; }
+.account-issue__copy strong { color:var(--n-text-color-1); font-size:11px; }
+.account-issue__copy span { overflow:hidden; color:var(--n-text-color-3); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.panel { margin-top:14px; padding-top:13px; border-top:1px dashed var(--n-border-color); }
+.panel-title { gap:5px; font-size:11px; font-weight:700; }
+.panel-head { justify-content:space-between; gap:8px; margin-bottom:9px; }
+.usage-stats { gap:7px; margin:8px 0; }
+.stat-pill { padding:4px 9px; border-radius:999px; font-size:11px; }
+.stat-pill--success { color:#15803d; background:rgba(34,197,94,.1); }
+.stat-pill--failure { color:#dc2626; background:rgba(239,68,68,.08); }
+.status-rate { margin-left:auto; padding:5px 9px; border-radius:999px; font-size:11px; font-weight:700; }
+.status-rate--empty { background:var(--n-color-embedded); }
+.status-rate--high { color:#15803d; background:rgba(34,197,94,.12); }
+.status-rate--medium { color:#b45309; background:rgba(245,158,11,.13); }
+.status-rate--low { color:#dc2626; background:rgba(239,68,68,.1); }
+.status-blocks { display:flex; gap:3px; }
+.status-block { flex:1; height:7px; border-radius:999px; background:rgba(148,163,184,.2); }
+.status-block--success.level-1 { background:rgba(34,197,94,.32); }
+.status-block--success.level-2 { background:rgba(34,197,94,.5); }
+.status-block--success.level-3 { background:rgba(34,197,94,.7); }
+.status-block--success.level-4 { background:#16a34a; }
+.status-block--mixed { background:#f59e0b; }
+.status-block--failure { background:#dc2626; }
+.caption { margin-top:6px; color:var(--n-text-color-3); font-size:10px; }
+.quota-list { display:flex; flex-direction:column; gap:12px; }
+.quota-row { display:flex; flex-direction:column; gap:5px; }
+.quota-row :deep(.n-progress-graph-line-fill) { background:var(--quota-gradient)!important; box-shadow:0 0 8px color-mix(in srgb,var(--quota-color) 24%,transparent); }
+.quota-head { display:flex; justify-content:space-between; font-size:12px; }
+.credit { justify-content:space-between; padding:10px 12px; border-radius:10px; background:var(--n-color-embedded); font-size:12px; }
+.credit span { display:flex; align-items:center; gap:6px; }
+.quota-refresh { display:flex; align-items:center; justify-content:center; gap:6px; width:100%; padding:9px; border:1px dashed var(--n-border-color); border-radius:10px; background:transparent; color:var(--n-text-color-3); cursor:pointer; }
+.card-actions { display:flex; align-items:center; justify-content:space-between; margin-top:auto; padding-top:15px; border-top:1px solid var(--n-border-color); }
+.toggle { gap:8px; font-size:11px; color:var(--n-text-color-3); }
+.pagination-row { justify-content:center; margin-top:22px; }
+.account-form-grid { grid-template-columns:repeat(3,1fr); }
+@media(max-width:820px) { .account-grid { grid-template-columns:1fr; } }
+@media(max-width:520px) { .meta-time { margin-left:0; flex-basis:100%; } .account-form-grid { grid-template-columns:1fr; } .account-issue { grid-template-columns:auto minmax(0,1fr); } .account-issue>.n-tag { grid-column:2; justify-self:start; } }
 </style>
