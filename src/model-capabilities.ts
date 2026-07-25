@@ -95,7 +95,7 @@ export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoi
   const row = await env.DB.prepare(
     `SELECT capabilities_json,raw_json FROM discovered_models
      WHERE provider_id=? AND model_id=? AND endpoint=? AND enabled=1
-     ORDER BY discovered_at DESC LIMIT 1`,
+     ORDER BY discovered_at DESC,credential_id ASC LIMIT 1`,
   ).bind(route.provider_id, route.upstream_model, endpoint).first<{ capabilities_json: string; raw_json: string }>().catch(() => null);
   const discovered = row ? discoveredCapabilities(row.capabilities_json, row.raw_json) : {};
   const configured = normalizeCapabilities(options.capabilities ?? options.model_capabilities);
@@ -137,9 +137,16 @@ export function validateModelCapabilities(body: Record<string, unknown>, capabil
 export async function enrichModelsWithCapabilities(env: Env, models: Array<Record<string, unknown>>): Promise<Array<Record<string, unknown>>> {
   const [discoveredResult, routeResult] = await Promise.all([
     env.DB.prepare(
-      `SELECT provider_id,model_id,MAX(capabilities_json) AS capabilities_json,MAX(raw_json) AS raw_json,
-              MAX(discovered_at) AS discovered_at
-       FROM discovered_models WHERE enabled=1 GROUP BY provider_id,model_id`,
+      `SELECT provider_id,model_id,capabilities_json,raw_json,discovered_at
+       FROM (
+         SELECT provider_id,model_id,capabilities_json,raw_json,discovered_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY provider_id,model_id
+                  ORDER BY discovered_at DESC,credential_id ASC
+                ) AS row_number
+         FROM discovered_models WHERE enabled=1
+       )
+       WHERE row_number=1`,
     ).all<{ provider_id: string; model_id: string; capabilities_json: string; raw_json: string; discovered_at: number }>().catch(() => ({ results: [] })),
     env.DB.prepare(
       `SELECT public_model,provider_id,upstream_model,options_json
