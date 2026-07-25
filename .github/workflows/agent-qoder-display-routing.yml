@@ -22,9 +22,33 @@ jobs:
       - name: Apply proposed changes
         working-directory: repo
         run: |
-          git apply --recount --verbose --check agent-qoder-routing.patch
-          git apply --recount --verbose agent-qoder-routing.patch
-          rm agent-qoder-routing.patch .github/workflows/agent-qoder-display-routing.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          patch_path = Path("agent-qoder-routing.patch")
+          patch = patch_path.read_text()
+          filtered = re.sub(
+              r"diff --git a/src/proxy-v2\.ts b/src/proxy-v2\.ts\n.*?(?=diff --git a/test/qoder-model-routing\.test\.ts)",
+              "",
+              patch,
+              flags=re.S,
+          )
+          Path("agent-qoder-filtered.patch").write_text(filtered)
+
+          proxy_path = Path("src/proxy-v2.ts")
+          proxy = proxy_path.read_text()
+          old_import = 'import { authenticateGatewayKey, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";'
+          new_import = 'import { authenticateGatewayKey, gatewayKeyAllowsModel, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";'
+          old_check = 'if (allowedModels.length > 0 && !allowedModels.includes(publicModel)) {'
+          new_check = 'if (!await gatewayKeyAllowsModel(c.env, publicModel, allowedModels)) {'
+          if proxy.count(old_import) != 1 or proxy.count(old_check) != 1:
+              raise SystemExit("proxy-v2.ts expected context not found")
+          proxy_path.write_text(proxy.replace(old_import, new_import).replace(old_check, new_check))
+          PY
+          git apply --recount --verbose --check agent-qoder-filtered.patch
+          git apply --recount --verbose agent-qoder-filtered.patch
+          rm agent-qoder-routing.patch agent-qoder-filtered.patch .github/workflows/agent-qoder-display-routing.yml
       - uses: pnpm/action-setup@v4
         with:
           version: 11.9.0
