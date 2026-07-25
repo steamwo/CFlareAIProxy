@@ -1,4 +1,7 @@
 import type { Context } from "hono";
+import {
+  isCodexMultiAgentClient, loadCodexMultiAgentModelProfiles, optimizeCodexMultiAgentV2Body,
+} from "./codex-multi-agent-v2";
 import { providerFetchForCredential } from "./credential-fetch";
 import { authenticateGatewayKey, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";
 import type { CredentialAvailability } from "./db";
@@ -157,6 +160,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
     // Each route gets two account attempts before falling through to the next route.
     const attemptPlan = ordered.routes.flatMap((route: ModelRouteRow) => [route, route]);
     const blockedProviders = new Set<string>();
+    let codexMultiAgentModels: ReturnType<typeof loadCodexMultiAgentModelProfiles> | undefined;
 
     for (const route of attemptPlan) {
       if (blockedProviders.has(route.provider_id)) continue;
@@ -169,6 +173,24 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
         const provider = await getProvider(c.env, route.provider_id);
         const runtime = await routeRuntimeOptions(c.env, route, endpoint);
         validateModelCapabilities(body, runtime.capabilities);
+        const providerMultiAgentV2 = provider.options.codex_multi_agent_v2 === true || provider.options.codexMultiAgentV2 === true;
+        const multiAgentEnabled = runtime.codexMultiAgentV2 ?? providerMultiAgentV2;
+        const multiAgentEligible = multiAgentEnabled
+          && endpoint === "responses"
+          && isCodexMultiAgentClient(c.req.raw.headers.get("user-agent"));
+        if (multiAgentEligible && !codexMultiAgentModels) {
+          codexMultiAgentModels = loadCodexMultiAgentModelProfiles(c.env, allowedModels).catch(() => []);
+        }
+        const multiAgent = multiAgentEligible
+          ? optimizeCodexMultiAgentV2Body(body, {
+            enabled: true,
+            endpoint,
+            providerKind: provider.kind,
+            userAgent: c.req.raw.headers.get("user-agent"),
+            models: await codexMultiAgentModels!,
+          })
+          : { body, collaborationNamespaceOptimized: false };
+        const routeBody = multiAgent.body;
 
         const availability = await listCredentialAvailabilityForModel(c.env, provider.id, route.upstream_model, endpoint);
         const rows = availability.filter((entry: CredentialAvailability) => entry.available).map((entry: CredentialAvailability) => entry.row);
@@ -190,7 +212,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             providerId: provider.id,
             strategy: provider.pool_strategy,
             candidates,
-            sessionKey: provider.options.session_affinity === false ? undefined : sessionKey(c.req.raw, body, gatewayKey.id, provider.id),
+            sessionKey: provider.options.session_affinity === false ? undefined : sessionKey(c.req.raw, routeBody, gatewayKey.id, provider.id),
             leaseTtlMs: 15 * 60_000,
           });
         } catch (error) {
@@ -217,7 +239,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
           endpoint,
           publicModel,
           upstreamModel: route.upstream_model,
-          body,
+          body: routeBody,
           originalRequest: c.req.raw,
           provider,
           credential,
@@ -289,12 +311,13 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
         const downstream = await prepareProviderResponse({
           upstream,
           mode: upstreamRequest.responseMode,
-          requestedStream: body.stream === true,
+          requestedStream: routeBody.stream === true,
           model: publicModel,
           requestId,
           providerKind: provider.kind,
           endpoint,
           forceResponseModelMapping: runtime.forceResponseModelMapping,
+          restoreCodexCollaborationNamespace: multiAgent.collaborationNamespaceOptimized,
         });
         const eventBase = {
           requestId,
