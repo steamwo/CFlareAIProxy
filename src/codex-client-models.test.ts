@@ -71,7 +71,10 @@ describe("Codex client model catalog", () => {
       multiAgentModels: new Set(),
       providerKinds: new Map([["codex", "codex"], ["openai-main", "openai-compatible"]]),
     });
-    expect(models[0].supports_search_tool).toBe(false);
+    const model = models[0];
+    expect(model).toBeDefined();
+    if (!model) throw new Error("Expected mixed model entry");
+    expect(model.supports_search_tool).toBe(false);
   });
 
   it("advertises multi-agent v2 only when every Responses route is enabled", () => {
