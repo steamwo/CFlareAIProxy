@@ -25,9 +25,21 @@ interface ActivityRecord {
   };
 }
 
+interface QuotaWindowRecord extends Record<string, unknown> {
+  limit?: unknown;
+  remaining?: unknown;
+  usedPercent?: unknown;
+  remainingPercent?: unknown;
+}
+
 function numericValue(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function normalizeActivityRecord(value: unknown): ActivityRecord {
@@ -62,6 +74,44 @@ function normalizeActivityRecord(value: unknown): ActivityRecord {
   return { buckets, totals };
 }
 
+function normalizeQuotaWindow(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const window = value as QuotaWindowRecord;
+  const limit = finiteNumber(window.limit);
+  const remaining = finiteNumber(window.remaining);
+  if (limit === undefined || limit <= 0 || remaining === undefined) return value;
+
+  const remainingPercent = Math.max(0, Math.min(100, remaining / limit * 100));
+  return {
+    ...window,
+    remainingPercent,
+    usedPercent: 100 - remainingPercent,
+  };
+}
+
+function normalizeQuotaDocument(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const document = value as Record<string, unknown>;
+  if (!Array.isArray(document.windows)) return value;
+  return { ...document, windows: document.windows.map(normalizeQuotaWindow) };
+}
+
+function normalizeQuotaRecord(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const row = value as Record<string, unknown>;
+  const normalized: Record<string, unknown> = { ...row };
+
+  if (row.snapshot) normalized.snapshot = normalizeQuotaDocument(row.snapshot);
+  if (typeof row.quota_json === "string" && row.quota_json.trim()) {
+    try {
+      normalized.quota_json = JSON.stringify(normalizeQuotaDocument(JSON.parse(row.quota_json)));
+    } catch {
+      // Keep malformed legacy snapshots untouched; the view already handles them gracefully.
+    }
+  }
+  return normalized;
+}
+
 export function normalizeCredentialPageActivity<T>(payload: T): T {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
   const source = payload as T & { activity?: unknown };
@@ -71,6 +121,17 @@ export function normalizeCredentialPageActivity<T>(payload: T): T {
       .map(([credentialId, value]) => [credentialId, normalizeActivityRecord(value)]),
   );
   return { ...source, activity };
+}
+
+export function normalizeCredentialPageQuotas<T>(payload: T): T {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const source = payload as T & { quotas?: unknown };
+  if (!Array.isArray(source.quotas)) return payload;
+  return { ...source, quotas: source.quotas.map(normalizeQuotaRecord) };
+}
+
+export function normalizeCredentialPage<T>(payload: T): T {
+  return normalizeCredentialPageQuotas(normalizeCredentialPageActivity(payload));
 }
 
 async function parseResponse<T>(response: Response): Promise<T> {
@@ -89,7 +150,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const resolvedPath = path === "/overview" ? "/overview-v2" : path;
   const response = await fetch(`${API_BASE}${resolvedPath}`, { ...init, headers, credentials: "same-origin" });
   const payload = await parseResponse<T>(response);
-  return resolvedPath.startsWith("/credentials/paged") ? normalizeCredentialPageActivity(payload) : payload;
+  return resolvedPath.startsWith("/credentials/paged") ? normalizeCredentialPage(payload) : payload;
 }
 
 export const jsonBody = (value: unknown) => JSON.stringify(value);
