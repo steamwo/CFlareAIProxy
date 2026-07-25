@@ -28,8 +28,8 @@ jobs:
           cache: pnpm
       - name: Apply proposed changes
         run: |
-          git apply --check agent-qoder-routing.patch
-          git apply agent-qoder-routing.patch
+          git apply --recount --check agent-qoder-routing.patch
+          git apply --recount agent-qoder-routing.patch
           rm agent-qoder-routing.patch .github/workflows/agent-qoder-display-routing.yml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
