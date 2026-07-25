@@ -92,7 +92,8 @@ function installQuotaProgressEnhancement(): void {
       }
       for (const node of mutation.addedNodes) {
         if (!(node instanceof Element)) continue;
-        if (node.matches(QUOTA_ROW_SELECTOR)) enhanceQuotaProgress(node);
+        const row = node.closest(QUOTA_ROW_SELECTOR);
+        if (row) enhanceQuotaProgress(row);
         enhanceQuotaProgressWithin(node);
       }
     }
