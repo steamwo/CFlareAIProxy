@@ -5,9 +5,9 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: f8dffa0522c628c27970148319a50f25f0ffebdd -->
+<!-- upstream-ref: 27fc3169bb4eb0509e3aba7dde4ab80286b0ae65 -->
 <!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
-<!-- last-reviewed: 2026-07-25 -->
+<!-- last-reviewed: 2026-07-26 -->
 
 ## 1. 当前基线
 
@@ -15,23 +15,19 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `f8dffa0522c628c27970148319a50f25f0ffebdd` |
+| 已审阅上游提交 | `27fc3169bb4eb0509e3aba7dde4ab80286b0ae65` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
-| 审阅日期 | 2026-07-25 |
+| 审阅日期 | 2026-07-26 |
 
-本轮审阅范围为 `35ebe3f3..f8dffa05`，共 8 个提交：
+本轮审阅范围为 `f8dffa05..27fc3169`，共 11 个提交：
 
-- 1 个纯赞助文档提交，忽略。
-- 1 个 Claude client model catalog，属于明确排除范围。
-- 1 个 Codex client model catalog 重构与增强，属于 provider/model registry 范围。
-- 5 个 Codex Live/WebRTC/sideband/TCP relay 相关提交，属于尚未批准的长连接和媒体转发架构。
+- 1 个 OAuth 账号选择调试日志提交及其合并提交，只增加可观测性，不改变选择、代理或失败语义。
+- 1 个通用 executor 注册串行化与重绑定修复，同时保护 Codex executor 不因无关账号更新被替换；其运行时对象生命周期依赖本地 Go 进程，Workers 不直接移植。
+- 1 个 Windows pluginhost 缓冲修复，属于本地插件运行时范围。
+- 其余为 Claude、Antigravity/Gemini、Grok/xAI 专用模型、签名、reasoning replay、translator 或 WebSocket executor 变化，属于当前明确排除范围。
 
-Codex client model catalog 新增或强化了模板回退、稳定优先级、reasoning levels、input modalities、context window、visibility、search-tool support 和 Multi-Agent V2 标记。CFlareAIProxy 已在 `dev` 按 Workers 架构实现动态目录：数据来自当前公开路由、D1 最新模型发现记录和通用 capability，不引入第二套常驻内存 registry 或文件模板缓存；`/v1/models?client_version=...` 返回 Codex 客户端结构。
-
-Issue #16 的 HTTP/SSE 兼容层也已进入实装：默认关闭，支持 route/provider feature flag，仅识别 Codex Desktop / codex-tui；覆盖 `spawn_agent`、`agent_message`、collaboration namespace 冲突检测与响应恢复，并在混合路由时仅当所有 Responses 路由均启用才宣告 `multi_agent_version: v2`。WebSocket continuity 仍不在本轮范围。
-
-Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会话和动态配置热更新，不能安全直接移植到 Workers 主服务。已建立 Issue #17 进行独立架构和威胁模型评估，本轮不修改运行代码。
+上游通用 executor 修复的可迁移行为是：配置或账号目录并发更新时，注册流程应串行；无关 provider 的更新不应替换仍有效的 Codex/provider 执行实例；读取配置时应使用同一快照。CFlareAIProxy 不维护 Go 进程内 executor registry，账号租约与并发选择由 Durable Object 串行化，路由/provider 配置按请求读取一致快照，因此没有对应的安全代码或测试需要同步。本轮仅更新审阅基线。
 
 ## 2. 对齐程度
 
@@ -70,7 +66,7 @@ Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会
 | Codex reasoning replay/signature cache | 未对齐 | 尚未实现跨请求 reasoning/signature 重放缓存 | 评估 Workers KV/DO 实现 |
 | Codex Responses WebSocket | 未对齐 | Workers 网关当前仅实现 HTTP/SSE | 未单独批准前不自动移植 |
 | Codex Alpha Search / 特殊路由插件 | 未对齐 | 尚未实现插件式模型选择 | 有真实使用需求后再跟进 |
-| 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和 | 跟进 credential concurrency 和选择算法变化 |
+| 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | 跟进 credential concurrency 和选择算法变化，保持无关 provider 更新不扰动既有租约 |
 | 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断 | 继续细化按错误类型的 cooldown |
 | Token/OAuth 刷新锁 | 大体对齐 | 使用 Durable Object 防止同账号并发刷新 | 跟进新的 OAuth 字段和刷新失败语义 |
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理 |
@@ -155,6 +151,7 @@ Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-26 | `f8dffa05..27fc3169` | 文档更新 | 11 个提交中仅 `27fc3169` 含通用 executor 注册串行化和 Codex executor 保留语义；Workers 侧由 Durable Object 串行租约、按请求配置快照和无进程内 executor registry 自然覆盖，不移植 Go 生命周期代码。OAuth 选择日志无行为变化；其余为 Windows plugin、Claude、Gemini/Antigravity 或 Grok/xAI 专用变化。 |
 | 2026-07-25 | Issue #16 + `71d59129` | `88f703c9..86b7eb4c` | 已实现 Workers 原生 Multi-Agent V2 HTTP/SSE 兼容层和动态 Codex client model catalog：默认关闭、目标 UA 门禁、route/provider 灰度、冲突安全回退、公开模型/能力继承、SSE frame metadata 保留；不引入常驻 registry、文件系统或 WebSocket 假设。 |
 | 2026-07-25 | `35ebe3f3..f8dffa05` | 文档更新；Issue #16 补充；Issue #17 | Codex client model catalog 属于相关变化；Codex Live/WebRTC 属重大架构和安全能力，不直接合入。其余为 Claude 或纯文档变化。 |
 | 2026-07-25 | `42f36b94..35ebe3f3` | `f68c71f5`；Issue #16 | credential concurrency 仅重构测试，无行为变化；新增 Codex Multi-Agent V2 属于重大架构能力，先设计后实现。 |
