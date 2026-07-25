@@ -39,42 +39,28 @@ const editing = ref<RouteDisplay | null>(null);
 const editingOptions = ref<Record<string, unknown>>({});
 const query = ref("");
 const message = useMessage();
-const form = reactive({ publicModel: "", providerId: "", upstreamModel: "", endpoint: "", enabled: true, priority: 100, weight: 1, codexMultiAgentV2: false });
+const form = reactive({
+  publicModel: "",
+  providerId: "",
+  upstreamModel: "",
+  endpoint: "",
+  enabled: true,
+  priority: 100,
+  weight: 1,
+  codexMultiAgentV2: false,
+});
+
 const endpointOrder = new Map([["responses", 0], ["chat", 1], ["completions", 2]]);
-const endpointLabels: Record<string, string> = { responses: "Responses", chat: "Chat Completions", completions: "Legacy Completions" };
+const endpointLabels: Record<string, string> = {
+  responses: "Responses",
+  chat: "Chat Completions",
+  completions: "Legacy Completions",
+};
 const endpointOptions = [
   { label: "Responses", value: "responses" },
   { label: "Chat Completions", value: "chat" },
   { label: "Legacy Completions", value: "completions" },
 ];
-
-const upstreamOptions = computed(() => {
-  const groups = new Map<string, Set<string>>();
-  for (const item of discoveredModels.value) {
-    if (item.provider_id !== form.providerId || item.enabled !== 1) continue;
-    const endpoints = groups.get(item.model_id) ?? new Set<string>();
-    endpoints.add(item.endpoint);
-    groups.set(item.model_id, endpoints);
-  }
-  return [...groups.entries()].map(([modelId, endpoints]) => {
-    const first = discoveredModels.value.find((item) => item.provider_id === form.providerId && item.model_id === modelId);
-    const name = first?.display_name && first.display_name !== modelId ? `${first.display_name} · ${modelId}` : modelId;
-    const protocols = [...endpoints].sort(sortEndpoint).map((endpoint) => endpointLabels[endpoint] ?? endpoint).join(" / ");
-    return { label: protocols ? `${name} · ${protocols}` : name, value: modelId };
-  });
-});
-
-const availableEndpoints = computed(() => {
-  const endpoints = new Set(
-    discoveredModels.value
-      .filter((item) => item.provider_id === form.providerId && item.model_id === form.upstreamModel && item.enabled === 1)
-      .map((item) => item.endpoint),
-  );
-  return [...endpoints].sort(sortEndpoint);
-});
-
-const recommendedEndpoint = computed(() => availableEndpoints.value[0] ?? "chat");
-const selectedEndpoint = computed(() => form.endpoint || recommendedEndpoint.value);
 
 function sortEndpoint(left: string, right: string): number {
   return (endpointOrder.get(left) ?? 99) - (endpointOrder.get(right) ?? 99) || left.localeCompare(right);
@@ -82,21 +68,47 @@ function sortEndpoint(left: string, right: string): number {
 function sourceLabel(providerId: string): string {
   return sourceMap.value.get(providerId)?.label ?? providerId;
 }
-function selectUpstream(value: string) {
-  form.upstreamModel = value;
-  if (!form.publicModel.trim()) form.publicModel = value;
-  if (!advanced.value) form.endpoint = "";
-}
 function parseOptions(row: ModelRoute): Record<string, unknown> {
-  try { return JSON.parse(row.options_json || "{}"); } catch { return {}; }
+  try {
+    return JSON.parse(row.options_json || "{}") as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+function managed(row: ModelRoute): boolean {
+  return parseOptions(row).managed_by === "provider-model-selection";
 }
 function multiAgentEnabled(row: ModelRoute): boolean {
   const options = parseOptions(row);
   return options.codex_multi_agent_v2 === true || options.codexMultiAgentV2 === true;
 }
-function managed(row: ModelRoute): boolean {
-  return parseOptions(row).managed_by === "provider-model-selection";
-}
+
+const upstreamOptions = computed(() => {
+  const groups = new Map<string, Set<string>>();
+  for (const item of discoveredModels.value) {
+    if (item.provider_id !== form.providerId || item.enabled !== 1) continue;
+    const modelEndpoints = groups.get(item.model_id) ?? new Set<string>();
+    modelEndpoints.add(item.endpoint);
+    groups.set(item.model_id, modelEndpoints);
+  }
+  return [...groups.entries()].map(([modelId, modelEndpoints]) => {
+    const first = discoveredModels.value.find((item) => item.provider_id === form.providerId && item.model_id === modelId);
+    const name = first?.display_name && first.display_name !== modelId ? `${first.display_name} · ${modelId}` : modelId;
+    const protocols = [...modelEndpoints].sort(sortEndpoint).map((endpoint) => endpointLabels[endpoint] ?? endpoint).join(" / ");
+    return { label: protocols ? `${name} · ${protocols}` : name, value: modelId };
+  });
+});
+
+const availableEndpoints = computed(() => {
+  const modelEndpoints = new Set(
+    discoveredModels.value
+      .filter((item) => item.provider_id === form.providerId && item.model_id === form.upstreamModel && item.enabled === 1)
+      .map((item) => item.endpoint),
+  );
+  return [...modelEndpoints].sort(sortEndpoint);
+});
+const recommendedEndpoint = computed(() => availableEndpoints.value[0] ?? "chat");
+const selectedEndpoint = computed(() => form.endpoint || recommendedEndpoint.value);
 
 async function load() {
   loading.value = true;
@@ -110,10 +122,10 @@ async function load() {
     rows.value = routeResult.data;
     discoveredModels.value = models.data;
     sourceOptions.value = [...channels.data, ...providers.data].map((item) => ({ label: item.name, value: item.id }));
-    sourceMap.value = new Map([
-      ...channels.data.map((item) => [item.id, { label: item.name, kind: "channel" as const }] as const),
-      ...providers.data.map((item) => [item.id, { label: item.name, kind: "provider" as const }] as const),
-    ]);
+    const nextSourceMap = new Map<string, SourceMeta>();
+    for (const item of channels.data) nextSourceMap.set(item.id, { label: item.name, kind: "channel" });
+    for (const item of providers.data) nextSourceMap.set(item.id, { label: item.name, kind: "provider" });
+    sourceMap.value = nextSourceMap;
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
   } finally {
@@ -125,7 +137,16 @@ function create() {
   editing.value = null;
   editingOptions.value = {};
   advanced.value = false;
-  Object.assign(form, { publicModel: "", providerId: "", upstreamModel: "", endpoint: "", enabled: true, priority: 100, weight: 1, codexMultiAgentV2: false });
+  Object.assign(form, {
+    publicModel: "",
+    providerId: "",
+    upstreamModel: "",
+    endpoint: "",
+    enabled: true,
+    priority: 100,
+    weight: 1,
+    codexMultiAgentV2: false,
+  });
   modal.value = true;
 }
 function edit(row: RouteDisplay) {
@@ -143,6 +164,11 @@ function edit(row: RouteDisplay) {
     codexMultiAgentV2: multiAgentEnabled(row),
   });
   modal.value = true;
+}
+function selectUpstream(value: string) {
+  form.upstreamModel = value;
+  if (!form.publicModel.trim()) form.publicModel = value;
+  if (!advanced.value) form.endpoint = "";
 }
 
 const displayRows = computed<RouteDisplay[]>(() => {
@@ -178,18 +204,21 @@ const displayRows = computed<RouteDisplay[]>(() => {
 });
 
 const routeGroups = computed<RouteGroup[]>(() => {
-  const q = query.value.trim().toLowerCase();
+  const normalizedQuery = query.value.trim().toLowerCase();
   const groups = new Map<string, RouteDisplay[]>();
   for (const row of displayRows.value) {
     const searchable = `${row.public_model} ${row.provider_id} ${sourceLabel(row.provider_id)} ${row.upstream_model} ${row.endpoints.join(" ")}`.toLowerCase();
-    if (q && !searchable.includes(q)) continue;
+    if (normalizedQuery && !searchable.includes(normalizedQuery)) continue;
     const routes = groups.get(row.public_model) ?? [];
     routes.push(row);
     groups.set(row.public_model, routes);
   }
   return [...groups.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([publicModel, routes]) => ({ publicModel, routes: routes.sort((left, right) => left.priority - right.priority || right.weight - left.weight) }));
+    .map(([publicModel, routes]) => ({
+      publicModel,
+      routes: routes.sort((left, right) => left.priority - right.priority || right.weight - left.weight),
+    }));
 });
 
 async function save() {
@@ -222,7 +251,6 @@ async function save() {
     message.error(error instanceof Error ? error.message : String(error));
   }
 }
-
 async function remove(id: string) {
   try {
     await api(`/routes/${id}`, { method: "DELETE" });
@@ -256,7 +284,9 @@ function availabilityDetail(row: RouteDisplay): string {
   if (problems.length) {
     return problems.map((item) => `${endpointLabels[item.endpoint] ?? item.endpoint}：${item.availability?.reason || (item.availability?.status === "degraded" ? "部分可用" : "不可用")}`).join("；");
   }
-  const values = row.endpointStates.map((item) => item.availability).filter((value): value is NonNullable<ModelRoute["availability"]> => Boolean(value));
+  const values = row.endpointStates
+    .map((item) => item.availability)
+    .filter((value): value is NonNullable<ModelRoute["availability"]> => Boolean(value));
   if (!values.length) return "等待运行数据";
   const available = Math.min(...values.map((value) => value.availableCredentials));
   const total = Math.max(...values.map((value) => value.totalCredentials));
@@ -268,6 +298,9 @@ function statusMeta(row: RouteDisplay) {
   if (state === "degraded") return { type: "warning" as const, label: "部分可用" };
   return { type: "error" as const, label: "已摘除" };
 }
+function retryAt(row: RouteDisplay): number {
+  return Math.max(...row.endpointStates.map((item) => item.availability?.retryAt ?? 0));
+}
 
 watch(() => [form.providerId, form.upstreamModel] as const, () => {
   if (!advanced.value) form.endpoint = "";
@@ -276,7 +309,6 @@ watch(advanced, (value) => {
   if (!value) form.endpoint = "";
   else if (!form.endpoint) form.endpoint = recommendedEndpoint.value;
 });
-
 onMounted(load);
 </script>
 
@@ -334,9 +366,7 @@ onMounted(load);
             <span class="route-label">状态</span>
             <n-tag size="small" :type="statusMeta(row).type">{{ statusMeta(row).label }}</n-tag>
             <span class="muted">{{ availabilityDetail(row) }}</span>
-            <span v-if="Math.max(...row.endpointStates.map(item => item.availability?.retryAt ?? 0))" class="muted">
-              恢复于 {{ formatRetry(Math.max(...row.endpointStates.map(item => item.availability?.retryAt ?? 0))) }}
-            </span>
+            <span v-if="retryAt(row)" class="muted">恢复于 {{ formatRetry(retryAt(row)) }}</span>
           </div>
 
           <div class="route-actions">
@@ -391,23 +421,19 @@ onMounted(load);
             {{ endpointLabels[endpoint] ?? endpoint }}
           </n-tag>
         </div>
-        <div class="advanced-toggle" @click="advanced = !advanced">
+        <button type="button" class="advanced-toggle" @click="advanced = !advanced">
           <sliders-horizontal :size="14" />
           <span>高级设置</span>
           <chevron-down :size="14" :class="{ 'advanced-toggle__icon--open': advanced }" />
-        </div>
+        </button>
         <n-form-item v-if="advanced" label="手动指定协议" :show-feedback="false" class="advanced-endpoint">
           <n-select v-model:value="form.endpoint" :options="endpointOptions" />
         </n-form-item>
       </div>
 
       <div class="grid-2 policy-fields">
-        <n-form-item label="优先级（越小越先）">
-          <n-input-number v-model:value="form.priority" :min="1" style="width:100%" />
-        </n-form-item>
-        <n-form-item label="同级权重">
-          <n-input-number v-model:value="form.weight" :min="1" style="width:100%" />
-        </n-form-item>
+        <n-form-item label="优先级（越小越先）"><n-input-number v-model:value="form.priority" :min="1" style="width:100%" /></n-form-item>
+        <n-form-item label="同级权重"><n-input-number v-model:value="form.weight" :min="1" style="width:100%" /></n-form-item>
       </div>
 
       <n-form-item label="Codex Multi-Agent V2">
@@ -448,7 +474,7 @@ onMounted(load);
 .protocol-panel__head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .protocol-panel__head p { margin: 4px 0 0; color: var(--n-text-color-3); font-size: 11px; }
 .protocol-capabilities { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 12px; font-size: 11px; }
-.advanced-toggle { display: flex; align-items: center; gap: 7px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--n-border-color); color: var(--n-text-color-2); font-size: 11px; cursor: pointer; }
+.advanced-toggle { display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 12px; padding: 10px 0 0; border: 0; border-top: 1px solid var(--n-border-color); background: transparent; color: var(--n-text-color-2); font: inherit; font-size: 11px; cursor: pointer; }
 .advanced-toggle svg:last-child { margin-left: auto; transition: transform .18s ease; }
 .advanced-toggle__icon--open { transform: rotate(180deg); }
 .advanced-endpoint { margin: 12px 0 0; }
