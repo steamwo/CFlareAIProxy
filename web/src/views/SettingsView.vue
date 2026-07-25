@@ -74,7 +74,7 @@ onMounted(load);
         <span class="section-icon"><scroll-text :size="18" /></span>
         <div>
           <h2>请求日志与基础统计</h2>
-          <p>控制单次错误明细和 Worker 运行日志；基础聚合统计始终保持开启。</p>
+          <p>控制单次错误明细和 Worker 运行日志；基础调用统计始终开启。</p>
         </div>
         <n-tag :type="logging.requestLoggingEnabled ? 'success' : 'default'" round>
           {{ logging.requestLoggingEnabled ? '日志已开启' : '日志已关闭' }}
@@ -82,7 +82,7 @@ onMounted(load);
       </div>
 
       <n-alert type="info" :bordered="false" class="section-alert">
-        成功与失败请求会按 5 分钟聚合写入 Queue。成功请求不会永久保存单次明细，关闭日志也不会影响账号池健康度和概览统计。
+        基础调用统计始终开启：成功与失败请求会按 5 分钟聚合写入 Queue。成功请求不会永久保存单次明细，关闭日志也不会影响账号池健康度和概览统计。
       </n-alert>
 
       <div class="setting-list">
