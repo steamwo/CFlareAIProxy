@@ -37,10 +37,10 @@ async function load() {
     ]);
     discovered.value = modelResult.data;
     publicModels.value = modelResult.public;
-    sourceMap.value = new Map([
-      ...channelResult.data.map((item) => [item.id, { label: item.name, kind: "channel" as const }] as const),
-      ...providerResult.data.map((item) => [item.id, { label: item.name, kind: "provider" as const }] as const),
-    ]);
+    const nextSourceMap = new Map<string, SourceMeta>();
+    for (const item of channelResult.data) nextSourceMap.set(item.id, { label: item.name, kind: "channel" });
+    for (const item of providerResult.data) nextSourceMap.set(item.id, { label: item.name, kind: "provider" });
+    sourceMap.value = nextSourceMap;
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error));
   } finally {
