@@ -1,0 +1,375 @@
+diff --git a/src/qoder-model-routing.ts b/src/qoder-model-routing.ts
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/src/qoder-model-routing.ts
+@@ -0,0 +1,38 @@
++export const QODER_PROVIDER_ID = "qoder";
++
++export function discoveryCredentialScopes(providerKind: string, credentialId: string): string[] {
++  return providerKind === QODER_PROVIDER_ID ? [credentialId, ""] : [credentialId];
++}
++
++export function publicDiscoveredModelId(
++  providerKind: string,
++  providerId: string,
++  modelId: string,
++  displayName: string,
++): string {
++  if (providerKind !== QODER_PROVIDER_ID) return `${providerId}/${modelId}`;
++  return displayName.trim() || modelId;
++}
++
++export function discoveredModelAllowed(
++  model: Record<string, unknown>,
++  allowedModels: ReadonlySet<string>,
++): boolean {
++  if (allowedModels.has(String(model.id))) return true;
++  if (model.x_cflare_provider !== QODER_PROVIDER_ID) return false;
++  const upstreamModel = model.x_cflare_upstream_model;
++  return typeof upstreamModel === "string" && allowedModels.has(`${QODER_PROVIDER_ID}/${upstreamModel}`);
++}
++
++export function sortModelRoutes<T extends { priority: number; weight: number; created_at: number }>(routes: T[]): T[] {
++  return [...routes].sort((left, right) =>
++    left.priority - right.priority
++    || right.weight - left.weight
++    || left.created_at - right.created_at,
++  );
++}
+diff --git a/src/models.ts b/src/models.ts
+index 6ea290c..2222222 100644
+--- a/src/models.ts
++++ b/src/models.ts
+@@ -7,6 +7,7 @@ import { openCodeGatewayEndpoints } from "./providers/opencode";
+ import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
+ import { isOpenCodeAnonymousModel, openCodeAnonymousCredential } from "./providers/opencode-anonymous";
++import { discoveryCredentialScopes } from "./qoder-model-routing";
+ import type { Credential, DiscoveredModelRow, Env, GatewayEndpoint, ProviderConfig } from "./types";
+ import { normalizeBaseUrl } from "./utils";
+ import { providerFetch } from "./upstream-fetch";
+@@ -211,21 +212,27 @@ export async function refreshCredentialModels(env: Env, credentialId: string): P
+     if (!models.length) throw new GatewayError(502, "MODEL_DISCOVERY_EMPTY", `${provider.name} returned no recognizable models`, "upstream_error");
+     const endpointSet = new Set<GatewayEndpoint>();
+     const now = Math.floor(Date.now() / 1000);
+-    const statements: D1PreparedStatement[] = [
+-      env.DB.prepare("DELETE FROM discovered_models WHERE provider_id = ? AND credential_id = ?").bind(provider.id, credential.id),
+-    ];
++    const discoveryScopes = discoveryCredentialScopes(provider.kind, credential.id);
++    const statements: D1PreparedStatement[] = discoveryScopes.map((scope) =>
++      env.DB.prepare("DELETE FROM discovered_models WHERE provider_id = ? AND credential_id = ?").bind(provider.id, scope),
++    );
+     for (const model of models) {
+       const modelEndpoints = endpointsForModel(provider, model.id);
+       for (const endpoint of modelEndpoints) {
+         endpointSet.add(endpoint);
+-        statements.push(env.DB.prepare(
+-          `INSERT INTO discovered_models
+-            (provider_id,credential_id,model_id,display_name,endpoint,owned_by,capabilities_json,raw_json,enabled,discovered_at)
+-           VALUES(?,?,?,?,?,?,?,?,1,?)`,
+-        ).bind(
+-          provider.id, credential.id, model.id, model.displayName, endpoint,
+-          model.ownedBy || provider.id, JSON.stringify(model.capabilities), JSON.stringify(model.raw), now,
+-        ));
++        for (const scope of discoveryScopes) {
++          statements.push(env.DB.prepare(
++            `INSERT INTO discovered_models
++              (provider_id,credential_id,model_id,display_name,endpoint,owned_by,capabilities_json,raw_json,enabled,discovered_at)
++             VALUES(?,?,?,?,?,?,?,?,1,?)`,
++          ).bind(
++            provider.id, scope, model.id, model.displayName, endpoint,
++            model.ownedBy || provider.id, JSON.stringify(model.capabilities), JSON.stringify(model.raw), now,
++          ));
++        }
+       }
+     }
+     await env.DB.batch(statements);
+diff --git a/src/db.ts b/src/db.ts
+index 192538f..3333333 100644
+--- a/src/db.ts
++++ b/src/db.ts
+@@ -6,6 +6,7 @@ import {
+   isOpenCodeAnonymousCredential, isOpenCodeAnonymousModel, openCodeAnonymousCredential, openCodeAnonymousCredentialRow,
+ } from "./providers/opencode-anonymous";
++import { discoveredModelAllowed, publicDiscoveredModelId, QODER_PROVIDER_ID, sortModelRoutes } from "./qoder-model-routing";
+ import type {
+   Credential,
+   CredentialRow,
+@@ -170,6 +171,22 @@ export async function deleteSystemProxyUrl(env: Env): Promise<void> {
+   await env.DB.prepare("DELETE FROM system_settings WHERE key='system_proxy_url'").run();
+ }
+ 
++export async function gatewayKeyAllowsModel(env: Env, publicModel: string, allowedModels: string[]): Promise<boolean> {
++  if (allowedModels.length === 0 || allowedModels.includes(publicModel)) return true;
++  const allowed = new Set(allowedModels);
++  if (![...allowed].some((model) => model.startsWith(`${QODER_PROVIDER_ID}/`))) return false;
++  const result = await env.DB.prepare(
++    `SELECT model_id FROM discovered_models
++     WHERE provider_id='qoder' AND credential_id='' AND display_name=? AND enabled=1
++     GROUP BY model_id`,
++  ).bind(publicModel).all<{ model_id: string }>();
++  return result.results.some((row) => allowed.has(`${QODER_PROVIDER_ID}/${row.model_id}`));
++}
++
+ export async function listRoutesForModel(
+   env: Env,
+   publicModel: string,
+@@ -181,7 +198,35 @@ export async function listRoutesForModel(
+      WHERE r.public_model = ? AND r.enabled = 1 AND r.endpoint = ?
+      ORDER BY r.priority ASC, r.weight DESC, r.created_at ASC`,
+   ).bind(publicModel, endpoint).all<ModelRouteRow>();
+-  if (configured.results.length) return configured.results;
++
++  let qoderRoutes: ModelRouteRow[] = [];
++  if (!configured.results.some((route) => route.provider_id === QODER_PROVIDER_ID)) {
++    const discovered = await env.DB.prepare(
++      `SELECT dm.model_id, MIN(dm.discovered_at) AS created_at, p.options_json
++       FROM discovered_models dm
++       JOIN providers p ON p.id=dm.provider_id AND p.kind='qoder' AND p.enabled=1
++       WHERE dm.provider_id='qoder' AND dm.credential_id='' AND dm.display_name=?
++         AND dm.endpoint=? AND dm.enabled=1
++       GROUP BY dm.model_id,p.options_json
++       ORDER BY MAX(dm.discovered_at) DESC,dm.model_id ASC
++       LIMIT 1`,
++    ).bind(publicModel, endpoint).all<{ model_id: string; created_at: number; options_json: string }>();
++    qoderRoutes = discovered.results.map((row) => {
++      const options = parseJson<Record<string, unknown>>(row.options_json, {});
++      const weight = typeof options.routing_weight === "number" ? Math.max(1, Math.floor(options.routing_weight)) : 1;
++      return {
++        id: `discovered:qoder:${endpoint}:${row.model_id}`,
++        public_model: publicModel,
++        provider_id: QODER_PROVIDER_ID,
++        upstream_model: row.model_id,
++        endpoint,
++        enabled: 1,
++        priority: 100,
++        weight,
++        options_json: JSON.stringify({ dynamic: true, channel_mapping: true }),
++        created_at: row.created_at,
++        updated_at: row.created_at,
++      };
++    });
++  }
++  const directRoutes = sortModelRoutes([...configured.results, ...qoderRoutes]);
++  if (directRoutes.length) return directRoutes;
+ 
+   // Dynamically discovered models use provider/model. OpenAI-compatible providers
+   // with an explicit model selection only expose the chosen aliases above.
+@@ -224,7 +269,7 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promise
+   const cached = await env.CONFIG_CACHE.get(cacheKey, "json").catch(() => null) as Array<Record<string, unknown>> | null;
+   if (cached) {
+     const allowed = new Set(allowedModels);
+-    return allowed.size ? cached.filter((model) => allowed.has(String(model.id))) : cached;
++    return allowed.size ? cached.filter((model) => discoveredModelAllowed(model, allowed)) : cached;
+   }
+ 
+   const [discoveredResult, routeResult] = await Promise.all([
+@@ -237,7 +282,10 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promise
+        FROM discovered_models dm
+        JOIN providers p ON p.id=dm.provider_id AND p.enabled=1
+        LEFT JOIN credentials c ON c.id=dm.credential_id AND c.enabled=1
+-       WHERE dm.enabled=1 AND (dm.credential_id='' OR c.id IS NOT NULL)
++       WHERE dm.enabled=1 AND (
++         (p.kind='qoder' AND dm.credential_id='')
++         OR (p.kind<>'qoder' AND (dm.credential_id='' OR c.id IS NOT NULL))
++       )
+        GROUP BY dm.provider_id,dm.model_id
+        ORDER BY dm.provider_id,dm.model_id`,
+@@ -256,7 +304,7 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promise
+   for (const row of discoveredResult.results) {
+     const options = parseJson<Record<string, unknown>>(row.options_json, {});
+     if (row.kind === "openai-compatible" && Array.isArray(options.selected_models)) continue;
+-    const id = `${row.provider_id}/${row.model_id}`;
++    const id = publicDiscoveredModelId(row.kind, row.provider_id, row.model_id, row.display_name || row.model_id);
+     modelMap.set(id, {
+       id,
+       object: "model",
+@@ -270,19 +318,31 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promise
+     });
+   }
+   for (const row of routeResult.results) {
++    const existing = modelMap.get(row.public_model);
++    const routeProviders = row.providers ? row.providers.split(",") : [];
++    const existingProviders = Array.isArray(existing?.x_cflare_providers)
++      ? existing.x_cflare_providers.map(String)
++      : typeof existing?.x_cflare_provider === "string" ? [existing.x_cflare_provider] : [];
++    const routeEndpoints = row.endpoints ? row.endpoints.split(",") : [];
++    const existingEndpoints = Array.isArray(existing?.x_cflare_endpoints) ? existing.x_cflare_endpoints.map(String) : [];
+     modelMap.set(row.public_model, {
++      ...existing,
+       id: row.public_model,
+       object: "model",
+-      created: row.created_at,
+-      owned_by: "cflare-route",
++      created: Math.min(Number(existing?.created ?? row.created_at), row.created_at),
++      owned_by: existing?.owned_by ?? "cflare-route",
+       display_name: row.public_model,
+-      x_cflare_providers: row.providers ? row.providers.split(",") : [],
+-      x_cflare_endpoints: row.endpoints ? row.endpoints.split(",") : [],
++      x_cflare_providers: [...new Set([...existingProviders, ...routeProviders])],
++      x_cflare_endpoints: [...new Set([...existingEndpoints, ...routeEndpoints])],
+       x_cflare_managed_route: true,
+     });
+   }
+   const models = [...modelMap.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+   await env.CONFIG_CACHE.put(cacheKey, JSON.stringify(models), { expirationTtl: 120 }).catch(() => undefined);
+   const allowed = new Set(allowedModels);
+-  return allowed.size ? models.filter((model) => allowed.has(String(model.id))) : models;
++  return allowed.size ? models.filter((model) => discoveredModelAllowed(model, allowed)) : models;
+ }
+diff --git a/src/proxy-v2.ts b/src/proxy-v2.ts
+index 7f83b92..4444444 100644
+--- a/src/proxy-v2.ts
++++ b/src/proxy-v2.ts
+@@ -5,7 +5,7 @@ import {
+   isCodexMultiAgentClient, loadCodexMultiAgentModelProfiles, optimizeCodexMultiAgentV2Body,
+ } from "./codex-multi-agent-v2";
+ import { providerFetchForCredential } from "./credential-fetch";
+-import { authenticateGatewayKey, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";
++import { authenticateGatewayKey, gatewayKeyAllowsModel, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";
+@@ -115,8 +115,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
+ 
+     const allowedModels = parseJson<string[]>(gatewayKey.allowed_models_json, []);
+-    if (allowedModels.length > 0 && !allowedModels.includes(publicModel)) {
++    if (!await gatewayKeyAllowsModel(c.env, publicModel, allowedModels)) {
+       throw new GatewayError(403, "MODEL_NOT_ALLOWED", `API key is not allowed to use model ${publicModel}`, "permission_error");
+     }
+diff --git a/test/qoder-model-routing.test.ts b/test/qoder-model-routing.test.ts
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/test/qoder-model-routing.test.ts
+@@ -0,0 +1,151 @@
++import { describe, expect, it } from "vitest";
++import { gatewayKeyAllowsModel, listRoutesForModel } from "../src/db";
++import {
++  discoveredModelAllowed,
++  discoveryCredentialScopes,
++  publicDiscoveredModelId,
++  sortModelRoutes,
++} from "../src/qoder-model-routing";
++import type { Env, GatewayEndpoint, ModelRouteRow } from "../src/types";
++
++interface QueryResult {
++  all?: unknown[];
++  first?: unknown;
++}
++
++class FakeStatement {
++  private values: unknown[] = [];
++
++  constructor(private readonly db: FakeDatabase, private readonly sql: string) {}
++
++  bind(...values: unknown[]): this {
++    this.values = values;
++    return this;
++  }
++
++  async all<T>(): Promise<D1Result<T>> {
++    const result = this.db.resolve(this.sql, this.values);
++    return { results: (result.all ?? []) as T[], success: true, meta: {} } as D1Result<T>;
++  }
++
++  async first<T>(): Promise<T | null> {
++    return (this.db.resolve(this.sql, this.values).first ?? null) as T | null;
++  }
++}
++
++class FakeDatabase {
++  constructor(private readonly handler: (sql: string, values: unknown[]) => QueryResult) {}
++
++  prepare(sql: string): D1PreparedStatement {
++    return new FakeStatement(this, sql) as unknown as D1PreparedStatement;
++  }
++
++  resolve(sql: string, values: unknown[]): QueryResult {
++    return this.handler(sql, values);
++  }
++}
++
++function envWithDatabase(db: FakeDatabase): Env {
++  return { DB: db as unknown as D1Database } as Env;
++}
++
++function route(providerId: string, priority: number, weight: number, upstreamModel = `${providerId}-model`): ModelRouteRow {
++  return {
++    id: `${providerId}-route`, public_model: "Claude Sonnet", provider_id: providerId,
++    upstream_model: upstreamModel, endpoint: "chat", enabled: 1, priority, weight,
++    options_json: "{}", created_at: priority, updated_at: priority,
++  };
++}
++
++describe("Qoder channel model routing", () => {
++  it("stores Qoder discovery in account and channel scopes only", () => {
++    expect(discoveryCredentialScopes("qoder", "credential-a")).toEqual(["credential-a", ""]);
++    expect(discoveryCredentialScopes("codex", "credential-a")).toEqual(["credential-a"]);
++  });
++
++  it("uses display_name as Qoder's public model id", () => {
++    expect(publicDiscoveredModelId("qoder", "qoder", "anon-a8f3", "Claude Sonnet")).toBe("Claude Sonnet");
++    expect(publicDiscoveredModelId("qoder", "qoder", "anon-a8f3", "  ")).toBe("anon-a8f3");
++    expect(publicDiscoveredModelId("codex", "codex", "gpt-5", "GPT-5")).toBe("codex/gpt-5");
++  });
++
++  it("keeps legacy anonymous Qoder allow-list entries compatible without exposing them", () => {
++    const model = { id: "Claude Sonnet", x_cflare_provider: "qoder", x_cflare_upstream_model: "anon-a8f3" };
++    expect(discoveredModelAllowed(model, new Set(["Claude Sonnet"]))).toBe(true);
++    expect(discoveredModelAllowed(model, new Set(["qoder/anon-a8f3"]))).toBe(true);
++    expect(discoveredModelAllowed(model, new Set(["qoder/another-model"]))).toBe(false);
++  });
++
++  it("sorts automatic Qoder routes together with explicit provider routes", () => {
++    expect(sortModelRoutes([route("secondary", 200, 1), route("qoder", 100, 1), route("primary", 100, 5)])
++      .map((item) => item.provider_id)).toEqual(["primary", "qoder", "secondary"]);
++  });
++
++  it("adds Qoder as a candidate for the same public model name", async () => {
++    const explicit = route("openai-provider", 100, 5, "claude-sonnet-4");
++    const db = new FakeDatabase((sql, values) => {
++      if (sql.includes("FROM model_routes")) return { all: [explicit] };
++      if (sql.includes("dm.provider_id='qoder'")) {
++        expect(values).toEqual(["Claude Sonnet", "chat"]);
++        return { all: [{ model_id: "anon-a8f3", created_at: 20, options_json: '{"routing_weight":3}' }] };
++      }
++      throw new Error(`Unexpected SQL: ${sql}`);
++    });
++    const routes = await listRoutesForModel(envWithDatabase(db), "Claude Sonnet", "chat" as GatewayEndpoint);
++    expect(routes.map((item) => [item.provider_id, item.upstream_model, item.weight])).toEqual([
++      ["openai-provider", "claude-sonnet-4", 5],
++      ["qoder", "anon-a8f3", 3],
++    ]);
++  });
++
++  it("lets an explicit Qoder route override the automatic channel mapping", async () => {
++    const explicit = route("qoder", 10, 1, "manual-anon-model");
++    const db = new FakeDatabase((sql) => {
++      if (sql.includes("FROM model_routes")) return { all: [explicit] };
++      throw new Error(`Automatic discovery should not run: ${sql}`);
++    });
++    const routes = await listRoutesForModel(envWithDatabase(db), "Claude Sonnet", "chat");
++    expect(routes).toEqual([explicit]);
++  });
++
++  it("authorizes a display name through a legacy Qoder anonymous allow-list entry", async () => {
++    const db = new FakeDatabase((sql, values) => {
++      expect(sql).toContain("credential_id='' AND display_name=?");
++      expect(values).toEqual(["Claude Sonnet"]);
++      return { all: [{ model_id: "anon-a8f3" }] };
++    });
++    const env = envWithDatabase(db);
++    await expect(gatewayKeyAllowsModel(env, "Claude Sonnet", ["qoder/anon-a8f3"])).resolves.toBe(true);
++    await expect(gatewayKeyAllowsModel(env, "Claude Sonnet", ["qoder/other"])).resolves.toBe(false);
++    await expect(gatewayKeyAllowsModel(env, "Claude Sonnet", ["Claude Sonnet"])).resolves.toBe(true);
++  });
++});
+diff --git a/README.md b/README.md
+index 47472c3..6666666 100644
+--- a/README.md
++++ b/README.md
+@@ -68,7 +68,7 @@ CFlareAIProxy 把不同上游的授权方式、请求协议、账号池和故障
+ | **OpenAI Codex** | PKCE OAuth / 授权 JSON / 本地助手 | Responses 为主，Chat 与 Completions 自动转换 | 支持流式错误识别、完成事件检查和输出重建。 |
+ | **Kimi Coding** | Device OAuth | Chat、Responses、Completions 转换 | 处理工具消息关联、模型名归一化和流式 usage。 |
+-| **Qoder** | PKCE Device OAuth | Qoder 专用请求与 SSE | 内置 COSY 签名、模型发现和个人/组织额度。 |
++| **Qoder** | PKCE Device OAuth | Qoder 专用请求与 SSE | 模型列表自动将 `display_name` 作为公开名称，渠道内部映射到匿名模型名；内置 COSY 签名和个人/组织额度。 |
+ | **OpenCode Zen** | API Key / 匿名免费模型 | Responses、Anthropic Messages、Google GenerateContent、Chat | 官方线路失败后可按配置尝试镜像线路。 |
+ | **OpenAI-compatible** | API Key | Chat、Responses 或 both | 可发现模型、设置公开别名、权重和代理。 |
