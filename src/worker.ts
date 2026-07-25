@@ -2,6 +2,8 @@ import handler from "./index";
 import { cleanupExpiredRequestLogs, requestLogCutoff } from "./log-retention";
 import type { Env, UsageQueueEvent } from "./types";
 
+export { AccountPool, RateLimiter } from "./index";
+
 export default {
   ...handler,
   scheduled(controller, env, ctx) {

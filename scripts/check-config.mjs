@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { root } from "./lib.mjs";
 
@@ -16,6 +16,19 @@ if (!kv) errors.push("Missing CONFIG_CACHE binding");
 if (kv?.id) errors.push("CONFIG_CACHE should use automatic provisioning and must not contain a template id");
 for (const required of ["AccountPool", "RateLimiter"]) {
   if (!config.migrations?.some((m) => m.new_sqlite_classes?.includes(required))) errors.push(`Missing SQLite Durable Object migration for ${required}`);
+}
+const entrypointPath = typeof config.main === "string" ? join(root, config.main) : null;
+if (!entrypointPath || !existsSync(entrypointPath)) {
+  errors.push("Worker entrypoint file is missing");
+} else {
+  const entrypoint = readFileSync(entrypointPath, "utf8");
+  for (const required of ["AccountPool", "RateLimiter"]) {
+    const namedExport = new RegExp(`export\\s*\\{[^}]*\\b${required}\\b[^}]*\\}`, "s");
+    const directExport = new RegExp(`export\\s+(?:class|const|function)\\s+${required}\\b`);
+    if (!namedExport.test(entrypoint) && !directExport.test(entrypoint)) {
+      errors.push(`Worker entrypoint must export Durable Object ${required}`);
+    }
+  }
 }
 for (const scriptName of ["deploy", "deploy:worker"]) {
   const command = packageJson.scripts?.[scriptName];
