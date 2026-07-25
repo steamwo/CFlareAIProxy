@@ -127,7 +127,7 @@ const columns: DataTableColumns<DiscoveredModelGroup> = [
     ]),
   },
   {
-    title: "支持协议",
+    title: "支持端点 / 协议",
     key: "endpoints",
     render: (row) => h(NSpace, { size: 5, wrap: true }, {
       default: () => row.endpoints.map((endpoint) => h(NTag, { size: "small", type: "info", bordered: false }, { default: () => endpointLabels[endpoint] ?? endpoint })),
@@ -141,7 +141,7 @@ onMounted(load);
 </script>
 
 <template>
-  <page-header title="实际模型" description="按模型与渠道/供应商去重展示，不再因多个账号产生重复行。">
+  <page-header title="实际模型" description="按模型与渠道/供应商去重展示，同一来源支持的端点集中显示，不再因多个账号产生重复行。">
     <n-button type="primary" :loading="loading" @click="refresh"><template #icon><refresh-cw /></template>刷新全部模型</n-button>
   </page-header>
 
@@ -149,12 +149,12 @@ onMounted(load);
     <n-card><div class="metric">{{ publicModels.length }}</div><div class="metric-label">公开模型</div></n-card>
     <n-card><div class="metric">{{ groupedDiscovered.length }}</div><div class="metric-label">实际模型来源组合</div></n-card>
     <n-card><div class="metric">{{ new Set(groupedDiscovered.map(value => value.provider_id)).size }}</div><div class="metric-label">有模型的渠道 / 供应商</div></n-card>
-    <n-card><div class="metric">{{ new Set(groupedDiscovered.flatMap(value => value.endpoints)).size }}</div><div class="metric-label">支持协议类型</div></n-card>
+    <n-card><div class="metric">{{ new Set(groupedDiscovered.flatMap(value => value.endpoints)).size }}</div><div class="metric-label">支持端点类型</div></n-card>
   </div>
 
   <n-card class="models-card">
     <div class="toolbar">
-      <n-input v-model:value="query" clearable placeholder="搜索模型、渠道、供应商或协议" style="max-width:420px">
+      <n-input v-model:value="query" clearable placeholder="搜索模型、渠道、供应商或端点" style="max-width:420px">
         <template #prefix><search /></template>
       </n-input>
     </div>
