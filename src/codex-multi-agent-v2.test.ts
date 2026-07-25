@@ -32,6 +32,11 @@ function requestBody(): Record<string, unknown> {
   };
 }
 
+function requiredRecord(value: Record<string, unknown> | undefined, label: string): Record<string, unknown> {
+  if (!value) throw new Error(`Expected ${label}`);
+  return value;
+}
+
 describe("Codex multi-agent v2", () => {
   it("matches only official Codex desktop clients", () => {
     expect(isCodexMultiAgentClient("Codex Desktop/1.2.3")).toBe(true);
@@ -61,12 +66,13 @@ describe("Codex multi-agent v2", () => {
       models,
     });
     const input = result.body.input as Array<Record<string, unknown>>;
-    const message = input[0];
+    const message = requiredRecord(input[0], "agent message");
     expect(message.type).toBe("agent_message");
     expect(message.content).toEqual([{ type: "input_text", text: "agent payload" }]);
-    const namespace = (input[1].tools as Array<Record<string, unknown>>)[0];
+    const additionalTools = requiredRecord(input[1], "additional tools input");
+    const namespace = requiredRecord((additionalTools.tools as Array<Record<string, unknown>>)[0], "collaboration namespace");
     expect(namespace.name).toBe("collaboration-optimize");
-    const spawnAgent = (namespace.tools as Array<Record<string, unknown>>)[0];
+    const spawnAgent = requiredRecord((namespace.tools as Array<Record<string, unknown>>)[0], "spawn_agent tool");
     expect(spawnAgent.description).toContain("Available model overrides");
     expect(spawnAgent.description).toContain("`gpt-5.5`");
     expect(spawnAgent.description).toContain("Reasoning efforts: low, medium, high.");
@@ -84,7 +90,7 @@ describe("Codex multi-agent v2", () => {
       userAgent: "codex-tui/0.9.0",
       models,
     });
-    const message = (result.body.input as Array<Record<string, unknown>>)[0];
+    const message = requiredRecord((result.body.input as Array<Record<string, unknown>>)[0], "converted user message");
     expect(message.type).toBe("message");
     expect(message.role).toBe("user");
   });
@@ -100,12 +106,15 @@ describe("Codex multi-agent v2", () => {
       models,
     });
     const input = result.body.input as Array<Record<string, unknown>>;
-    const namespace = (input[1].tools as Array<Record<string, unknown>>)[0];
-    const spawnAgent = (namespace.tools as Array<Record<string, unknown>>)[0];
+    const additionalTools = requiredRecord(input[1], "additional tools input");
+    const namespace = requiredRecord((additionalTools.tools as Array<Record<string, unknown>>)[0], "collaboration namespace");
+    const spawnAgent = requiredRecord((namespace.tools as Array<Record<string, unknown>>)[0], "spawn_agent tool");
     expect(namespace.name).toBe("collaboration");
     expect(spawnAgent.description).toBe("Spawns an agent to work on a task.");
     expect(result.collaborationNamespaceOptimized).toBe(false);
-    expect((input[0].content as Array<Record<string, unknown>>)[0]).toEqual({ type: "input_text", text: "agent payload" });
+    const message = requiredRecord(input[0], "normalized agent message");
+    const content = requiredRecord((message.content as Array<Record<string, unknown>>)[0], "normalized agent content");
+    expect(content).toEqual({ type: "input_text", text: "agent payload" });
   });
 
   it("restores optimized collaboration names without rewriting tool arguments", () => {
