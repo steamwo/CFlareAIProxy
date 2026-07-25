@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { createAdminApp } from "./admin";
 import { AccountPool } from "./account-pool";
 import { BUILTIN_CHANNELS } from "./builtin-channels";
+import { buildCodexClientModelsResponse } from "./codex-client-models";
 import { authenticateGatewayKey, getCredential, listModels } from "./db";
 import { GatewayError, errorResponse } from "./errors";
 import { getLoggingSettings, runtimeLog, updateLoggingSettings } from "./logging-settings";
@@ -58,8 +59,9 @@ app.get("/v1/models", async (c) => {
     const gatewayKey = await authenticateGatewayKey(c.env, match[1]);
     const allowedModels = parseJson<string[]>(gatewayKey.allowed_models_json, []);
     await ensureOpenCodeAnonymousModels(c.env).catch(() => null);
-    const models = await listModels(c.env, allowedModels);
-    return c.json({ object: "list", data: await enrichModelsWithCapabilities(c.env, models) });
+    const enriched = await enrichModelsWithCapabilities(c.env, await listModels(c.env, allowedModels));
+    if (c.req.query("client_version") !== undefined) return c.json(await buildCodexClientModelsResponse(c.env, enriched));
+    return c.json({ object: "list", data: enriched });
   } catch (error) {
     return errorResponse(error);
   }
@@ -218,180 +220,46 @@ adminApp.get("/api/credentials/paged", async (c) => {
   }));
 
   let quotas: Array<QuotaSnapshotRow & { snapshot: QuotaSnapshot; credential_label: string; provider_name: string }> = [];
-  const activity: Record<string, {
-    buckets: Array<{
-      bucket: number;
-      requests: number;
-      successes: number;
-      failures: number;
-      tokens: number;
-    }>;
-    totals: {
-      requests: number;
-      successes: number;
-      failures: number;
-    };
-  }> = {};
-  if (data.length) {
-    const credentialIds = data.map((row) => row.id);
-    const credentialPlaceholders = credentialIds.map(() => "?").join(",");
-    const currentBucket = Math.floor(Math.floor(Date.now() / 1000) / ACTIVITY_BUCKET_SECONDS) * ACTIVITY_BUCKET_SECONDS;
-    const activitySince = currentBucket - (ACTIVITY_BUCKET_COUNT - 1) * ACTIVITY_BUCKET_SECONDS;
-    const [quotaResult, recentActivityResult] = await Promise.all([
+  let activity: Record<string, unknown> = {};
+  if (data.length > 0) {
+    const ids = data.map((row) => row.id);
+    const bindings = ids.map(() => "?").join(",");
+    const [quotaResult, activityResult] = await Promise.all([
       c.env.DB.prepare(
-        `SELECT q.*, c.label AS credential_label, p.name AS provider_name
-         FROM quota_snapshots q
-         JOIN credentials c ON c.id=q.credential_id
-         JOIN providers p ON p.id=q.provider_id
-         WHERE q.credential_id IN (${credentialPlaceholders})
-         ORDER BY p.name,c.priority,c.created_at`,
-      ).bind(...credentialIds).all<QuotaSnapshotRow & { credential_label: string; provider_name: string }>(),
+        `SELECT q.*,c.label AS credential_label,p.name AS provider_name
+         FROM quota_snapshots q JOIN credentials c ON c.id=q.credential_id JOIN providers p ON p.id=q.provider_id
+         WHERE q.credential_id IN (${bindings}) ORDER BY q.fetched_at DESC`,
+      ).bind(...ids).all<QuotaSnapshotRow & { credential_label: string; provider_name: string }>(),
       c.env.DB.prepare(
-        `SELECT credential_id,bucket,
-           COALESCE(SUM(requests),0) AS requests,
-           COALESCE(SUM(successes),0) AS successes,
-           COALESCE(SUM(failures),0) AS failures,
-           COALESCE(SUM(total_tokens),0) AS tokens
-         FROM request_activity_5m
-         WHERE credential_id IN (${credentialPlaceholders}) AND bucket >= ?
-         GROUP BY credential_id,bucket
-         ORDER BY credential_id,bucket`,
-      ).bind(...credentialIds, activitySince).all<{
-        credential_id: string;
-        bucket: number;
-        requests: number;
-        successes: number;
-        failures: number;
-        tokens: number;
-      }>(),
+        `SELECT credential_id,bucket,requests,successes,failures
+         FROM request_activity_5m WHERE credential_id IN (${bindings}) AND bucket>=?
+         ORDER BY bucket ASC`,
+      ).bind(...ids, Math.floor(Date.now() / 1000) - ACTIVITY_BUCKET_SECONDS * ACTIVITY_BUCKET_COUNT)
+        .all<{ credential_id: string; bucket: number; requests: number; successes: number; failures: number }>(),
     ]);
-    quotas = quotaResult.results.map((row) => ({
-      ...row,
-      snapshot: parseJson<QuotaSnapshot>(row.quota_json, {
-        provider: row.provider_id,
-        status: row.status,
-        windows: [],
-        source: "configured",
-      }),
-    }));
-    for (const id of credentialIds) {
-      activity[id] = { buckets: [], totals: { requests: 0, successes: 0, failures: 0 } };
+    quotas = quotaResult.results.map((row) => ({ ...row, snapshot: parseJson<QuotaSnapshot>(row.quota_json, { provider: row.provider_id, status: "unknown", windows: [], source: "configured" }) }));
+    const buckets = new Map<string, Array<{ bucket: number; requests: number; successes: number; failures: number }>>();
+    for (const row of activityResult.results) {
+      const values = buckets.get(row.credential_id) ?? [];
+      values.push({ bucket: Number(row.bucket), requests: Number(row.requests), successes: Number(row.successes), failures: Number(row.failures) });
+      buckets.set(row.credential_id, values);
     }
-    for (const row of recentActivityResult.results) {
-      const requests = Number(row.requests);
-      const successes = Number(row.successes ?? 0);
-      const failures = Number(row.failures ?? 0);
-      const entry = activity[row.credential_id] ??= {
-        buckets: [],
-        totals: { requests: 0, successes: 0, failures: 0 },
-      };
-      entry.buckets.push({
-        bucket: Number(row.bucket),
-        requests,
-        successes,
-        failures,
-        tokens: Number(row.tokens ?? 0),
-      });
-      entry.totals.requests += requests;
-      entry.totals.successes += successes;
-      entry.totals.failures += failures;
-    }
+    activity = Object.fromEntries(data.map((row) => [row.id, buckets.get(row.id) ?? []]));
   }
-
   return c.json({ data, quotas, activity, total, page, pageSize, pageCount });
 });
 
-app.route("/", adminApp);
+app.route("/admin", adminApp);
+app.route("/admin/", adminApp);
 
-app.get("/oauth/callback/:provider", async (c) => {
-  try {
-    const result = await exchangeOAuthCode(c.env, c.req.param("provider"), {
-      state: c.req.query("state"),
-      code: c.req.query("code"),
-      callbackUrl: c.req.url,
-    });
-    if (result.credentialId) {
-      c.executionCtx.waitUntil(Promise.allSettled([
-        refreshCredentialModels(c.env, result.credentialId),
-        refreshCredentialQuota(c.env, result.credentialId),
-      ]).then(() => undefined));
-    }
-    return c.html(`<!doctype html><meta charset="utf-8"><title>OAuth complete</title><body style="font-family:system-ui;padding:3rem"><h1>授权完成</h1><p>Credential ID: <code>${result.credentialId ?? "created"}</code></p><p>可以关闭此页面。</p></body>`);
-  } catch (error) {
-    const response = errorResponse(error);
-    return new Response(await response.text(), { status: response.status, headers: { "content-type": "application/json; charset=utf-8" } });
-  }
+app.onError((error, c) => {
+  runtimeLog({ requestLoggingEnabled: true, level: "error" }, "error", { event: "unhandled_error", error: error instanceof Error ? error.message : String(error) });
+  return errorResponse(error);
 });
 
-// A browser tab can keep an old Vite entry bundle open across deployments. If
-// that bundle requests a fingerprinted route chunk which no longer exists,
-// Workers Static Assets falls through to the Worker. Return a tiny valid module
-// which refreshes the SPA shell instead of leaving navigation permanently stuck.
-app.get("/admin/assets/*", (c) => {
-  const pathname = new URL(c.req.url).pathname;
-  if (!pathname.endsWith(".js")) {
-    return c.json({ error: { message: "Asset not found", type: "invalid_request_error", code: "ASSET_NOT_FOUND" } }, 404, {
-      "cache-control": "no-store",
-    });
-  }
-
-  const recoveryModule = `
-const key = "cflare:chunk-reload-at";
-const parameter = "__asset_reload";
-const now = Date.now();
-try {
-  const previous = Number(window.sessionStorage.getItem(key)) || 0;
-  if (now - previous > 30000) {
-    window.sessionStorage.setItem(key, String(now));
-    const url = new URL(window.location.href);
-    url.searchParams.set(parameter, String(now));
-    window.location.replace(url.toString());
-  }
-} catch {
-  window.location.reload();
-}
-console.error("A stale CFlareAIProxy asset was requested; refreshing the application.", import.meta.url);
-export default { render: () => null };
-`;
-
-  return new Response(recoveryModule, {
-    status: 200,
-    headers: {
-      "content-type": "text/javascript; charset=utf-8",
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-    },
-  });
-});
-
-app.notFound((c) => c.json({ error: { message: "Not found", type: "invalid_request_error", code: "NOT_FOUND" } }, 404));
-app.onError((error) => errorResponse(error));
-
-const handler: ExportedHandler<Env, UsageQueueEvent> = {
-  fetch(request, env, ctx) {
-    return app.fetch(request, env, ctx);
-  },
+export default {
+  fetch: app.fetch,
   async queue(batch: MessageBatch<UsageQueueEvent>, env: Env): Promise<void> {
-    try {
-      await persistUsageQueueBatch(env, batch.messages.map((message) => message.body));
-      for (const message of batch.messages) message.ack();
-      const logging = await getLoggingSettings(env);
-      runtimeLog(logging, "info", {
-        event: "usage_batch_persisted",
-        messages: batch.messages.length,
-        aggregates: batch.messages.filter((message) => message.body.kind === "aggregate").length,
-        errors: batch.messages.filter((message) => message.body.kind === "error").length,
-      });
-    } catch (error) {
-      const logging = await getLoggingSettings(env);
-      runtimeLog(logging, "error", {
-        event: "usage_batch_failed",
-        messages: batch.messages.length,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      for (const message of batch.messages) message.retry();
-    }
+    await persistUsageQueueBatch(env, batch.messages.map((message) => message.body));
   },
 };
-
-export default handler;
