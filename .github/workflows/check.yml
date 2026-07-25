@@ -2,8 +2,10 @@ name: Check CFlareAIProxy
 
 on:
   pull_request:
-  push:
     branches: [main, dev]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
