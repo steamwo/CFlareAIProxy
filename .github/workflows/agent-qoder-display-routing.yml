@@ -1,0 +1,44 @@
+name: Validate Qoder display-name routing
+
+on:
+  push:
+    branches: [agent/qoder-display-name-routing]
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+      - name: Apply proposed changes
+        run: |
+          git apply --check agent-qoder-routing.patch
+          git apply agent-qoder-routing.patch
+          rm agent-qoder-routing.patch .github/workflows/agent-qoder-display-routing.yml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run repository checks
+        run: pnpm run check
+      - name: Build production web bundle
+        run: pnpm run build:web
+      - name: Run Wrangler dry run
+        run: pnpm run config:check
+      - name: Commit validated changes
+        run: |
+          git config user.name "openai-agent"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add automatic Qoder display-name routing"
+          git push origin HEAD:agent/qoder-display-name-routing
