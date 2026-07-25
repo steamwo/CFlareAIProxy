@@ -6,6 +6,7 @@ export interface ModelCapabilities {
   inputModalities?: string[];
   outputModalities?: string[];
   reasoningLevels?: string[];
+  serviceTiers?: string[];
   supportsTools?: boolean;
   supportsImages?: boolean;
   forceResponseModelMapping?: boolean;
@@ -14,6 +15,7 @@ export interface ModelCapabilities {
 export interface RouteRuntimeOptions {
   capabilities: ModelCapabilities;
   forceResponseModelMapping: boolean;
+  codexMultiAgentV2?: boolean;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -32,6 +34,7 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
     inputModalities: strings(raw.inputModalities ?? raw.input_modalities),
     outputModalities: strings(raw.outputModalities ?? raw.output_modalities),
     reasoningLevels: strings(raw.reasoningLevels ?? raw.reasoning_levels),
+    serviceTiers: strings(raw.serviceTiers ?? raw.service_tiers),
     supportsTools: typeof raw.supportsTools === "boolean" ? raw.supportsTools : typeof raw.supports_tools === "boolean" ? raw.supports_tools : undefined,
     supportsImages: typeof raw.supportsImages === "boolean" ? raw.supportsImages : typeof raw.supports_images === "boolean" ? raw.supports_images : undefined,
     forceResponseModelMapping: raw.forceResponseModelMapping === true || raw.force_response_model_mapping === true ? true : undefined,
@@ -43,6 +46,7 @@ function mergeCapabilities(primary: ModelCapabilities, fallback: ModelCapabiliti
     inputModalities: primary.inputModalities ?? fallback.inputModalities,
     outputModalities: primary.outputModalities ?? fallback.outputModalities,
     reasoningLevels: primary.reasoningLevels ?? fallback.reasoningLevels,
+    serviceTiers: primary.serviceTiers ?? fallback.serviceTiers,
     supportsTools: primary.supportsTools ?? fallback.supportsTools,
     supportsImages: primary.supportsImages ?? fallback.supportsImages,
     forceResponseModelMapping: primary.forceResponseModelMapping ?? fallback.forceResponseModelMapping,
@@ -63,7 +67,9 @@ export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoi
   const forceResponseModelMapping = options.force_response_model_mapping === true
     || options.forceResponseModelMapping === true
     || capabilities.forceResponseModelMapping === true;
-  return { capabilities, forceResponseModelMapping };
+  const routeMultiAgentFlag = options.codex_multi_agent_v2 ?? options.codexMultiAgentV2;
+  const codexMultiAgentV2 = typeof routeMultiAgentFlag === "boolean" ? routeMultiAgentFlag : undefined;
+  return { capabilities, forceResponseModelMapping, codexMultiAgentV2 };
 }
 
 function containsImage(value: unknown, depth = 0): boolean {
