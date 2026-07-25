@@ -3,10 +3,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { root } from "./lib.mjs";
 
+const EXPECTED_WORKER_NAME = "cfap";
 const config = JSON.parse(readFileSync(join(root, "wrangler.jsonc"), "utf8"));
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const errors = [];
-if (config.name !== "cflare-api") errors.push("Worker name must be cflare-api");
+if (config.name !== EXPECTED_WORKER_NAME) errors.push(`Worker name must be ${EXPECTED_WORKER_NAME}`);
 if (String(JSON.stringify(config)).includes("REPLACE_WITH")) errors.push("wrangler.jsonc contains placeholder resource IDs");
 const db = config.d1_databases?.find((item) => item.binding === "DB");
 if (!db) errors.push("Missing DB binding");
