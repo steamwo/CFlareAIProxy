@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { root } from "./lib.mjs";
-const required=["web/index.html","web/src/main.ts","web/src/App.vue","web/src/router.ts","web/src/views/ChannelsView.vue","web/src/views/ProvidersView.vue","web/src/views/AuthorizationView.vue","web/src/views/AccountsView.vue","web/src/views/SettingsView.vue","vite.config.ts","src/logging-settings.ts","src/usage-storage.ts","migrations/20260724_request_activity_5m.sql"];
+const required=["web/index.html","web/src/main.ts","web/src/App.vue","web/src/router.ts","web/src/views/ChannelsView.vue","web/src/views/ProvidersView.vue","web/src/views/AuthorizationView.vue","web/src/views/AccountsView.vue","web/src/views/SettingsView.vue","vite.config.ts","src/logging-settings.ts","src/usage-storage.ts","migrations/0007_request_activity_5m.sql"];
 const errors=[];
 for(const file of required) if(!existsSync(join(root,file))) errors.push(`缺少 ${file}`);
 const pkg=JSON.parse(readFileSync(join(root,"package.json"),"utf8"));
