@@ -6,7 +6,7 @@
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
 <!-- upstream-ref: f8dffa0522c628c27970148319a50f25f0ffebdd -->
-<!-- local-implementation-ref: f68c71f5a40a9660b40a2bff7f0312dd7feecd0f -->
+<!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
 <!-- last-reviewed: 2026-07-25 -->
 
 ## 1. 当前基线
@@ -17,7 +17,7 @@
 | 上游分支 | `main` |
 | 已审阅上游提交 | `f8dffa0522c628c27970148319a50f25f0ffebdd` |
 | 本地分支 | `dev` |
-| 本地实现基线 | `f68c71f5a40a9660b40a2bff7f0312dd7feecd0f` |
+| 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
 | 审阅日期 | 2026-07-25 |
 
 本轮审阅范围为 `35ebe3f3..f8dffa05`，共 8 个提交：
@@ -27,7 +27,9 @@
 - 1 个 Codex client model catalog 重构与增强，属于 provider/model registry 范围。
 - 5 个 Codex Live/WebRTC/sideband/TCP relay 相关提交，属于尚未批准的长连接和媒体转发架构。
 
-Codex client model catalog 新增或强化了模板回退、稳定优先级、reasoning levels、input modalities、context window、visibility、search-tool support 和 Multi-Agent V2 标记。CFlareAIProxy 已有通用模型能力元数据、公开别名继承和请求前能力校验，但尚未实现官方 Codex 客户端所需的完整 models 响应结构。该项已补充到 Issue #16，未机械移植上游的常驻内存模板缓存。
+Codex client model catalog 新增或强化了模板回退、稳定优先级、reasoning levels、input modalities、context window、visibility、search-tool support 和 Multi-Agent V2 标记。CFlareAIProxy 已在 `dev` 按 Workers 架构实现动态目录：数据来自当前公开路由、D1 最新模型发现记录和通用 capability，不引入第二套常驻内存 registry 或文件模板缓存；`/v1/models?client_version=...` 返回 Codex 客户端结构。
+
+Issue #16 的 HTTP/SSE 兼容层也已进入实装：默认关闭，支持 route/provider feature flag，仅识别 Codex Desktop / codex-tui；覆盖 `spawn_agent`、`agent_message`、collaboration namespace 冲突检测与响应恢复，并在混合路由时仅当所有 Responses 路由均启用才宣告 `multi_agent_version: v2`。WebSocket continuity 仍不在本轮范围。
 
 Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会话和动态配置热更新，不能安全直接移植到 Workers 主服务。已建立 Issue #17 进行独立架构和威胁模型评估，本轮不修改运行代码。
 
@@ -35,8 +37,8 @@ Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会
 
 以下比例是工程估算，用来表达工作量和行为覆盖，不是官方兼容认证，也不是逐测试用例通过率。
 
-- **当前目标范围（暂不包含 Claude 协议和未批准的 Codex Live）：约 73%，属于“大体对齐”。**
-- **相对 CLIProxyAPI 全部产品能力：约 42%，属于“部分对齐”。**
+- **当前目标范围（暂不包含 Claude 协议和未批准的 Codex Live）：约 76%，属于“大体对齐”。**
+- **相对 CLIProxyAPI 全部产品能力：约 44%，属于“部分对齐”。**
 
 等级定义：
 
@@ -51,7 +53,7 @@ Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会
 | 能力 | 程度 | CFlareAIProxy 状态 | 后续动作 |
 | --- | --- | --- | --- |
 | OpenAI Chat Completions | 已对齐 | 支持流式、非流式、tools、多账号路由和 OpenAI-compatible 上游 | 跟进上游新增字段和错误语义 |
-| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses 和 Chat↔Responses 转换 | 补齐更多事件、状态和工具边界测试 |
+| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses 转换和可选 Multi-Agent V2 请求/响应兼容 | 补齐更多事件、状态和工具边界测试 |
 | OpenAI Completions | 大体对齐 | 可路由 generic、Codex、Kimi | 保持兼容，不扩大旧协议特性 |
 | Kimi Chat 上游 | 已对齐 | 专用 adapter，固定走 Chat Completions | 持续对比 `kimi_executor.go` |
 | Kimi 模型名归一化 | 已对齐 | 去除 `[1m]` 后缀 | 跟进上游新增 suffix/alias 规则 |
@@ -62,8 +64,8 @@ Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会
 | Codex `response.failed/error` | 已对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误 | 对比上游新增 code/type 分类 |
 | Codex 中断流检测 | 已对齐 | 未收到 `response.completed/incomplete` 时视为失败，不伪造成功 | 跟进上游中断流恢复策略 |
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
-| Codex client model catalog | 部分对齐 | 已有通用 capabilities、公开别名继承和模型名回写；缺官方客户端完整 metadata 模板 | 与 Issue #16 一并设计；不复制常驻内存模板缓存 |
-| Codex Multi-Agent V2 | 未对齐 | 尚未重写 `spawn_agent`、`agent_message`、collaboration namespace 和客户端模型目录 | 重大架构项，跟进 Issue #16 |
+| Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，覆盖 reasoning、modalities、context window、visibility、search-tool、service tier、稳定 priority 和 V2 标记 | 继续对比官方模板新增字段，不引入常驻模板缓存 |
+| Codex Multi-Agent V2 | 大体对齐 | 默认关闭；按 route/provider 开启；仅目标 UA；支持 spawn/agent/namespace、非 Codex 转换及流式/非流式恢复 | 运行完整 CI 与真实 Codex 客户端 smoke；WebSocket 单独设计 |
 | Codex Live / WebRTC / sideband | 未对齐 | 当前仅实现 HTTP/SSE，不提供媒体 relay 或 TCP candidate proxy | 重大安全与生命周期设计，跟进 Issue #17 |
 | Codex reasoning replay/signature cache | 未对齐 | 尚未实现跨请求 reasoning/signature 重放缓存 | 评估 Workers KV/DO 实现 |
 | Codex Responses WebSocket | 未对齐 | Workers 网关当前仅实现 HTTP/SSE | 未单独批准前不自动移植 |
@@ -75,7 +77,7 @@ Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会
 | Provider/System 代理 | 已对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连 | 持续跟进 Workers Socket 限制 |
 | OpenAI-compatible 自定义上游 | 已对齐 | 可配置 base URL、API mode、模型、权重、Key 和代理 | 跟进通用 provider 配置能力 |
 | 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名 | 补强不同供应商模型响应解析 |
-| 模型能力元数据 | 部分对齐 | 支持 tools、images、reasoning levels、输入/输出模态和模型名回写 | 后续补 context window、search-tool、visibility 等客户端 metadata |
+| 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、visibility、search-tool、priority 和模型名回写 | 跟进上游 registry 新字段与冲突优先级 |
 | Usage/Token 规范化 | 部分对齐 | 已记录 prompt/completion/cached/total 和费用 | 优先跟进 canonical breakdown、partial/unclassified/inconsistent 状态 |
 | 请求级日志与费用 | 项目差异 | 使用 D1/Queue 内建 | 不要求结构一致，只保证 Token 语义可靠 |
 | 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构 |
@@ -153,8 +155,9 @@ Codex Live 依赖 WebRTC、ICE/STUN、sideband、TCP candidate proxy、常驻会
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
-| 2026-07-25 | `35ebe3f3..f8dffa05` | 文档更新；Issue #16 补充；Issue #17 | Codex client model catalog 属于相关变化，但现有通用 capability 已覆盖主语义，完整官方客户端 metadata 与 Multi-Agent V2 一并设计；Codex Live/WebRTC 属重大架构和安全能力，不直接合入。其余为 Claude 或纯文档变化。 |
-| 2026-07-25 | `42f36b94..35ebe3f3` | `f68c71f5`；Issue #16 | credential concurrency 仅重构测试，无行为变化；新增 Codex Multi-Agent V2 属于重大架构能力，不直接合入。 |
+| 2026-07-25 | Issue #16 + `71d59129` | `88f703c9..86b7eb4c` | 已实现 Workers 原生 Multi-Agent V2 HTTP/SSE 兼容层和动态 Codex client model catalog：默认关闭、目标 UA 门禁、route/provider 灰度、冲突安全回退、公开模型/能力继承、SSE frame metadata 保留；不引入常驻 registry、文件系统或 WebSocket 假设。 |
+| 2026-07-25 | `35ebe3f3..f8dffa05` | 文档更新；Issue #16 补充；Issue #17 | Codex client model catalog 属于相关变化；Codex Live/WebRTC 属重大架构和安全能力，不直接合入。其余为 Claude 或纯文档变化。 |
+| 2026-07-25 | `42f36b94..35ebe3f3` | `f68c71f5`；Issue #16 | credential concurrency 仅重构测试，无行为变化；新增 Codex Multi-Agent V2 属于重大架构能力，先设计后实现。 |
 | 2026-07-24 | 至 `42f36b94` | `4e20ae6b` | Kimi/Codex HTTP 核心与 P1 调度、错误、模型能力已大体对齐；Token canonical breakdown、Codex WebSocket/replay cache、完整多供应商范围仍未对齐。 |
 
 ## 9. 许可证与署名
