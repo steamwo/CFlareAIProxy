@@ -15,13 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          fetch-tags: false
-          show-progress: false
-          ref: agent/qoder-display-name-routing
+      - name: Checkout branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: git clone --quiet --depth 1 --branch agent/qoder-display-name-routing "https://x-access-token:${GITHUB_TOKEN}@github.com/steamwo/CFlareAIProxy.git" repo
       - name: Apply proposed changes
+        working-directory: repo
         run: |
           git apply --recount --verbose --check agent-qoder-routing.patch
           git apply --recount --verbose agent-qoder-routing.patch
@@ -33,15 +32,21 @@ jobs:
         with:
           node-version: 22.13.0
           cache: pnpm
+          cache-dependency-path: repo/pnpm-lock.yaml
       - name: Install dependencies
+        working-directory: repo
         run: pnpm install --frozen-lockfile
       - name: Run repository checks
+        working-directory: repo
         run: pnpm run check
       - name: Build production web bundle
+        working-directory: repo
         run: pnpm run build:web
       - name: Run Wrangler dry run
+        working-directory: repo
         run: pnpm run config:check
       - name: Commit validated changes
+        working-directory: repo
         run: |
           git config user.name "openai-agent"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
