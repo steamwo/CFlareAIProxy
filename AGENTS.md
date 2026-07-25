@@ -16,6 +16,7 @@
 ## 项目结构与不变量
 
 - `src/worker.ts` 是 Wrangler 入口；`src/index.ts` 承载主要 HTTP、Queue 和业务路由。
+- 生产 Worker 名称固定为 `cfap`，必须与 Cloudflare Dashboard/Git 集成目标一致；包名、D1 和 Queue 的 `cflare-api*` 标识是独立资源，不得连带重命名。
 - `wrangler.jsonc` 中声明的 Durable Object 类必须由配置的入口文件具名导出。
 - `AccountPool` 和 `RateLimiter` 的类名、绑定名、迁移记录不得随意修改。
 - `/v1/*`、`/admin/api/*`、`/oauth/*`、Queue consumer、Cron handler 和静态资源路由必须继续可用。
@@ -37,6 +38,7 @@
 
 - 不提交真实 Secret、Token、密码、数据库 ID 或 KV ID。
 - 不绕过 `scripts/deploy.mjs` 的资源和 Secret 初始化流程。
+- 修改 Worker 名称时，同步 `scripts/check-config.mjs`，并确认 Cloudflare Dashboard 与 Git 集成指向同一服务。
 - 修改 Worker 入口时，核对默认导出以及所有 Wrangler 引用的具名导出。
 - Cloudflare 配置变更必须通过 Wrangler dry-run；仅 Web 构建成功不算部署验证。
 
