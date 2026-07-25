@@ -103,8 +103,8 @@ export function resolveCodexClientCatalogContext(
       if (flags.every(Boolean)) multiAgentModels.add(id);
       continue;
     }
-    const modelProviderIds = modelProviders(model);
-    if (modelProviderIds.length === 1 && providerFlags.get(modelProviderIds[0]) === true) multiAgentModels.add(id);
+    const [modelProviderId] = modelProviders(model);
+    if (modelProviderId && providerFlags.get(modelProviderId) === true) multiAgentModels.add(id);
   }
   return { multiAgentModels, providerKinds };
 }
