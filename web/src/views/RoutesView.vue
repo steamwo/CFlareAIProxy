@@ -26,9 +26,10 @@ const discoveredModels = ref<DiscoveredModel[]>([]);
 const loading = ref(false);
 const modal = ref(false);
 const editing = ref<ModelRoute | null>(null);
+const editingOptions = ref<Record<string, unknown>>({});
 const message = useMessage();
 const tablePagination = { pageSize: 10, pageSizes: [10, 20, 50], showSizePicker: true, showQuickJumper: true };
-const form = reactive({ publicModel: "", providerId: "", upstreamModel: "", endpoint: "chat", enabled: true, priority: 100, weight: 1 });
+const form = reactive({ publicModel: "", providerId: "", upstreamModel: "", endpoint: "chat", enabled: true, priority: 100, weight: 1, codexMultiAgentV2: false });
 const endpointOrder = new Map([["responses", 0], ["chat", 1], ["completions", 2]]);
 const endpointLabels: Record<string, string> = { responses: "Responses", chat: "Chat", completions: "Completions" };
 const upstreamOptions = computed(() => {
@@ -44,6 +45,13 @@ const endpoints = [
   { label: "Responses", value: "responses" },
   { label: "Legacy Completions", value: "completions" },
 ];
+function parseOptions(row: ModelRoute): Record<string, unknown> {
+  try { return JSON.parse(row.options_json || "{}"); } catch { return {}; }
+}
+function multiAgentEnabled(row: ModelRoute): boolean {
+  const options = parseOptions(row);
+  return options.codex_multi_agent_v2 === true || options.codexMultiAgentV2 === true;
+}
 async function load() {
   loading.value = true;
   try {
@@ -56,13 +64,22 @@ async function load() {
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
   finally { loading.value = false; }
 }
-function create() { editing.value = null; Object.assign(form, { publicModel: "", providerId: "", upstreamModel: "", endpoint: "chat", enabled: true, priority: 100, weight: 1 }); modal.value = true; }
-function edit(row: ModelRoute) {
-  editing.value = row;
-  Object.assign(form, { publicModel: row.public_model, providerId: row.provider_id, upstreamModel: row.upstream_model, endpoint: row.endpoint, enabled: row.enabled === 1, priority: row.priority, weight: row.weight });
+function create() {
+  editing.value = null;
+  editingOptions.value = {};
+  Object.assign(form, { publicModel: "", providerId: "", upstreamModel: "", endpoint: "chat", enabled: true, priority: 100, weight: 1, codexMultiAgentV2: false });
   modal.value = true;
 }
-function managed(row: ModelRoute): boolean { try { return JSON.parse(row.options_json || "{}").managed_by === "provider-model-selection"; } catch { return false; } }
+function edit(row: ModelRoute) {
+  editing.value = row;
+  editingOptions.value = parseOptions(row);
+  Object.assign(form, {
+    publicModel: row.public_model, providerId: row.provider_id, upstreamModel: row.upstream_model, endpoint: row.endpoint,
+    enabled: row.enabled === 1, priority: row.priority, weight: row.weight, codexMultiAgentV2: multiAgentEnabled(row),
+  });
+  modal.value = true;
+}
+function managed(row: ModelRoute): boolean { return parseOptions(row).managed_by === "provider-model-selection"; }
 const displayRows = computed<RouteDisplay[]>(() => {
   const output: RouteDisplay[] = [];
   const managedGroups = new Map<string, RouteDisplay>();
@@ -96,8 +113,22 @@ const displayRows = computed<RouteDisplay[]>(() => {
 });
 async function save() {
   try {
-    if (editing.value) await api(`/routes/${editing.value.id}`, { method: "PATCH", body: jsonBody(form) });
-    else await api("/routes", { method: "POST", body: jsonBody(form) });
+    const options = { ...editingOptions.value };
+    delete options.codexMultiAgentV2;
+    if (form.codexMultiAgentV2 && form.endpoint === "responses") options.codex_multi_agent_v2 = true;
+    else delete options.codex_multi_agent_v2;
+    const body = {
+      publicModel: form.publicModel,
+      providerId: form.providerId,
+      upstreamModel: form.upstreamModel,
+      endpoint: form.endpoint,
+      enabled: form.enabled,
+      priority: form.priority,
+      weight: form.weight,
+      options,
+    };
+    if (editing.value) await api(`/routes/${editing.value.id}`, { method: "PATCH", body: jsonBody(body) });
+    else await api("/routes", { method: "POST", body: jsonBody(body) });
     message.success("路由已保存"); modal.value = false; await load();
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
 }
@@ -121,7 +152,7 @@ function availabilityDetail(row: RouteDisplay): string {
   return row.endpoints.length > 1 ? `${row.endpoints.length} 个端点，${available}/${total} 个账号可覆盖` : `${available}/${total} 个账号可用`;
 }
 const columns: DataTableColumns<RouteDisplay> = [
-  { title: "客户端模型名", key: "public_model", render: (row) => h("div", [h("strong", row.public_model), managed(row) ? h(NTag, { size: "tiny", style: "margin-left:8px" }, { default: () => "供应商自动管理" }) : null]) },
+  { title: "客户端模型名", key: "public_model", render: (row) => h("div", [h("strong", row.public_model), managed(row) ? h(NTag, { size: "tiny", style: "margin-left:8px" }, { default: () => "供应商自动管理" }) : null, multiAgentEnabled(row) ? h(NTag, { size: "tiny", type: "success", style: "margin-left:8px" }, { default: () => "Multi-Agent V2" }) : null]) },
   { title: "实际上游", key: "target", render: (row) => h("div", [h(NTag, { size: "small" }, { default: () => row.provider_id }), h("span", { class: "mono", style: "margin-left:8px" }, row.upstream_model)]) },
   { title: "支持端点", key: "endpoints", render: (row) => h(NSpace, { size: 5, wrap: true }, { default: () => row.endpoints.map((endpoint) => h(NTag, { size: "small", type: "info" }, { default: () => endpointLabels[endpoint] ?? endpoint })) }) },
   { title: "分流规则", key: "priority", render: (row) => h("div", [h("strong", `优先级 ${row.priority}`), h("div", { class: "muted", style: "font-size:12px" }, `同级权重 ${row.weight}`)]) },
@@ -147,6 +178,6 @@ onMounted(load);
   <n-alert type="info" :bordered="false" style="margin-bottom:16px"><strong>怎么用：</strong>相同“客户端模型名”的线路会组成一个路由池。数字更小的优先级先用；只有主线路不可用时才切到更大的优先级。同一优先级按权重分流。OpenAI 供应商的模型勾选与别名建议直接在“OpenAI-compatible 供应商”里配置，这里只做高级主备覆盖。</n-alert>
   <n-card><n-data-table :columns="columns" :data="displayRows" :loading="loading" :pagination="tablePagination" :row-key="row => row.routeIds.join(':')" :scroll-x="1320" /></n-card>
   <n-modal v-model:show="modal" preset="card" :title="editing ? '编辑手动路由' : '新增手动路由'" style="width:min(720px,calc(100vw - 32px))">
-    <n-form label-placement="top"><n-form-item label="客户端看到的模型名"><n-input v-model:value="form.publicModel" placeholder="例如 coding-fast" /></n-form-item><div class="grid-2"><n-form-item label="供应商 / 渠道"><n-select v-model:value="form.providerId" :options="sources" filterable /></n-form-item><n-form-item label="实际上游模型"><n-select :value="form.upstreamModel" :options="upstreamOptions" filterable tag placeholder="选择已发现模型，或直接输入模型 ID" @update:value="selectUpstream" /></n-form-item></div><div class="grid-stats" style="grid-template-columns:repeat(3,1fr)"><n-form-item label="端点"><n-select v-model:value="form.endpoint" :options="endpoints" /></n-form-item><n-form-item label="优先级（越小越先）"><n-input-number v-model:value="form.priority" :min="1" style="width:100%" /></n-form-item><n-form-item label="同级权重"><n-input-number v-model:value="form.weight" :min="1" style="width:100%" /></n-form-item></div><n-form-item label="启用"><n-switch v-model:value="form.enabled" /></n-form-item><n-space justify="end"><n-button @click="modal = false">取消</n-button><n-button type="primary" @click="save">保存</n-button></n-space></n-form>
+    <n-form label-placement="top"><n-form-item label="客户端看到的模型名"><n-input v-model:value="form.publicModel" placeholder="例如 coding-fast" /></n-form-item><div class="grid-2"><n-form-item label="供应商 / 渠道"><n-select v-model:value="form.providerId" :options="sources" filterable /></n-form-item><n-form-item label="实际上游模型"><n-select :value="form.upstreamModel" :options="upstreamOptions" filterable tag placeholder="选择已发现模型，或直接输入模型 ID" @update:value="selectUpstream" /></n-form-item></div><div class="grid-stats" style="grid-template-columns:repeat(3,1fr)"><n-form-item label="端点"><n-select v-model:value="form.endpoint" :options="endpoints" /></n-form-item><n-form-item label="优先级（越小越先）"><n-input-number v-model:value="form.priority" :min="1" style="width:100%" /></n-form-item><n-form-item label="同级权重"><n-input-number v-model:value="form.weight" :min="1" style="width:100%" /></n-form-item></div><n-form-item label="Codex Multi-Agent V2"><n-space align="center"><n-switch v-model:value="form.codexMultiAgentV2" :disabled="form.endpoint !== 'responses'" /><span class="muted">默认关闭；仅 Codex Desktop / codex-tui 的 Responses 请求触发。</span></n-space></n-form-item><n-form-item label="启用"><n-switch v-model:value="form.enabled" /></n-form-item><n-space justify="end"><n-button @click="modal = false">取消</n-button><n-button type="primary" @click="save">保存</n-button></n-space></n-form>
   </n-modal>
 </template>
