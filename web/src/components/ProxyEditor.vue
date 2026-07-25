@@ -10,7 +10,16 @@ const visible = defineModel<boolean>("show", { default: false });
 const value = ref("");
 const saving = ref(false);
 const testing = ref(false);
-const testResult = ref<{ directIp?: string; exitIp?: string; ipChanged?: boolean; latencyMs?: number; warning?: string } | null>(null);
+const testResult = ref<{
+  directIp?: string;
+  exitIp?: string;
+  ipChanged?: boolean;
+  latencyMs?: number;
+  warning?: string;
+  httpsReady?: boolean;
+  testTransport?: "http" | "https";
+  tlsError?: string;
+} | null>(null);
 const message = useMessage();
 watch(visible, (open) => { if (open) { value.value = ""; testResult.value = null; } });
 const endpoint = computed(() => props.providerId ? `/providers/${props.providerId}/proxy` : "/settings/proxy");
@@ -36,9 +45,19 @@ async function test() {
   testResult.value = null;
   try {
     const testEndpoint = props.providerId ? `/providers/${props.providerId}/proxy/test` : "/settings/proxy/test";
-    const result = await api<{ directIp?: string; exitIp?: string; ipChanged?: boolean; latencyMs?: number; warning?: string }>(testEndpoint, { method: "POST" });
+    const result = await api<{
+      directIp?: string;
+      exitIp?: string;
+      ipChanged?: boolean;
+      latencyMs?: number;
+      warning?: string;
+      httpsReady?: boolean;
+      testTransport?: "http" | "https";
+      tlsError?: string;
+    }>(testEndpoint, { method: "POST" });
     testResult.value = result;
-    if (result.ipChanged === false) message.warning(result.warning || "代理出口与 Worker 直连出口相同");
+    if (result.httpsReady === false) message.warning(result.warning || "代理可连接，但 HTTPS 隧道不可用");
+    else if (result.ipChanged === false) message.warning(result.warning || "代理出口与 Worker 直连出口相同");
     else message.success(`代理出口已生效：${result.exitIp ?? "已连接"}`);
   } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
   finally { testing.value = false; }
@@ -52,10 +71,19 @@ async function test() {
       Codex 换 Token、模型、额度和推理会共用这个出口。代理失败会直接报错，不会静默改走 Worker IP。
     </n-alert>
     <n-form-item label="代理 URL"><n-input v-model:value="value" clearable placeholder="http://user:pass@host:port 或 socks5://host:port" /></n-form-item>
-    <n-alert v-if="testResult" :type="testResult.ipChanged === false ? 'warning' : 'success'" :bordered="false" style="margin-bottom:16px">
+    <n-alert
+      v-if="testResult"
+      :type="testResult.httpsReady === false || testResult.ipChanged === false ? 'warning' : 'success'"
+      :bordered="false"
+      style="margin-bottom:16px"
+    >
       Worker 直连：<span class="mono">{{ testResult.directIp || '未知' }}</span><br />
       代理出口：<span class="mono">{{ testResult.exitIp || '未知' }}</span>
-      <span v-if="testResult.latencyMs"> · {{ testResult.latencyMs }} ms</span>
+      <span v-if="testResult.latencyMs"> · {{ testResult.latencyMs }} ms</span><br />
+      HTTPS 隧道：<strong>{{ testResult.httpsReady === false ? '不可用' : '可用' }}</strong>
+      <span v-if="testResult.testTransport"> · 出口检测使用 {{ testResult.testTransport.toUpperCase() }}</span>
+      <template v-if="testResult.warning"><br />{{ testResult.warning }}</template>
+      <template v-if="testResult.tlsError"><br /><span class="mono">{{ testResult.tlsError }}</span></template>
     </n-alert>
     <n-space justify="space-between">
       <n-space>

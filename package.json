@@ -10,7 +10,7 @@
     "doctor": "node scripts/doctor.mjs",
     "resources:ensure": "node scripts/ensure-remote-resources.mjs",
     "deploy": "npm run build && node scripts/deploy.mjs",
-    "deploy:worker": "wrangler deploy",
+    "deploy:worker": "node scripts/deploy.mjs",
     "preview": "wrangler versions upload",
     "cf-typegen": "wrangler types",
     "typecheck": "npm run typecheck:worker && npm run typecheck:web",

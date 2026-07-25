@@ -1,4 +1,4 @@
-name: Deploy CFlareAPI with GitHub Actions
+name: Deploy CFlareAIProxy with GitHub Actions
 on:
   workflow_dispatch:
 jobs:

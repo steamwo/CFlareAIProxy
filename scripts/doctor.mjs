@@ -126,4 +126,4 @@ if (checks.some((item) => !item.ok)) {
   process.exit(1);
 }
 
-console.log("\nCFlareAPI 本地环境检查通过。运行 pnpm run dev 即可启动。\n");
+console.log("\nCFlareAIProxy 本地环境检查通过。运行 pnpm run dev 即可启动。\n");

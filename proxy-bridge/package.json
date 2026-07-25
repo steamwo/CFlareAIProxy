@@ -3,7 +3,7 @@
   "version": "0.5.0",
   "private": true,
   "type": "module",
-  "description": "Authenticated streaming proxy bridge for CFlareAPI provider-level HTTP/HTTPS/SOCKS egress.",
+  "description": "Authenticated streaming proxy bridge for CFlareAIProxy provider-level HTTP/HTTPS/SOCKS egress.",
   "scripts": {
     "start": "node server.mjs",
     "check": "node --check server.mjs"

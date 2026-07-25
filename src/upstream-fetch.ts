@@ -157,6 +157,16 @@ function basicAuthorization(url: URL): string | undefined {
   return `Basic ${btoa(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`)}`;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function isTlsHandshakeFailure(error: unknown): boolean {
+  const code = error instanceof GatewayError ? error.code : "";
+  return code === "PROXY_TLS_HANDSHAKE_FAILED"
+    || /(?:tls|ssl).*(?:handshake|certificate)|(?:handshake|certificate).*(?:tls|ssl)/i.test(errorMessage(error));
+}
+
 async function bodyBytes(body: BodyInit | null | undefined): Promise<Uint8Array> {
   if (body == null) return new Uint8Array();
   if (typeof body === "string") return encoder.encode(body);
@@ -368,10 +378,20 @@ async function nativeProxyFetch(config: ProviderProxyConfig, target: URL, init: 
 
     if (target.protocol === "https:") {
       reader.release();
-      socket = socket.startTls({ expectedServerHostname: target.hostname });
-      await socket.opened;
-      socket.closed.catch(() => undefined);
-      reader = new SocketReader(socket.readable);
+      try {
+        socket = socket.startTls({ expectedServerHostname: target.hostname });
+        await socket.opened;
+        socket.closed.catch(() => undefined);
+        reader = new SocketReader(socket.readable);
+      } catch (error) {
+        const port = target.port || "443";
+        throw new GatewayError(
+          502,
+          "PROXY_TLS_HANDSHAKE_FAILED",
+          `代理隧道已建立，但与 ${target.hostname}:${port} 的 TLS 握手失败：${errorMessage(error)}。请确认代理支持标准 CONNECT/SOCKS 隧道、不会进行 HTTPS 解密或替换证书，并允许访问该目标。`,
+          "upstream_error",
+        );
+      }
     }
 
     const body = await bodyBytes(init.body);
@@ -427,7 +447,7 @@ export async function providerFetch(
     return await nativeProxyFetch(config, url, init, timeoutMs);
   } catch (error) {
     if (error instanceof GatewayError) throw error;
-    throw new GatewayError(502, "PROXY_REQUEST_FAILED", `${provider.name} 通过代理请求失败：${error instanceof Error ? error.message : String(error)}`, "upstream_error");
+    throw new GatewayError(502, "PROXY_REQUEST_FAILED", `${provider.name} 通过代理请求失败：${errorMessage(error)}`, "upstream_error");
   }
 }
 
@@ -439,32 +459,76 @@ function readIpPayload(value: unknown): string | undefined {
   return undefined;
 }
 
+async function readIpResponse(response: Response): Promise<string | undefined> {
+  const text = await response.text();
+  if (!text) return undefined;
+  try {
+    return readIpPayload(JSON.parse(text));
+  } catch {
+    return readIpPayload(text);
+  }
+}
+
 export async function testProviderProxy(env: Env, provider: ProviderConfig): Promise<Record<string, unknown>> {
   const config = await getProviderProxyConfig(env, provider.id);
   if (!config?.enabled) throw new GatewayError(400, "PROXY_DISABLED", "该供应商尚未启用代理");
   const startedAt = Date.now();
-  const ipUrl = "https://api.ipify.org?format=json";
-  const [directResult, proxied] = await Promise.all([
-    fetch(ipUrl, { signal: AbortSignal.timeout(15_000) }).then((response) => response.json()).catch(() => null),
-    providerFetch(env, provider, ipUrl, { method: "GET", headers: { accept: "application/json" } }, {
+  const httpsIpUrl = "https://api.ipify.org?format=json";
+  const httpIpUrl = "http://api.ipify.org?format=json";
+  const directPromise = fetch(httpsIpUrl, { signal: AbortSignal.timeout(15_000) })
+    .then(readIpResponse)
+    .catch(() => undefined);
+
+  let proxied: Response;
+  let httpsReady = true;
+  let tlsError: string | undefined;
+  try {
+    proxied = await providerFetch(env, provider, httpsIpUrl, { method: "GET", headers: { accept: "application/json" } }, {
       purpose: "test",
       timeoutMs: Math.min(config.requestTimeoutMs, 30_000),
-    }),
-  ]);
-  const payload = await proxied.json().catch(() => null);
+    });
+  } catch (error) {
+    if (!isTlsHandshakeFailure(error)) throw error;
+    httpsReady = false;
+    tlsError = errorMessage(error);
+    try {
+      proxied = await providerFetch(env, provider, httpIpUrl, { method: "GET", headers: { accept: "application/json" } }, {
+        purpose: "test",
+        timeoutMs: Math.min(config.requestTimeoutMs, 30_000),
+      });
+    } catch (fallbackError) {
+      throw new GatewayError(
+        502,
+        "PROXY_TEST_FAILED",
+        `${tlsError}；HTTP 出口诊断也失败：${errorMessage(fallbackError)}`,
+        "upstream_error",
+      );
+    }
+  }
+
   if (!proxied.ok) throw new GatewayError(502, "PROXY_TEST_FAILED", `代理出口检测返回 HTTP ${proxied.status}`, "upstream_error");
-  const directIp = readIpPayload(directResult);
-  const exitIp = readIpPayload(payload);
+  const [directIp, exitIp] = await Promise.all([directPromise, readIpResponse(proxied)]);
   if (!exitIp) throw new GatewayError(502, "PROXY_TEST_INVALID", "代理出口检测没有返回 IP 地址", "upstream_error");
+
+  const sameExit = directIp ? directIp === exitIp : false;
+  const warning = !httpsReady
+    ? "已通过 HTTP 确认代理出口，但 HTTPS 隧道的 TLS 握手失败。该代理目前不能用于模型、OAuth、额度等 HTTPS 上游；请改用不拦截 TLS 的标准 CONNECT/SOCKS5 代理。"
+    : sameExit
+      ? "代理出口 IP 与 Worker 直连出口相同，请检查代理是否真的改变了出口。"
+      : undefined;
+
   return {
-    ok: true,
+    ok: httpsReady,
     providerId: provider.id,
     latencyMs: Date.now() - startedAt,
     proxyApplied: true,
     directIp,
     exitIp,
-    ipChanged: directIp ? directIp !== exitIp : undefined,
-    warning: directIp && directIp === exitIp ? "代理出口 IP 与 Worker 直连出口相同，请检查代理是否真的改变了出口。" : undefined,
+    ipChanged: directIp ? !sameExit : undefined,
+    httpsReady,
+    testTransport: httpsReady ? "https" : "http",
+    tlsError,
+    warning,
     proxyProtocol: validateProxyUrl(config.proxyUrl).protocol.replace(/:$/, ""),
   };
 }

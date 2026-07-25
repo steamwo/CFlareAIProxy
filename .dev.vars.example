@@ -1,9 +1,16 @@
-# pnpm run dev 会在缺失时自动生成本地值。
+# pnpm run dev 会在缺失时生成本地 MASTER_KEY 与 ADMIN_TOKEN。
+# 不要把真实 .dev.vars 提交到 Git。
 MASTER_KEY=
 ADMIN_TOKEN=
+
+# 管理台登录。
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=
 
-# 可选：部署 Proxy Bridge 后设置。管理台用户只填写系统/来源 Proxy URL。
+# 可选：额外 OpenCode Zen 镜像，使用逗号或换行分隔。
+OPENCODE_MIRRORS_URL=
+
+# 旧部署兼容项。当前 Worker 原生支持 HTTP CONNECT / SOCKS5，
+# 新部署不需要 Proxy Bridge；只有维护旧环境时才填写。
 PROXY_BRIDGE_URL=
 PROXY_BRIDGE_TOKEN=
