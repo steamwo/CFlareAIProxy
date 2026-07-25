@@ -5,6 +5,7 @@ import { buildQoderHeaders } from "./providers/qoder-crypto";
 import { openCodeGatewayEndpoints } from "./providers/opencode";
 import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
 import { isOpenCodeAnonymousModel, openCodeAnonymousCredential } from "./providers/opencode-anonymous";
+import { discoveryCredentialScopes } from "./qoder-model-routing";
 import type { Credential, DiscoveredModelRow, Env, GatewayEndpoint, ProviderConfig } from "./types";
 import { normalizeBaseUrl } from "./utils";
 import { providerFetch } from "./upstream-fetch";
@@ -209,21 +210,24 @@ export async function refreshCredentialModels(env: Env, credentialId: string): P
     if (!models.length) throw new GatewayError(502, "MODEL_DISCOVERY_EMPTY", `${provider.name} returned no recognizable models`, "upstream_error");
     const endpointSet = new Set<GatewayEndpoint>();
     const now = Math.floor(Date.now() / 1000);
-    const statements: D1PreparedStatement[] = [
-      env.DB.prepare("DELETE FROM discovered_models WHERE provider_id = ? AND credential_id = ?").bind(provider.id, credential.id),
-    ];
+    const discoveryScopes = discoveryCredentialScopes(provider.kind, credential.id);
+    const statements: D1PreparedStatement[] = discoveryScopes.map((scope) =>
+      env.DB.prepare("DELETE FROM discovered_models WHERE provider_id = ? AND credential_id = ?").bind(provider.id, scope),
+    );
     for (const model of models) {
       const modelEndpoints = endpointsForModel(provider, model.id);
       for (const endpoint of modelEndpoints) {
         endpointSet.add(endpoint);
-        statements.push(env.DB.prepare(
-          `INSERT INTO discovered_models
-            (provider_id,credential_id,model_id,display_name,endpoint,owned_by,capabilities_json,raw_json,enabled,discovered_at)
-           VALUES(?,?,?,?,?,?,?,?,1,?)`,
-        ).bind(
-          provider.id, credential.id, model.id, model.displayName, endpoint,
-          model.ownedBy || provider.id, JSON.stringify(model.capabilities), JSON.stringify(model.raw), now,
-        ));
+        for (const scope of discoveryScopes) {
+          statements.push(env.DB.prepare(
+            `INSERT INTO discovered_models
+              (provider_id,credential_id,model_id,display_name,endpoint,owned_by,capabilities_json,raw_json,enabled,discovered_at)
+             VALUES(?,?,?,?,?,?,?,?,1,?)`,
+          ).bind(
+            provider.id, scope, model.id, model.displayName, endpoint,
+            model.ownedBy || provider.id, JSON.stringify(model.capabilities), JSON.stringify(model.raw), now,
+          ));
+        }
       }
     }
     await env.DB.batch(statements);
