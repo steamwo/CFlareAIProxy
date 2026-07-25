@@ -249,8 +249,8 @@ adminApp.get("/api/credentials/paged", async (c) => {
   return c.json({ data, quotas, activity, total, page, pageSize, pageCount });
 });
 
-app.route("/admin", adminApp);
-app.route("/admin/", adminApp);
+// createAdminApp() already owns the /admin base path.
+app.route("/", adminApp);
 
 app.onError((error, c) => {
   runtimeLog({ requestLoggingEnabled: true, level: "error" }, "error", { event: "unhandled_error", error: error instanceof Error ? error.message : String(error) });
