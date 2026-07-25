@@ -42,3 +42,4 @@ jobs:
           git add -A
           git commit -m "Add automatic Qoder display-name routing"
           git push origin HEAD:agent/qoder-display-name-routing
+# trigger validation after workflow registration
