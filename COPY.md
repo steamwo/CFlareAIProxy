@@ -5,7 +5,7 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: 27fc3169bb4eb0509e3aba7dde4ab80286b0ae65 -->
+<!-- upstream-ref: 42a00a2a6521b867c27f7ad096d08699db8e6d19 -->
 <!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
 <!-- last-reviewed: 2026-07-26 -->
 
@@ -15,19 +15,20 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `27fc3169bb4eb0509e3aba7dde4ab80286b0ae65` |
+| 已审阅上游提交 | `42a00a2a6521b867c27f7ad096d08699db8e6d19` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
 | 审阅日期 | 2026-07-26 |
 
-本轮审阅范围为 `f8dffa05..27fc3169`，共 11 个提交：
+本轮审阅范围为 `27fc3169..42a00a2a`，共 8 个提交：
 
-- 1 个 OAuth 账号选择调试日志提交及其合并提交，只增加可观测性，不改变选择、代理或失败语义。
-- 1 个通用 executor 注册串行化与重绑定修复，同时保护 Codex executor 不因无关账号更新被替换；其运行时对象生命周期依赖本地 Go 进程，Workers 不直接移植。
-- 1 个 Windows pluginhost 缓冲修复，属于本地插件运行时范围。
-- 其余为 Claude、Antigravity/Gemini、Grok/xAI 专用模型、签名、reasoning replay、translator 或 WebSocket executor 变化，属于当前明确排除范围。
+- `f6c32ec3` 新增通用派生会话标识，并用于 Codex HTTP/Responses 的 `prompt_cache_key`、`session_id` 与 `Conversation_id` 回退；该行为与缓存连续性、租户隔离和账号切换相关，属于范围内实质变化。
+- 该提交同时包含 Codex Responses WebSocket 增量根节点连续性测试；WebSocket 部分仍属于明确排除范围。
+- `94cf4674` 位于 Codex translator 路径，但实际只调整 Codex→Claude 流式 thinking block，属于 Claude 协议范围。
+- `29406436` 及合并提交 `42a00a2a` 只修复 Claude cloaking reminder 与 `tool_result` 顺序，属于 Claude 专用变化。
+- `7cb71ed6` 为 Home/Redis 集群订阅重连与 failover 生命周期；`fe4ae498` 为 pluginhost 拆分重构；其余为 Antigravity/Gemini 与 xAI 专用变化，均不直接同步。
 
-上游通用 executor 修复的可迁移行为是：配置或账号目录并发更新时，注册流程应串行；无关 provider 的更新不应替换仍有效的 Codex/provider 执行实例；读取配置时应使用同一快照。CFlareAIProxy 不维护 Go 进程内 executor registry，账号租约与并发选择由 Durable Object 串行化，路由/provider 配置按请求读取一致快照，因此没有对应的安全代码或测试需要同步。本轮仅更新审阅基线。
+Codex 派生会话标识无法在本轮可靠直接移植：CFlareAIProxy 已使用 `X-Session-Id` / `X-Conversation-Id` 做账号亲和，但需要先明确 Codex 上游 cache key 的优先级、网关 Key/租户/provider 隔离边界、账号切换时稳定性，以及无显式会话 ID 时的隐私安全回退。已创建 Issue #35，仅评估 HTTP/SSE；不启用或移植 WebSocket 实现。本轮没有安全可验证的运行代码或测试更新。
 
 ## 2. 对齐程度
 
@@ -56,7 +57,7 @@
 | Kimi 多轮工具消息修复 | 已对齐 | 删除无效空 assistant、补 `reasoning_content`、修复 `call_id/tool_call_id` | 新增上游测试时同步移植测试语义 |
 | Kimi Responses/Completions 转换 | 大体对齐 | 支持文字、图片、工具定义、tool choice 和终止事件 | 跟进新的 Responses item/event 类型 |
 | Kimi 流式 usage | 大体对齐 | 自动请求 `include_usage` 并归集基础 Token | 接入规范化 Token 质量模型 |
-| Codex Responses 请求归一化 | 已对齐 | 清理不兼容字段、转换 tools/tool choice、透传 Codex 会话头 | 跟进 Codex CLI 新 header 和 payload 字段 |
+| Codex Responses 请求归一化 | 已对齐 | 清理不兼容字段、转换 tools/tool choice、透传 Codex 会话头 | 评估派生会话 UUID 与 prompt cache 连续性，跟进 Issue #35 |
 | Codex `response.failed/error` | 已对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误 | 对比上游新增 code/type 分类 |
 | Codex 中断流检测 | 已对齐 | 未收到 `response.completed/incomplete` 时视为失败，不伪造成功 | 跟进上游中断流恢复策略 |
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
@@ -151,6 +152,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-26 | `27fc3169..42a00a2a` | 文档更新；Issue #35 | 8 个提交中 `f6c32ec3` 含 Codex HTTP/Responses 派生会话 UUID 与 prompt cache/session header 回退语义，属于相关变化；因租户隔离、账号切换稳定性和隐私回退无法在本轮可靠验证，未直接移植，建立仅限 HTTP/SSE 的设计与测试跟进。其 WebSocket 测试以及 Claude、Home/Redis、pluginhost、Gemini/Antigravity、xAI 变化均排除。 |
 | 2026-07-26 | `f8dffa05..27fc3169` | 文档更新 | 11 个提交中仅 `27fc3169` 含通用 executor 注册串行化和 Codex executor 保留语义；Workers 侧由 Durable Object 串行租约、按请求配置快照和无进程内 executor registry 自然覆盖，不移植 Go 生命周期代码。OAuth 选择日志无行为变化；其余为 Windows plugin、Claude、Gemini/Antigravity 或 Grok/xAI 专用变化。 |
 | 2026-07-25 | Issue #16 + `71d59129` | `88f703c9..86b7eb4c` | 已实现 Workers 原生 Multi-Agent V2 HTTP/SSE 兼容层和动态 Codex client model catalog：默认关闭、目标 UA 门禁、route/provider 灰度、冲突安全回退、公开模型/能力继承、SSE frame metadata 保留；不引入常驻 registry、文件系统或 WebSocket 假设。 |
 | 2026-07-25 | `35ebe3f3..f8dffa05` | 文档更新；Issue #16 补充；Issue #17 | Codex client model catalog 属于相关变化；Codex Live/WebRTC 属重大架构和安全能力，不直接合入。其余为 Claude 或纯文档变化。 |
