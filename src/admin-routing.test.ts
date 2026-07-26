@@ -104,6 +104,30 @@ describe("admin API authentication", () => {
   });
 });
 
+describe("admin request bodies", () => {
+  it("reports malformed JSON as 400 rather than 500", async () => {
+    const app = createTestApp();
+    const authed = { ...env, ADMIN_USERNAME: "admin", ADMIN_PASSWORD: "pw" } as Env;
+    const login = await app.request("https://example.test/admin/api/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: "pw" }),
+    }, authed);
+    const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+
+    for (const body of ["{ not json", "[]", "\"a string\""]) {
+      const response = await app.request("https://example.test/admin/api/channels/codex", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", cookie },
+        body,
+      }, authed);
+      expect(response.status, `body ${body} must be rejected as a client error`).toBe(400);
+      const payload = await response.json() as { error?: { code?: string } };
+      expect(payload.error?.code).toBe("INVALID_JSON");
+    }
+  });
+});
+
 describe("built-in channel updates", () => {
   /** Signs in through the real handler so the test exercises the deployed auth path. */
   async function signedInCookie(app: ReturnType<typeof createTestApp>, testEnv: Env): Promise<string> {

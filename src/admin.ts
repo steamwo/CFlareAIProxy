@@ -243,6 +243,26 @@ async function testOpenAiProvider(
   return { models, latencyMs: Date.now() - startedAt, status: response.status };
 }
 
+/**
+ * Reads a JSON object body from an admin request.
+ *
+ * A bare `c.req.json()` throws a SyntaxError on malformed input, which the error normaliser
+ * turns into a 500 — a client-side mistake reported as a server fault. This reports 400
+ * instead, and rejects non-object payloads so handlers can index the result safely.
+ */
+async function adminJsonBody(request: Request): Promise<Record<string, unknown>> {
+  let parsed: unknown;
+  try {
+    parsed = await request.json();
+  } catch {
+    throw new GatewayError(400, "INVALID_JSON", "请求体不是有效的 JSON", "invalid_request_error");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new GatewayError(400, "INVALID_JSON", "请求体必须是 JSON 对象", "invalid_request_error");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 async function invalidateModelCache(env: Env): Promise<void> {
   await Promise.all([
     env.CONFIG_CACHE.delete("models:public"),
@@ -411,7 +431,7 @@ export function createAdminApp() {
   app.patch("/api/channels/:id", async (c) => {
     const id = c.req.param("id");
     if (!isBuiltinChannelId(id)) throw new GatewayError(404, "CHANNEL_NOT_FOUND", "Built-in channel not found");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const poolStrategy = typeof body.poolStrategy === "string" ? body.poolStrategy : body.pool_strategy;
     await c.env.DB.prepare(
       "UPDATE providers SET enabled=COALESCE(?,enabled),pool_strategy=COALESCE(?,pool_strategy),updated_at=? WHERE id=?",
@@ -446,7 +466,7 @@ export function createAdminApp() {
   });
 
   app.post("/api/providers/test", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const rawBaseUrl = typeof body.baseUrl === "string" ? body.baseUrl : body.base_url;
     const baseUrl = stringValue(rawBaseUrl, "baseUrl");
     const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
@@ -456,7 +476,7 @@ export function createAdminApp() {
   });
 
   app.post("/api/providers", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const id = stringValue(body.id, "id").toLowerCase();
     if (!/^[a-z0-9][a-z0-9_-]{1,63}$/.test(id)) {
       throw new GatewayError(400, "PROVIDER_ID_INVALID", "供应商 ID 只能包含小写字母、数字、下划线和短横线");
@@ -505,7 +525,7 @@ export function createAdminApp() {
   app.patch("/api/providers/:id", async (c) => {
     const id = c.req.param("id");
     if (isBuiltinChannelId(id)) throw new GatewayError(400, "BUILTIN_CHANNEL_READ_ONLY", "内置渠道配置不可修改");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const row = await c.env.DB.prepare("SELECT * FROM providers WHERE id=?").bind(id).first<ProviderRow>();
     if (!row) throw new GatewayError(404, "PROVIDER_NOT_FOUND", "Provider not found");
     const previousOptions = parseJson<Record<string, unknown>>(row.options_json, {});
@@ -557,7 +577,7 @@ export function createAdminApp() {
 
   app.get("/api/settings/proxy", async (c) => c.json({ data: await getSystemProxySummary(c.env) }));
   app.put("/api/settings/proxy", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const proxyUrl = typeof body.proxyUrl === "string" ? body.proxyUrl.trim() : "";
     if (proxyUrl) validateProxyUrl(proxyUrl);
     await upsertSystemProxyUrl(c.env, proxyUrl);
@@ -574,7 +594,7 @@ export function createAdminApp() {
     const providerId = c.req.param("id");
     const exists = await c.env.DB.prepare("SELECT id FROM providers WHERE id=?").bind(providerId).first<{ id: string }>();
     if (!exists) throw new GatewayError(404, "PROVIDER_NOT_FOUND", "Provider not found");
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const proxyUrl = typeof body.proxyUrl === "string" ? body.proxyUrl.trim() : "";
     if (proxyUrl) validateProxyUrl(proxyUrl);
     await upsertProviderProxyConfig(c.env, { providerId, proxyUrl });
@@ -639,7 +659,7 @@ export function createAdminApp() {
     return c.json({ data });
   });
   app.post("/api/credentials", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const id = await createCredential(c.env, {
       providerId: stringValue(body.providerId, "providerId"),
       label: stringValue(body.label, "label"),
@@ -659,7 +679,7 @@ export function createAdminApp() {
     return c.json({ id }, 201);
   });
   app.patch("/api/credentials/:id", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const row = await c.env.DB.prepare("SELECT * FROM credentials WHERE id=?").bind(c.req.param("id")).first<CredentialRow>();
     if (!row) throw new GatewayError(404, "CREDENTIAL_NOT_FOUND", "Credential not found");
     const secretCiphertext = typeof body.secret === "string" && body.secret
@@ -713,7 +733,7 @@ export function createAdminApp() {
     })) });
   });
   app.post("/api/auth-files/import", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const auth = jsonObject(body.auth);
     const access = [auth.access_token, auth.token, auth.api_key, body.secret].find((value) => typeof value === "string" && value.length > 0);
     if (typeof access !== "string") throw new GatewayError(400, "AUTH_FILE_INVALID", "auth.access_token, auth.token or auth.api_key is required", "invalid_request_error");
@@ -740,7 +760,7 @@ export function createAdminApp() {
     return c.json({ id }, 201);
   });
   app.patch("/api/auth-files/:id", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     await c.env.DB.prepare("UPDATE credentials SET enabled=COALESCE(?,enabled), updated_at=? WHERE id=?")
       .bind(optionalEnabled(body.enabled), Math.floor(Date.now()/1000), c.req.param("id")).run();
     await invalidateModelCache(c.env);
@@ -819,7 +839,7 @@ export function createAdminApp() {
     return c.json({ ok: true });
   });
   app.post("/api/routes", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const id = crypto.randomUUID(); const now = Math.floor(Date.now()/1000);
     await c.env.DB.prepare(
       `INSERT INTO model_routes(id,public_model,provider_id,upstream_model,endpoint,enabled,priority,weight,options_json,created_at,updated_at)
@@ -834,7 +854,7 @@ export function createAdminApp() {
     return c.json({ id }, 201);
   });
   app.patch("/api/routes/:id", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const row = await c.env.DB.prepare("SELECT * FROM model_routes WHERE id=?").bind(c.req.param("id")).first<ModelRouteRow>();
     if (!row) throw new GatewayError(404, "ROUTE_NOT_FOUND", "Model route not found");
     await c.env.DB.prepare(
@@ -870,7 +890,7 @@ export function createAdminApp() {
     return c.json({ data });
   });
   app.post("/api/keys", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     return c.json(await createGatewayKey(c.env, {
       name: stringValue(body.name,"name"), rpm: typeof body.rpm === "number" ? body.rpm : undefined,
       maxConcurrency: typeof body.maxConcurrency === "number" ? body.maxConcurrency : undefined,
@@ -880,7 +900,7 @@ export function createAdminApp() {
     }), 201);
   });
   app.patch("/api/keys/:id", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const row = await c.env.DB.prepare("SELECT * FROM gateway_keys WHERE id=?").bind(c.req.param("id")).first<GatewayKeyRow>();
     if (!row) throw new GatewayError(404, "GATEWAY_KEY_NOT_FOUND", "Gateway key not found");
     const expiresAt = body.expiresAt === null
@@ -918,7 +938,7 @@ export function createAdminApp() {
     return c.json({ data: result.results });
   });
   app.put("/api/prices", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const providerId = stringValue(body.providerId, "providerId");
     const model = stringValue(body.model, "model");
     const { input, output, cache } = priceInput(body);
@@ -940,7 +960,7 @@ export function createAdminApp() {
     return c.json({ ok: true });
   });
   app.put("/api/prices/:provider/:model", async (c) => {
-    const body = await c.req.json<Record<string, unknown>>();
+    const body = await adminJsonBody(c.req.raw);
     const { input, output, cache } = priceInput(body);
     await c.env.DB.prepare(
       `INSERT INTO model_prices(provider_id,model,input_micros_per_million,output_micros_per_million,cache_micros_per_million,updated_at)
@@ -968,16 +988,23 @@ export function createAdminApp() {
 
   app.post("/api/oauth/:provider/start", async (c) => c.json(await startOAuth(c.env,c.req.param("provider"))));
   app.post("/api/oauth/:provider/poll", async (c) => {
-    const body=await c.req.json<{sessionId:string}>();
-    const result = await pollOAuth(c.env,c.req.param("provider"),body.sessionId);
+    const body = await adminJsonBody(c.req.raw);
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    const result = await pollOAuth(c.env, c.req.param("provider"), sessionId);
     if (result.credentialId) c.executionCtx.waitUntil(Promise.allSettled([
       refreshCredentialModels(c.env, result.credentialId), refreshCredentialQuota(c.env, result.credentialId),
     ]).then(() => undefined));
     return c.json(result);
   });
   app.post("/api/oauth/:provider/exchange", async (c) => {
-    const body=await c.req.json<{sessionId?:string;state?:string;code?:string;callbackUrl?:string}>();
-    const result = await exchangeOAuthCode(c.env,c.req.param("provider"),body);
+    const body = await adminJsonBody(c.req.raw);
+    const stringField = (key: string): string | undefined => typeof body[key] === "string" ? body[key] : undefined;
+    const result = await exchangeOAuthCode(c.env, c.req.param("provider"), {
+      sessionId: stringField("sessionId"),
+      state: stringField("state"),
+      code: stringField("code"),
+      callbackUrl: stringField("callbackUrl"),
+    });
     if (result.credentialId) c.executionCtx.waitUntil(Promise.allSettled([
       refreshCredentialModels(c.env, result.credentialId), refreshCredentialQuota(c.env, result.credentialId),
     ]).then(() => undefined));
