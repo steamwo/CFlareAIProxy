@@ -11,9 +11,9 @@ permissions:
   contents: write
 
 jobs:
-  diagnose-web-types:
+  validate-and-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout branch
         env:
@@ -30,15 +30,47 @@ jobs:
           new = '''    count = text.count(old)\n    if count == 0:\n        raise SystemExit(f"{path}: expected one match, found 0")\n    if count > 1:\n        if path == "src/admin.ts" and old.startswith("    const expiresAt = body.expiresAt"):\n            head, separator, tail = text.rpartition(old)\n            target.write_text(head + new + tail)\n            return\n        raise SystemExit(f"{path}: expected one match, found {count}")\n    target.write_text(text.replace(old, new))'''
           if text.count(old) != 1:
               raise SystemExit("replacement helper context not found")
-          path.write_text(text.replace(old, new))
+          text = text.replace(old, new)
+          source_import = 'import type { PublicModel } from "../types";\\n\\n'
+          typed_import = 'import type { SelectOption } from "naive-ui";\\nimport type { PublicModel } from "../types";\\n\\n'
+          option_interface = 'export interface ModelSelectOption {\\n  label: string;\\n  value: string;\\n}\\n\\n'
+          if text.count(source_import) != 1 or text.count(option_interface) != 1:
+              raise SystemExit("model option source context not found")
+          text = text.replace(source_import, typed_import).replace(option_interface, "")
+          text = text.replace("): ModelSelectOption[] {", "): SelectOption[] {")
+          path.write_text(text)
           PY
           python3 scripts/agent-fix-qoder-key-models.py
+          rm scripts/agent-fix-qoder-key-models.py .github/workflows/agent-qoder-key-model-fix.yml
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+          cache-dependency-path: repo/pnpm-lock.yaml
       - name: Install dependencies
         working-directory: repo
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.9.0 --activate
-          pnpm install --frozen-lockfile --reporter=silent
-      - name: Typecheck web
+        run: pnpm install --frozen-lockfile
+      - name: Run repository checks
         working-directory: repo
-        run: pnpm run typecheck:web
+        run: pnpm run check
+      - name: Build production web bundle
+        working-directory: repo
+        run: pnpm run build:web
+      - name: Run Wrangler dry run
+        working-directory: repo
+        run: pnpm run config:check
+      - name: Commit validated fix
+        working-directory: repo
+        run: |
+          git config user.name "openai-agent"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/qoder-model-routing.ts src/db.ts src/admin.ts \
+            web/src/types.ts web/src/views/KeysView.vue \
+            web/src/utils/model-selection.ts web/src/utils/model-selection.test.ts \
+            test/qoder-model-routing.test.ts docs/qoder-model-routing.md
+          git add -u .github/workflows/agent-qoder-key-model-fix.yml scripts/agent-fix-qoder-key-models.py
+          git commit -m "Normalize Qoder models in gateway keys"
+          git push origin HEAD:agent/qoder-display-name-routing
