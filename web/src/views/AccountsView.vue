@@ -3,24 +3,16 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NModal,
-  NPagination, NPopconfirm, NProgress, NSpace, NSpin, NSwitch, NTag, useMessage,
+  NPagination, NSpace, NSpin, NSwitch,
 } from "naive-ui";
-import { Activity, AlertTriangle, Clock, Download, FileJson, Gauge, KeyRound, RefreshCw, Settings, Sparkles, Trash2 } from "@lucide/vue";
+import { FileJson, KeyRound, RefreshCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
-import ProviderIcon from "../components/ProviderIcon.vue";
+import AccountCard from "../components/AccountCard.vue";
 import { api, jsonBody } from "../api";
-import { summarizeAccountError } from "../utils/account-error";
-import { formatTokens } from "../utils/format";
-import type { Channel, Credential, QuotaSnapshot, QuotaWindow } from "../types";
+import { useApiRequest } from "../composables/useApiRequest";
+import type { ActivityRecord } from "../utils/account-activity";
+import type { Channel, Credential, QuotaSnapshot } from "../types";
 
-interface ParsedQuota {
-  plan?: string;
-  windows: QuotaWindow[];
-  credits?: { balance?: string | number; unlimited?: boolean; hasCredits?: boolean };
-}
-interface ActivityBucket { bucket: number; requests: number; successes: number; failures: number; tokens: number }
-interface ActivityTotals { requests: number; successes: number; failures: number }
-interface ActivityRecord { buckets: ActivityBucket[]; totals: ActivityTotals }
 interface CredentialPage {
   data: Credential[];
   quotas: QuotaSnapshot[];
@@ -30,12 +22,10 @@ interface CredentialPage {
   pageSize: number;
   pageCount?: number;
 }
-type AccountTagType = "success" | "error" | "warning" | "info" | "default";
 
-const ACTIVITY_BUCKET_SECONDS = 5 * 60;
 const route = useRoute();
 const router = useRouter();
-const message = useMessage();
+const { loading, run } = useApiRequest();
 const allowedPageSizes = [6, 12, 24];
 const queryInteger = (value: unknown, fallback: number): number => {
   const raw = Array.isArray(value) ? value[0] : value;
@@ -52,116 +42,25 @@ const channels = ref<Channel[]>([]);
 const quotas = ref<QuotaSnapshot[]>([]);
 const activity = ref<Record<string, ActivityRecord>>({});
 const total = ref(0);
-const loading = ref(false);
 const modal = ref(false);
 const editing = ref<Credential | null>(null);
 const form = reactive({ label: "", enabled: true, priority: 100, weight: 1, maxConcurrency: 4 });
 const sourceNames = computed(() => new Map(channels.value.map((channel) => [channel.id, channel.name] as const)));
 const quotaMap = computed(() => new Map(quotas.value.map((quota) => [quota.credential_id, quota] as const)));
 
-function parseQuota(row?: QuotaSnapshot): ParsedQuota {
-  if (row?.snapshot) return { plan: row.snapshot.plan, windows: row.snapshot.windows ?? [], credits: row.snapshot.credits };
-  try {
-    const parsed = JSON.parse(row?.quota_json || "{}") as Partial<ParsedQuota>;
-    return { plan: parsed.plan, windows: Array.isArray(parsed.windows) ? parsed.windows : [], credits: parsed.credits };
-  } catch {
-    return { windows: [] };
-  }
-}
-const quotaFor = (id: string): ParsedQuota => parseQuota(quotaMap.value.get(id));
+/**
+ * Re-read on every load so activity strips advance with the clock instead of freezing on the
+ * timestamp of the first render.
+ */
+const nowMs = ref(Date.now());
+
 const sourceName = (id: string): string => sourceNames.value.get(id) ?? id;
 const providerLabel = (id: string): string => ({ codex: "Codex", qoder: "Qoder", kimi: "Kimi" } as Record<string, string>)[id] ?? sourceName(id);
-function accountTitle(row: Credential): string {
-  const metadata = row.metadata ?? {};
-  const value = metadata.email ?? metadata.name ?? metadata.username ?? metadata.user_id ?? metadata.userId;
-  return typeof value === "string" && value.trim() ? value.trim() : row.label || providerLabel(row.provider_id);
-}
-const planLabel = (value?: string): string => !value ? "未识别" : value.length <= 12 ? value.replace(/^./, (letter) => letter.toUpperCase()) : value;
-function quotaPercentage(window: QuotaWindow): number {
-  if (window.limit === 0 && window.remaining === 0) return 0;
-  if (typeof window.limit === "number" && window.limit > 0 && typeof window.remaining === "number") {
-    return Math.max(0, Math.min(100, window.remaining / window.limit * 100));
-  }
-  if (typeof window.remainingPercent === "number") return Math.max(0, Math.min(100, window.remainingPercent));
-  if (typeof window.usedPercent === "number") return Math.max(0, Math.min(100, 100 - window.usedPercent));
-  return 0;
-}
-function quotaProgressStyle(window: QuotaWindow): Record<string, string> {
-  const percentage = quotaPercentage(window);
-  const hue = percentage <= 50 ? 4 + percentage / 50 * 38 : 42 + (percentage - 50) / 50 * 100;
-  return {
-    "--quota-color": `hsl(${hue} 78% 46%)`,
-    "--quota-gradient": `linear-gradient(90deg,hsl(${Math.max(0, hue - 7)} 82% 43%),hsl(${Math.min(145, hue + 8)} 76% 53%))`,
-  };
-}
-function exhaustedWindow(window: QuotaWindow): boolean {
-  return (window.limit === 0 && window.remaining === 0)
-    || (typeof window.remaining === "number" && window.remaining <= 0)
-    || (typeof window.remainingPercent === "number" && window.remainingPercent <= 0)
-    || (typeof window.usedPercent === "number" && window.usedPercent >= 100);
-}
-function quotaExhausted(providerId: string, quota: ParsedQuota): boolean {
-  if (quota.credits?.unlimited) return false;
-  const measurable = quota.windows.filter((window) => window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined);
-  if (providerId === "qoder") {
-    const pools = measurable.filter((window) => window.key === "user" || window.key === "organization");
-    return pools.length > 0 && pools.every(exhaustedWindow);
-  }
-  if (providerId === "codex") {
-    const core = measurable.filter((window) => window.key === "primary" || window.key === "secondary");
-    return core.length > 0 ? core.every(exhaustedWindow) : measurable.length > 0 && measurable.every(exhaustedWindow);
-  }
-  if (measurable.length) return measurable.every(exhaustedWindow);
-  const balance = Number(quota.credits?.balance);
-  return quota.credits?.hasCredits === false || (Number.isFinite(balance) && balance <= 0);
-}
-function accountState(row: Credential): { text: string; type: AccountTagType } {
-  if (row.enabled !== 1) return { text: "已停用", type: "default" };
-  const snapshot = quotaMap.value.get(row.id);
-  if (snapshot?.status === "ok" && quotaExhausted(row.provider_id, quotaFor(row.id))) return { text: "额度耗尽", type: "error" };
-  if (row.last_error || snapshot?.status === "error") return { text: "需要关注", type: "warning" };
-  if (snapshot?.status === "unsupported") return { text: "额度未知", type: "warning" };
-  return { text: "运行正常", type: "success" };
-}
-const accountWarning = (row: Credential): string => row.last_error || quotaMap.value.get(row.id)?.error_message || "";
-const accountIssue = (row: Credential) => summarizeAccountError(accountWarning(row));
-const formatAmount = (value: unknown): string => {
-  if (typeof value === "number" && Number.isFinite(value)) return formatTokens(value);
-  return typeof value === "string" && value.trim() ? value : "—";
-};
-function formatTime(value?: number | null, short = false): string {
-  if (!value) return short ? "从未调用" : "—";
-  const date = new Date(value > 10_000_000_000 ? value : value * 1000);
-  return short
-    ? date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
-    : date.toLocaleString("zh-CN", { hour12: false });
-}
-const activityRecord = (id: string): ActivityRecord => activity.value[id] ?? { buckets: [], totals: { requests: 0, successes: 0, failures: 0 } };
-function activityCells(id: string) {
-  const rows = activityRecord(id).buckets;
-  const byBucket = new Map(rows.map((row) => [row.bucket, row] as const));
-  const current = Math.floor(Date.now() / 1000 / ACTIVITY_BUCKET_SECONDS) * ACTIVITY_BUCKET_SECONDS;
-  const max = Math.max(0, ...rows.map((row) => row.requests));
-  return Array.from({ length: 24 }, (_, index) => {
-    const bucket = current - (23 - index) * ACTIVITY_BUCKET_SECONDS;
-    const row = byBucket.get(bucket) ?? { bucket, requests: 0, successes: 0, failures: 0, tokens: 0 };
-    const level = row.requests === 0 || max === 0 ? 0 : Math.max(1, Math.min(4, Math.ceil(Math.log1p(row.requests) / Math.log1p(max) * 4)));
-    const status = row.requests === 0 ? "idle" : row.failures === 0 ? "success" : row.successes === 0 ? "failure" : "mixed";
-    return { ...row, level, status };
-  });
-}
-function summary(id: string) {
-  const value = activityRecord(id).totals;
-  return { ...value, successRate: value.requests ? value.successes / value.requests * 100 : 0 };
-}
-function successRateClass(id: string): string {
-  const value = summary(id);
-  return !value.requests ? "status-rate--empty" : value.successRate >= 95 ? "status-rate--high" : value.successRate >= 80 ? "status-rate--medium" : "status-rate--low";
-}
+
 const paginationQuery = (nextPage = page.value, nextPageSize = pageSize.value) => ({ ...route.query, page: String(nextPage), pageSize: String(nextPageSize) });
+
 async function load() {
-  loading.value = true;
-  try {
+  await run(async () => {
     const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) });
     if (activeSource.value) params.set("provider", activeSource.value);
     const [channelResult, accountResult] = await Promise.all([
@@ -175,60 +74,53 @@ async function load() {
     total.value = accountResult.total;
     page.value = accountResult.page;
     pageSize.value = accountResult.pageSize;
+    nowMs.value = Date.now();
     await router.replace({ query: paginationQuery() });
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  } finally {
-    loading.value = false;
-  }
+  });
 }
+
 function openEdit(row: Credential) {
   editing.value = row;
   Object.assign(form, { label: row.label, enabled: row.enabled === 1, priority: row.priority, weight: row.weight, maxConcurrency: row.max_concurrency });
   modal.value = true;
 }
+
 async function save() {
-  if (!editing.value) return;
-  try {
-    await api(`/credentials/${editing.value.id}`, { method: "PATCH", body: jsonBody(form) });
-    message.success("账号已更新");
+  const target = editing.value;
+  if (!target) return;
+  await run(async () => {
+    await api(`/credentials/${target.id}`, { method: "PATCH", body: jsonBody(form) });
     modal.value = false;
     await load();
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+  }, { success: "账号已更新", loading: null });
 }
+
 async function remove(id: string) {
-  try {
+  await run(async () => {
     await api(`/credentials/${id}`, { method: "DELETE" });
-    message.success("账号已删除");
     await load();
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+  }, { success: "账号已删除", loading: null });
 }
+
 async function toggleEnabled(row: Credential, enabled: boolean) {
-  try {
+  await run(async () => {
     await api(`/credentials/${row.id}`, { method: "PATCH", body: jsonBody({ enabled }) });
     row.enabled = enabled ? 1 : 0;
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+  }, { loading: null });
 }
+
 async function refreshOne(id: string) {
-  try {
+  await run(async () => {
     await Promise.all([
       api(`/models/refresh/credential/${id}`, { method: "POST" }),
       api(`/quotas/refresh/${id}`, { method: "POST" }),
     ]);
-    message.success("模型与额度已刷新");
     await load();
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+  }, { success: "模型与额度已刷新", loading: null });
 }
+
 async function downloadAuth(row: Credential) {
-  try {
+  await run(async () => {
     const payload = await api<Record<string, unknown>>(`/auth-files/${row.id}/export`);
     const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -237,10 +129,9 @@ async function downloadAuth(row: Credential) {
     anchor.download = `${row.label.replace(/[^a-zA-Z0-9._-]+/g, "_") || row.provider_id}.json`;
     anchor.click();
     URL.revokeObjectURL(url);
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+  }, { loading: null });
 }
+
 watch(() => [route.query.page, route.query.pageSize, route.query.source] as const, () => {
   const nextPage = queryInteger(route.query.page, 1);
   const size = queryInteger(route.query.pageSize, 6);
@@ -263,94 +154,21 @@ onMounted(load);
   </page-header>
 
   <n-spin :show="loading">
-    <div v-if="credentials.length" class="account-grid">
-      <n-card
+    <div v-if="credentials.length" class="account-grid" role="list" aria-label="账号列表">
+      <account-card
         v-for="row in credentials"
         :key="row.id"
-        class="account-card"
-        :class="[`account-card--${row.provider_id}`, { 'account-card--disabled': row.enabled !== 1 }]"
-        :bordered="false"
-      >
-        <div class="card-header">
-          <provider-icon :provider-id="row.provider_id" :name="providerLabel(row.provider_id)" :size="40" />
-          <div class="header-text">
-            <strong :title="accountTitle(row)">{{ accountTitle(row) }}</strong>
-            <div class="badge-row">
-              <n-tag size="small" :bordered="false" round type="info">{{ providerLabel(row.provider_id) }}</n-tag>
-              <n-tag size="small" :bordered="false" round :type="accountState(row).type">{{ accountState(row).text }}</n-tag>
-            </div>
-          </div>
-        </div>
-
-        <div class="meta-row">
-          <span>优先级 <b>{{ row.priority }}</b></span>
-          <span>权重 <b>{{ row.weight }}</b></span>
-          <span>并发 <b>{{ row.max_concurrency }}</b></span>
-          <span class="meta-time"><clock :size="12" />{{ formatTime(row.last_used_at, true) }}</span>
-        </div>
-
-        <div v-if="accountIssue(row)" class="account-issue" :class="`account-issue--${accountIssue(row)?.tone}`">
-          <alert-triangle :size="16" />
-          <div class="account-issue__copy">
-            <strong>{{ accountIssue(row)?.label }}</strong>
-            <span>{{ accountIssue(row)?.hint }}</span>
-          </div>
-          <n-tag size="small" :bordered="false" :type="accountIssue(row)?.tone === 'error' ? 'error' : 'warning'">
-            {{ accountIssue(row)?.code }}
-          </n-tag>
-        </div>
-
-        <section class="panel">
-          <div class="panel-title"><activity :size="13" />近 2 小时健康状态</div>
-          <div class="usage-stats">
-            <span class="stat-pill stat-pill--success">成功 <b>{{ formatTokens(activityRecord(row.id).totals.successes) }}</b></span>
-            <span class="stat-pill stat-pill--failure">失败 <b>{{ formatTokens(activityRecord(row.id).totals.failures) }}</b></span>
-            <span class="status-rate" :class="successRateClass(row.id)">{{ summary(row.id).requests ? `${Math.round(summary(row.id).successRate)}%` : '--' }}</span>
-          </div>
-          <div class="status-blocks">
-            <span
-              v-for="cell in activityCells(row.id)"
-              :key="cell.bucket"
-              class="status-block"
-              :class="[`status-block--${cell.status}`, `level-${cell.level}`]"
-              :title="`${formatTime(cell.bucket)} · ${cell.requests} 次请求 · ${formatTokens(cell.tokens)} Token`"
-            />
-          </div>
-          <div class="caption">近 2 小时共 {{ formatTokens(summary(row.id).requests) }} 次请求</div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-head">
-            <div class="panel-title"><gauge :size="13" />额度 · {{ planLabel(quotaFor(row.id).plan) }}</div>
-            <span class="caption">刷新于 {{ formatTime(quotaMap.get(row.id)?.fetched_at) }}</span>
-          </div>
-          <div v-if="quotaFor(row.id).windows.length" class="quota-list">
-            <div v-for="window in quotaFor(row.id).windows" :key="window.key" class="quota-row" :style="quotaProgressStyle(window)">
-              <div class="quota-head"><span>{{ window.label }}</span><b>{{ Math.round(quotaPercentage(window)) }}%</b></div>
-              <n-progress type="line" :percentage="quotaPercentage(window)" :show-indicator="false" :height="8" :border-radius="4" />
-              <div class="caption">剩余 {{ formatAmount(window.remaining) }} / {{ formatAmount(window.limit) }}</div>
-            </div>
-          </div>
-          <div v-else-if="quotaFor(row.id).credits" class="credit">
-            <span><sparkles :size="13" />可用余额</span>
-            <b>{{ quotaFor(row.id).credits?.unlimited ? '不限' : formatAmount(quotaFor(row.id).credits?.balance) }}</b>
-          </div>
-          <button v-else class="quota-refresh" @click="refreshOne(row.id)"><refresh-cw :size="13" />点击刷新额度</button>
-        </section>
-
-        <div class="card-actions">
-          <n-space>
-            <n-button quaternary circle size="small" title="刷新模型与额度" @click="refreshOne(row.id)"><refresh-cw :size="15" /></n-button>
-            <n-button quaternary circle size="small" title="下载认证文件" @click="downloadAuth(row)"><download :size="15" /></n-button>
-            <n-button quaternary circle size="small" title="调度设置" @click="openEdit(row)"><settings :size="15" /></n-button>
-            <n-popconfirm @positive-click="remove(row.id)">
-              <template #trigger><n-button quaternary circle size="small" type="error"><trash-2 :size="15" /></n-button></template>
-              删除该授权账号、模型缓存和额度快照？
-            </n-popconfirm>
-          </n-space>
-          <div class="toggle"><span>启用</span><n-switch :value="row.enabled === 1" @update:value="value => toggleEnabled(row, value)" /></div>
-        </div>
-      </n-card>
+        :row="row"
+        :quota="quotaMap.get(row.id)"
+        :activity="activity[row.id]"
+        :provider-label="providerLabel(row.provider_id)"
+        :now-ms="nowMs"
+        @refresh="refreshOne"
+        @download="downloadAuth"
+        @edit="openEdit"
+        @remove="remove"
+        @toggle="toggleEnabled"
+      />
     </div>
     <n-card v-else><n-empty description="账号池还是空的，请前往授权页添加账号" /></n-card>
   </n-spin>
@@ -387,58 +205,8 @@ onMounted(load);
 
 <style scoped>
 .account-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:18px; }
-.account-card { height:100%; border:1px solid var(--n-border-color); border-radius:16px; background:linear-gradient(180deg,rgba(148,163,184,.045),transparent 140px),var(--n-color); box-shadow:0 10px 28px rgba(15,23,42,.045); transition:transform .18s ease,box-shadow .18s ease; }
-.account-card:hover { transform:translateY(-2px); box-shadow:0 18px 34px rgba(15,23,42,.075); }
-.account-card--disabled { opacity:.68; filter:grayscale(.25); }
-.account-card--codex { background:linear-gradient(180deg,rgba(124,101,255,.055),transparent 140px),var(--n-color); }
-.account-card--qoder { background:linear-gradient(180deg,rgba(34,197,94,.05),transparent 140px),var(--n-color); }
-.account-card--kimi { background:linear-gradient(180deg,rgba(59,130,246,.05),transparent 140px),var(--n-color); }
-.account-card :deep(.n-card__content) { display:flex; flex-direction:column; min-height:100%; padding:18px; }
-.card-header { display:flex; align-items:center; gap:12px; }
-.header-text { min-width:0; display:flex; flex-direction:column; gap:6px; }
-.header-text>strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; font-weight:650; }
-.badge-row,.meta-row,.usage-stats,.panel-title,.panel-head,.credit,.toggle { display:flex; align-items:center; }
-.badge-row { gap:6px; }
-.meta-row { flex-wrap:wrap; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid var(--n-border-color); font-size:11px; color:var(--n-text-color-3); }
-.meta-row b { color:var(--n-text-color-1); }
-.meta-time { display:inline-flex; align-items:center; gap:4px; margin-left:auto; }
-.account-issue { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; min-height:54px; margin-top:12px; padding:10px 11px; border:1px solid rgba(245,158,11,.22); border-radius:11px; background:rgba(245,158,11,.07); color:#b45309; }
-.account-issue--error { border-color:rgba(239,68,68,.2); background:rgba(239,68,68,.065); color:#dc2626; }
-.account-issue__copy { min-width:0; display:flex; flex-direction:column; gap:2px; }
-.account-issue__copy strong { color:var(--n-text-color-1); font-size:11px; }
-.account-issue__copy span { overflow:hidden; color:var(--n-text-color-3); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
-.panel { margin-top:14px; padding-top:13px; border-top:1px dashed var(--n-border-color); }
-.panel-title { gap:5px; font-size:11px; font-weight:700; }
-.panel-head { justify-content:space-between; gap:8px; margin-bottom:9px; }
-.usage-stats { gap:7px; margin:8px 0; }
-.stat-pill { padding:4px 9px; border-radius:999px; font-size:11px; }
-.stat-pill--success { color:#15803d; background:rgba(34,197,94,.1); }
-.stat-pill--failure { color:#dc2626; background:rgba(239,68,68,.08); }
-.status-rate { margin-left:auto; padding:5px 9px; border-radius:999px; font-size:11px; font-weight:700; }
-.status-rate--empty { background:var(--n-color-embedded); }
-.status-rate--high { color:#15803d; background:rgba(34,197,94,.12); }
-.status-rate--medium { color:#b45309; background:rgba(245,158,11,.13); }
-.status-rate--low { color:#dc2626; background:rgba(239,68,68,.1); }
-.status-blocks { display:flex; gap:3px; }
-.status-block { flex:1; height:7px; border-radius:999px; background:rgba(148,163,184,.2); }
-.status-block--success.level-1 { background:rgba(34,197,94,.32); }
-.status-block--success.level-2 { background:rgba(34,197,94,.5); }
-.status-block--success.level-3 { background:rgba(34,197,94,.7); }
-.status-block--success.level-4 { background:#16a34a; }
-.status-block--mixed { background:#f59e0b; }
-.status-block--failure { background:#dc2626; }
-.caption { margin-top:6px; color:var(--n-text-color-3); font-size:10px; }
-.quota-list { display:flex; flex-direction:column; gap:12px; }
-.quota-row { display:flex; flex-direction:column; gap:5px; }
-.quota-row :deep(.n-progress-graph-line-fill) { background:var(--quota-gradient)!important; box-shadow:0 0 8px color-mix(in srgb,var(--quota-color) 24%,transparent); }
-.quota-head { display:flex; justify-content:space-between; font-size:12px; }
-.credit { justify-content:space-between; padding:10px 12px; border-radius:10px; background:var(--n-color-embedded); font-size:12px; }
-.credit span { display:flex; align-items:center; gap:6px; }
-.quota-refresh { display:flex; align-items:center; justify-content:center; gap:6px; width:100%; padding:9px; border:1px dashed var(--n-border-color); border-radius:10px; background:transparent; color:var(--n-text-color-3); cursor:pointer; }
-.card-actions { display:flex; align-items:center; justify-content:space-between; margin-top:auto; padding-top:15px; border-top:1px solid var(--n-border-color); }
-.toggle { gap:8px; font-size:11px; color:var(--n-text-color-3); }
 .pagination-row { justify-content:center; margin-top:22px; }
 .account-form-grid { grid-template-columns:repeat(3,1fr); }
 @media(max-width:820px) { .account-grid { grid-template-columns:1fr; } }
-@media(max-width:520px) { .meta-time { margin-left:0; flex-basis:100%; } .account-form-grid { grid-template-columns:1fr; } .account-issue { grid-template-columns:auto minmax(0,1fr); } .account-issue>.n-tag { grid-column:2; justify-self:start; } }
+@media(max-width:520px) { .account-form-grid { grid-template-columns:1fr; } }
 </style>

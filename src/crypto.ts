@@ -8,15 +8,14 @@ function masterKeyError(code: "MASTER_KEY_MISSING" | "INVALID_MASTER_KEY", messa
   return new GatewayError(503, code, message, "configuration_error");
 }
 
-async function importMasterKey(base64Key: string | undefined): Promise<CryptoKey> {
-  const normalized = typeof base64Key === "string" ? base64Key.trim() : "";
-  if (!normalized) {
-    throw masterKeyError(
-      "MASTER_KEY_MISSING",
-      "MASTER_KEY is not configured. Set it to a base64-encoded 32-byte Worker secret and redeploy.",
-    );
-  }
+// An AES-GCM CryptoKey is immutable and MASTER_KEY is fixed for the lifetime of a
+// deployment, so the import is memoized per isolate. A single inference request
+// decrypts 4-6 secrets (credential secret + refresh token + account/provider/system
+// proxy URLs); without this each one paid for its own subtle.importKey.
+const masterKeyCache = new Map<string, Promise<CryptoKey>>();
+const MASTER_KEY_CACHE_LIMIT = 4;
 
+async function importRawMasterKey(normalized: string): Promise<CryptoKey> {
   let raw: Uint8Array<ArrayBuffer>;
   try {
     raw = base64Decode(normalized);
@@ -42,6 +41,27 @@ async function importMasterKey(base64Key: string | undefined): Promise<CryptoKey
       "MASTER_KEY could not be imported. Generate a new base64-encoded 32-byte key and redeploy.",
     );
   }
+}
+
+async function importMasterKey(base64Key: string | undefined): Promise<CryptoKey> {
+  const normalized = typeof base64Key === "string" ? base64Key.trim() : "";
+  if (!normalized) {
+    throw masterKeyError(
+      "MASTER_KEY_MISSING",
+      "MASTER_KEY is not configured. Set it to a base64-encoded 32-byte Worker secret and redeploy.",
+    );
+  }
+  const cached = masterKeyCache.get(normalized);
+  if (cached) return cached;
+  // Cache the promise, not the resolved key, so concurrent callers share one import.
+  // Rejections are evicted so a transient failure is never memoized.
+  const pending = importRawMasterKey(normalized);
+  pending.catch(() => {
+    if (masterKeyCache.get(normalized) === pending) masterKeyCache.delete(normalized);
+  });
+  if (masterKeyCache.size >= MASTER_KEY_CACHE_LIMIT) masterKeyCache.clear();
+  masterKeyCache.set(normalized, pending);
+  return pending;
 }
 
 export async function encryptSecret(plaintext: string, masterKey: string | undefined): Promise<string> {

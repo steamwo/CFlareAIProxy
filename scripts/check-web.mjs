@@ -22,7 +22,12 @@ const router=readFileSync(join(root,"web/src/router.ts"),"utf8");
 if(!router.includes('path: "authorization"')||!router.includes("AuthorizationView.vue")) errors.push("独立授权页面未接入路由");
 const accounts=readFileSync(join(root,"web/src/views/AccountsView.vue"),"utf8");
 if(accounts.includes("添加账号 / API Key")||accounts.includes('api<{ data: Provider[] }>("/providers")')) errors.push("账号池仍暴露自定义供应商 API Key 管理入口");
-if(!accounts.includes("近 2 小时健康状态")||!accounts.includes("stat-pill--success")||!accounts.includes("status-blocks")||!accounts.includes("发起授权")) errors.push("CPA 风格账号卡片、近两小时状态条或调用统计未接线");
+if(!accounts.includes("发起授权")) errors.push("账号池缺少发起授权入口");
+if(!accounts.includes("AccountCard")) errors.push("账号池未渲染账号卡片组件");
+// The card markup lives in its own component; assert against the file that owns it so
+// extracting or moving it stays a refactor rather than a check-web failure.
+const accountCard=readFileSync(join(root,"web/src/components/AccountCard.vue"),"utf8");
+if(!accountCard.includes("近 2 小时健康状态")||!accountCard.includes("stat-pill--success")||!accountCard.includes("status-blocks")) errors.push("账号卡片缺少近两小时状态条或调用统计");
 const settings=readFileSync(join(root,"web/src/views/SettingsView.vue"),"utf8");
 if(!settings.includes("requestLoggingEnabled")||!settings.includes("运行日志级别")||!settings.includes("基础调用统计始终开启")||settings.includes("将逐渐变为空")) errors.push("系统设置必须明确日志开关不影响基础调用统计");
 const worker=readFileSync(join(root,"src/index.ts"),"utf8");

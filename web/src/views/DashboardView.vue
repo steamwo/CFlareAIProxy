@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { NButton, NCard, NEmpty, NProgress, NSkeleton, NTag, useMessage } from "naive-ui";
+import { NButton, NCard, NEmpty, NProgress, NSkeleton, NTag } from "naive-ui";
 import { Activity, Clock3, Gauge, RefreshCw, Server, Users, Zap } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import { api } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import { formatTokens } from "../utils/format";
 import type { Overview } from "../types";
 
 const data = ref<Overview | null>(null);
-const loading = ref(false);
-const message = useMessage();
+const { loading, run } = useApiRequest();
 const hours = Array.from({ length: 24 }, (_, hour) => hour);
 
 const formatRequests = (value: number): string => Intl.NumberFormat("zh-CN", {
@@ -22,14 +22,7 @@ const percentOf = (value: number, maximum: number): number => maximum > 0
   : 0;
 
 async function load() {
-  loading.value = true;
-  try {
-    data.value = await api<Overview>("/overview");
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  } finally {
-    loading.value = false;
-  }
+  await run(async () => { data.value = await api<Overview>("/overview"); });
 }
 
 const healthMeta = computed(() => {

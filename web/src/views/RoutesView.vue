@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import {
-  NAlert, NButton, NCard, NForm, NFormItem, NInput, NInputNumber, NModal,
-  NPopconfirm, NSelect, NSpace, NSwitch, NTag, useMessage,
+  NAlert, NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NModal,
+  NSelect, NSkeleton, NSpace, NSwitch, NTag, useMessage,
 } from "naive-ui";
 import { ChevronDown, Plus, RefreshCw, Route as RouteIcon, SlidersHorizontal } from "@lucide/vue";
+import ConfirmDeleteButton from "../components/ConfirmDeleteButton.vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProviderIcon from "../components/ProviderIcon.vue";
 import { api, jsonBody } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import type { Channel, DiscoveredModel, ModelRoute, Provider } from "../types";
 
 interface EndpointState {
@@ -32,13 +34,15 @@ const rows = ref<ModelRoute[]>([]);
 const sourceOptions = ref<Array<{ label: string; value: string }>>([]);
 const sourceMap = ref(new Map<string, SourceMeta>());
 const discoveredModels = ref<DiscoveredModel[]>([]);
-const loading = ref(false);
 const modal = ref(false);
 const advanced = ref(false);
 const editing = ref<RouteDisplay | null>(null);
 const editingOptions = ref<Record<string, unknown>>({});
 const query = ref("");
 const message = useMessage();
+const { loading, run } = useApiRequest();
+/** Distinguishes "still fetching" from "fetched and genuinely empty" for the empty state. */
+const loaded = ref(false);
 const form = reactive({
   publicModel: "",
   providerId: "",
@@ -111,8 +115,7 @@ const recommendedEndpoint = computed(() => availableEndpoints.value[0] ?? "chat"
 const selectedEndpoint = computed(() => form.endpoint || recommendedEndpoint.value);
 
 async function load() {
-  loading.value = true;
-  try {
+  await run(async () => {
     const [routeResult, channels, providers, models] = await Promise.all([
       api<{ data: ModelRoute[] }>("/routes"),
       api<{ data: Channel[] }>("/channels"),
@@ -126,11 +129,8 @@ async function load() {
     for (const item of channels.data) nextSourceMap.set(item.id, { label: item.name, kind: "channel" });
     for (const item of providers.data) nextSourceMap.set(item.id, { label: item.name, kind: "provider" });
     sourceMap.value = nextSourceMap;
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  } finally {
-    loading.value = false;
-  }
+  });
+  loaded.value = true;
 }
 
 function create() {
@@ -222,52 +222,45 @@ const routeGroups = computed<RouteGroup[]>(() => {
 });
 
 async function save() {
-  try {
-    const endpoint = advanced.value ? (form.endpoint || recommendedEndpoint.value) : recommendedEndpoint.value;
-    const options = { ...editingOptions.value };
-    delete options.codexMultiAgentV2;
-    if (form.codexMultiAgentV2 && endpoint === "responses") options.codex_multi_agent_v2 = true;
-    else delete options.codex_multi_agent_v2;
-    const body = {
-      publicModel: form.publicModel.trim(),
-      providerId: form.providerId,
-      upstreamModel: form.upstreamModel,
-      endpoint,
-      enabled: form.enabled,
-      priority: form.priority,
-      weight: form.weight,
-      options,
-    };
-    if (!body.publicModel || !body.providerId || !body.upstreamModel) {
-      message.warning("请完整选择客户端模型名、来源和上游模型");
-      return;
-    }
+  const endpoint = advanced.value ? (form.endpoint || recommendedEndpoint.value) : recommendedEndpoint.value;
+  const options = { ...editingOptions.value };
+  delete options.codexMultiAgentV2;
+  if (form.codexMultiAgentV2 && endpoint === "responses") options.codex_multi_agent_v2 = true;
+  else delete options.codex_multi_agent_v2;
+  const body = {
+    publicModel: form.publicModel.trim(),
+    providerId: form.providerId,
+    upstreamModel: form.upstreamModel,
+    endpoint,
+    enabled: form.enabled,
+    priority: form.priority,
+    weight: form.weight,
+    options,
+  };
+  // Client-side validation, so it stays a local warning rather than a request failure.
+  if (!body.publicModel || !body.providerId || !body.upstreamModel) {
+    message.warning("请完整选择客户端模型名、来源和上游模型");
+    return;
+  }
+  const saved = await run(async () => {
     if (editing.value) await api(`/routes/${editing.value.id}`, { method: "PATCH", body: jsonBody(body) });
     else await api("/routes", { method: "POST", body: jsonBody(body) });
-    message.success("路由策略已保存");
-    modal.value = false;
-    await load();
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+    return true;
+  }, { loading: null, success: "路由策略已保存" });
+  if (!saved) return;
+  modal.value = false;
+  await load();
 }
 async function remove(id: string) {
-  try {
-    await api(`/routes/${id}`, { method: "DELETE" });
-    message.success("路由已删除");
-    await load();
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+  const removed = await run(() => api(`/routes/${id}`, { method: "DELETE" }), { loading: null, success: "路由已删除" });
+  if (removed !== undefined) await load();
 }
 async function recover(providerId: string) {
-  try {
-    await api(`/routes/provider/${providerId}/recover`, { method: "POST" });
-    message.success("已清除该来源的熔断状态");
-    await load();
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+  const recovered = await run(
+    () => api(`/routes/provider/${providerId}/recover`, { method: "POST" }),
+    { loading: null, success: "已清除该来源的熔断状态" },
+  );
+  if (recovered !== undefined) await load();
 }
 function formatRetry(value?: number): string {
   return value ? new Date(value * 1000).toLocaleString("zh-CN", { hour12: false }) : "";
@@ -327,7 +320,13 @@ onMounted(load);
     <n-tag :bordered="false">{{ routeGroups.length }} 个客户端模型</n-tag>
   </div>
 
-  <div v-if="routeGroups.length" class="route-groups">
+  <div v-if="!loaded && loading" class="route-groups">
+    <n-card v-for="placeholder in 3" :key="placeholder" class="route-card" :bordered="false">
+      <n-skeleton text style="width:38%" />
+      <n-skeleton text :repeat="2" style="margin-top:12px" />
+    </n-card>
+  </div>
+  <div v-else-if="routeGroups.length" class="route-groups">
     <n-card v-for="group in routeGroups" :key="group.publicModel" class="route-card" :bordered="false">
       <div class="route-card__header">
         <div>
@@ -372,16 +371,24 @@ onMounted(load);
           <div class="route-actions">
             <n-button size="small" :disabled="managed(row)" @click="edit(row)">{{ managed(row) ? '供应商管理' : '编辑' }}</n-button>
             <n-button v-if="row.health?.disabledUntil && row.health.disabledUntil > Date.now()" size="small" type="warning" secondary @click="recover(row.provider_id)">立即恢复</n-button>
-            <n-popconfirm v-if="!managed(row)" @positive-click="remove(row.id)">
-              <template #trigger><n-button size="small" type="error" secondary>删除</n-button></template>
-              确定删除该路由？
-            </n-popconfirm>
+            <confirm-delete-button
+              v-if="!managed(row)"
+              content="确定删除该路由？"
+              :aria-label="`删除路由 ${row.public_model}`"
+              @confirm="remove(row.id)"
+            />
           </div>
         </div>
       </div>
     </n-card>
   </div>
-  <n-card v-else class="empty-route-card">没有匹配的路由策略</n-card>
+  <n-card v-else class="empty-route-card" :bordered="false">
+    <n-empty :description="query ? '没有匹配的路由策略' : '还没有配置路由策略'">
+      <template v-if="!query" #extra>
+        <n-button size="small" @click="create">添加路由</n-button>
+      </template>
+    </n-empty>
+  </n-card>
 
   <n-modal v-model:show="modal" preset="card" :title="editing ? '编辑路由策略' : '新增路由策略'" style="width:min(760px,calc(100vw - 32px))">
     <n-form label-placement="top">

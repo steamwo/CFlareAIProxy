@@ -1,41 +1,46 @@
 <script setup lang="ts">
 import { h, onMounted, reactive, ref } from "vue";
-import { NButton, NCard, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSpace, useMessage } from "naive-ui";
+import { NButton, NCard, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpace } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import { Plus, RefreshCw } from "@lucide/vue";
+import ConfirmDeleteButton from "../components/ConfirmDeleteButton.vue";
 import PageHeader from "../components/PageHeader.vue";
 import { api, jsonBody } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import type { Channel, Price, Provider } from "../types";
 
 const rows = ref<Price[]>([]);
 const sources = ref<Array<{ label: string; value: string }>>([]);
-const loading = ref(false);
 const modal = ref(false);
-const message = useMessage();
+const { loading, run } = useApiRequest();
 const tablePagination = { pageSize: 10, pageSizes: [10, 20, 50], showSizePicker: true, showQuickJumper: true };
 const form = reactive({ providerId: "", model: "", input: 0, output: 0, cache: 0 });
 async function load() {
-  loading.value = true;
-  try {
+  await run(async () => {
     const [prices, channels, providers] = await Promise.all([api<{ data: Price[] }>("/prices"), api<{ data: Channel[] }>("/channels"), api<{ data: Provider[] }>("/providers")]);
     rows.value = prices.data;
     sources.value = [...channels.data, ...providers.data].map((item) => ({ label: item.name, value: item.id }));
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
-  finally { loading.value = false; }
+  });
 }
 function open(row?: Price) {
   Object.assign(form, row ? { providerId: row.provider_id, model: row.model, input: row.input_micros_per_million, output: row.output_micros_per_million, cache: row.cache_micros_per_million ?? 0 } : { providerId: "", model: "", input: 0, output: 0, cache: 0 });
   modal.value = true;
 }
 async function save() {
-  try {
-    await api("/prices", { method: "PUT", body: jsonBody({ providerId: form.providerId, model: form.model, inputMicrosPerMillion: form.input, outputMicrosPerMillion: form.output, cacheMicrosPerMillion: form.cache }) });
-    message.success("价格已保存"); modal.value = false; await load();
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  const saved = await run(
+    () => api("/prices", { method: "PUT", body: jsonBody({ providerId: form.providerId, model: form.model, inputMicrosPerMillion: form.input, outputMicrosPerMillion: form.output, cacheMicrosPerMillion: form.cache }) }),
+    { loading: null, success: "价格已保存" },
+  );
+  if (saved === undefined) return;
+  modal.value = false;
+  await load();
 }
 async function remove(row: Price) {
-  try { await api(`/prices?provider=${encodeURIComponent(row.provider_id)}&model=${encodeURIComponent(row.model)}`, { method: "DELETE" }); message.success("价格已删除"); await load(); }
-  catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  const removed = await run(
+    () => api(`/prices?provider=${encodeURIComponent(row.provider_id)}&model=${encodeURIComponent(row.model)}`, { method: "DELETE" }),
+    { loading: null, success: "价格已删除" },
+  );
+  if (removed !== undefined) await load();
 }
 const usd = (value: number) => `$${(value / 1_000_000).toFixed(4)}`;
 const columns: DataTableColumns<Price> = [
@@ -43,7 +48,7 @@ const columns: DataTableColumns<Price> = [
   { title: "输入 / 1M Token", key: "input", render: (row) => usd(row.input_micros_per_million) },
   { title: "输出 / 1M Token", key: "output", render: (row) => usd(row.output_micros_per_million) },
   { title: "缓存命中 / 1M Token", key: "cache", render: (row) => usd(row.cache_micros_per_million ?? 0) },
-  { title: "操作", key: "actions", render: (row) => h(NSpace, null, { default: () => [h(NButton, { size: "small", onClick: () => open(row) }, { default: () => "编辑" }), h(NPopconfirm, { onPositiveClick: () => remove(row) }, { trigger: () => h(NButton, { size: "small", type: "error", secondary: true }, { default: () => "删除" }), default: () => "确定删除该价格？" })] }) },
+  { title: "操作", key: "actions", render: (row) => h(NSpace, null, { default: () => [h(NButton, { size: "small", onClick: () => open(row) }, { default: () => "编辑" }), h(ConfirmDeleteButton, { content: "确定删除该价格？", ariaLabel: `删除 ${row.model} 的价格`, onConfirm: () => { void remove(row); } })] }) },
 ];
 onMounted(load);
 </script>

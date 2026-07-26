@@ -482,10 +482,16 @@ export async function getCredential(env: Env, credentialId: string): Promise<Cre
   if (!row || row.enabled !== 1) {
     throw new GatewayError(503, "NO_CREDENTIAL", "No enabled credential is available", "upstream_error");
   }
+  // Both decryptions await the same memoized CryptoKey; running them together
+  // removes one serial await from the hot path.
+  const [secret, refreshToken] = await Promise.all([
+    decryptSecret(row.secret_ciphertext, env.MASTER_KEY),
+    row.refresh_ciphertext ? decryptSecret(row.refresh_ciphertext, env.MASTER_KEY) : Promise.resolve(undefined),
+  ]);
   return {
     ...row,
-    secret: await decryptSecret(row.secret_ciphertext, env.MASTER_KEY),
-    refreshToken: row.refresh_ciphertext ? await decryptSecret(row.refresh_ciphertext, env.MASTER_KEY) : undefined,
+    secret,
+    refreshToken,
     metadata: parseJson<Record<string, unknown>>(row.metadata_json, {}),
   };
 }
@@ -533,7 +539,8 @@ export async function createCredential(
       now,
     )
     .run();
-  await env.CONFIG_CACHE.delete(`provider:${input.providerId}`);
+  // No `provider:<id>` KV key is ever written or read (getProvider goes straight to
+  // D1), so the former invalidation here was a pure KV round trip against a dead key.
   return id;
 }
 

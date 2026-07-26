@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import {
-  NAlert, NButton, NCard, NDivider, NFormItem, NSelect, NSpace, NSwitch, NTag, useMessage,
+  NAlert, NButton, NCard, NDivider, NFormItem, NSelect, NSpace, NSwitch, NTag,
 } from "naive-ui";
 import { Network, RefreshCw, Route, Save, ScrollText } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProxyEditor from "../components/ProxyEditor.vue";
 import { api, jsonBody } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import type { ProxySummary } from "../types";
 
 type LogLevel = "error" | "warn" | "info" | "debug";
@@ -17,10 +18,9 @@ interface LoggingSettings {
 
 const proxy = ref<ProxySummary | null>(null);
 const logging = ref<LoggingSettings>({ requestLoggingEnabled: true, level: "error" });
-const loading = ref(false);
 const savingLogging = ref(false);
 const modal = ref(false);
-const message = useMessage();
+const { loading, run } = useApiRequest();
 const levelOptions = [
   { label: "错误 · 仅输出错误，长期保存 5xx / 内部错误明细", value: "error" },
   { label: "警告 · 输出警告和错误，长期保存全部失败明细", value: "warn" },
@@ -29,35 +29,24 @@ const levelOptions = [
 ];
 
 async function load() {
-  loading.value = true;
-  try {
+  await run(async () => {
     const [proxyResult, loggingResult] = await Promise.all([
       api<{ data: ProxySummary }>("/settings/proxy"),
       api<{ data: LoggingSettings }>("/settings/logging"),
     ]);
     proxy.value = proxyResult.data;
     logging.value = loggingResult.data;
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  } finally {
-    loading.value = false;
-  }
+  });
 }
 
 async function saveLogging() {
-  savingLogging.value = true;
-  try {
+  await run(async () => {
     const result = await api<{ data: LoggingSettings }>("/settings/logging", {
       method: "PUT",
       body: jsonBody(logging.value),
     });
     logging.value = result.data;
-    message.success("日志设置已保存");
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  } finally {
-    savingLogging.value = false;
-  }
+  }, { loading: savingLogging, success: "日志设置已保存" });
 }
 
 onMounted(load);

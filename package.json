@@ -47,13 +47,14 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260722.1",
-    "typescript": "5.9.3",
-    "vitest": "3.2.4",
-    "wrangler": "4.113.0",
     "@types/node": "22.20.1",
     "@vitejs/plugin-vue": "6.0.7",
+    "rollup-plugin-visualizer": "7.0.1",
+    "typescript": "5.9.3",
     "vite": "7.3.6",
-    "vue-tsc": "3.3.7"
+    "vitest": "3.2.4",
+    "vue-tsc": "3.3.7",
+    "wrangler": "4.113.0"
   },
   "engines": {
     "node": ">=20.19.0"

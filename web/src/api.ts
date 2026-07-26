@@ -83,11 +83,31 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return payload as T;
 }
 
+/**
+ * Paths that legitimately answer 401 as data rather than as "the admin session died".
+ * `/session` probes auth on purpose and `/login` reports bad credentials; neither should
+ * trigger the global sign-out handler.
+ */
+const SELF_HANDLED_AUTH_PATHS = new Set(["/session", "/login", "/logout"]);
+
+type UnauthorizedHandler = (path: string) => void;
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+/**
+ * Registers the single global reaction to an expired admin session. The session store owns
+ * this so that any 401 from any view converges on one sign-out + redirect, instead of each
+ * view showing an isolated toast while the user stays on a dead page.
+ */
+export function onUnauthorized(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler;
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
   const resolvedPath = path === "/overview" ? "/overview-v2" : path;
   const response = await fetch(`${API_BASE}${resolvedPath}`, { ...init, headers, credentials: "same-origin" });
+  if (response.status === 401 && !SELF_HANDLED_AUTH_PATHS.has(resolvedPath)) unauthorizedHandler?.(resolvedPath);
   const payload = await parseResponse<T>(response);
   return resolvedPath.startsWith("/credentials/paged") ? normalizeCredentialPageActivity(payload) : payload;
 }

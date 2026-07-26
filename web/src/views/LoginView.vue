@@ -12,6 +12,10 @@ const route = useRoute();
 const router = useRouter();
 const store = useSessionStore();
 const message = useMessage();
+// Deliberately not routed through useApiRequest: a failed sign-in answers 401, which the
+// composable silences on purpose (a 401 elsewhere means "session gone, redirecting"). Here
+// the 401 *is* the message the user needs, so it stays on the local toast. The button's
+// loading state already comes from store.loading.
 async function submit() {
   try {
     await store.login(username.value, password.value);

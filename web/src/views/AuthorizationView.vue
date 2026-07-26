@@ -6,11 +6,12 @@ import { FileJson, KeyRound, RefreshCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProviderIcon from "../components/ProviderIcon.vue";
 import { api, jsonBody } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import type { Channel } from "../types";
 
 const route = useRoute();
 const channels = ref<Channel[]>([]);
-const loading = ref(false);
+const { loading, run } = useApiRequest();
 const importModal = ref(false);
 const oauthModal = ref(false);
 const page = ref(1);
@@ -43,10 +44,7 @@ const channelOptions = computed(() => authChannels.value.map((channel) => ({ lab
 
 watch(pageCount, (count) => { if (page.value > count) page.value = count; });
 async function load() {
-  loading.value = true;
-  try { channels.value = (await api<{ data: Channel[] }>("/channels")).data; }
-  catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
-  finally { loading.value = false; }
+  await run(async () => { channels.value = (await api<{ data: Channel[] }>("/channels")).data; });
 }
 function stopPolling() {
   oauth.polling = false;
@@ -187,20 +185,19 @@ async function readImportFile(event: Event) {
   }
 }
 async function importJson() {
-  try {
+  const imported = await run(async () => {
     const parsed = parsedImport();
     if (!parsed.providerId) throw new Error("请选择内置渠道，或使用包含 type/provider_id 的认证文件");
     await api("/auth-files/import", {
       method: "POST",
       body: jsonBody({ providerId: parsed.providerId, label: parsed.label, auth: parsed.auth }),
     });
-    message.success("授权文件已导入账号池");
-    importModal.value = false;
-    Object.assign(importForm, { providerId: "", label: "", json: "", filename: "" });
-    await load();
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  }
+    return true;
+  }, { loading: null, success: "授权文件已导入账号池" });
+  if (!imported) return;
+  importModal.value = false;
+  Object.assign(importForm, { providerId: "", label: "", json: "", filename: "" });
+  await load();
 }
 watch(oauthModal, (open) => { if (!open) stopPolling(); });
 onMounted(async () => {
