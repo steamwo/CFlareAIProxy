@@ -7,6 +7,7 @@ import {
   listProviderProxySummaries, listProviders, normalizeGatewayAllowedModelLists, normalizeGatewayAllowedModels,
   upsertProviderProxyConfig, upsertSystemProxyUrl,
 } from "./db";
+import type { CredentialAvailability } from "./db";
 import { GatewayError, errorResponse } from "./errors";
 import { exchangeOAuthCode, pollOAuth, startOAuth } from "./oauth";
 import { listDiscoveredModels, refreshAllModels, refreshCredentialModels, refreshProviderModels } from "./models";
@@ -756,8 +757,24 @@ export function createAdminApp() {
     ]);
     const providerEnabled = new Map(providerResult.results.map((row) => [row.id, row.enabled === 1]));
     const healthMap = await getProviderHealthMap(c.env, result.results.map((row) => row.provider_id));
+
+    // Availability depends only on (provider, upstream model, endpoint), and several public
+    // models routinely point at the same upstream. Resolving one lookup per distinct triple
+    // instead of one per route keeps this page off an N+1 of a query that carries two
+    // correlated EXISTS subqueries and a LEFT JOIN.
+    // A unit separator (U+001F) cannot occur in a provider id, model name or endpoint,
+    // so joining on it keeps two different triples from colliding on one key.
+    const availabilityKey = (row: ModelRouteRow) => [row.provider_id, row.upstream_model, row.endpoint].join(String.fromCharCode(31));
+    const availabilityByKey = new Map<string, Promise<CredentialAvailability[]>>();
+    for (const row of result.results) {
+      const key = availabilityKey(row);
+      if (availabilityByKey.has(key)) continue;
+      availabilityByKey.set(key, listCredentialAvailabilityForModel(c.env, row.provider_id, row.upstream_model, row.endpoint));
+    }
+    await Promise.all(availabilityByKey.values());
+
     const data = await Promise.all(result.results.map(async (row) => {
-      const availability = await listCredentialAvailabilityForModel(c.env, row.provider_id, row.upstream_model, row.endpoint);
+      const availability = await availabilityByKey.get(availabilityKey(row))!;
       const availableCredentials = availability.filter((entry) => entry.available).length;
       const totalCredentials = availability.length;
       const health = healthMap[row.provider_id];
