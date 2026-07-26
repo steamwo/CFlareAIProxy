@@ -2,6 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { root } from "./lib.mjs";
+import { checkTypeContract } from "./check-types-sync.mjs";
 const required=["web/index.html","web/src/main.ts","web/src/App.vue","web/src/router.ts","web/src/views/ChannelsView.vue","web/src/views/ProvidersView.vue","web/src/views/AuthorizationView.vue","web/src/views/AccountsView.vue","web/src/views/SettingsView.vue","vite.config.ts","src/logging-settings.ts","src/usage-storage.ts","migrations/0007_request_activity_5m.sql"];
 const errors=[];
 for(const file of required) if(!existsSync(join(root,file))) errors.push(`缺少 ${file}`);
@@ -45,5 +46,9 @@ const routes=readFileSync(join(root,"web/src/views/RoutesView.vue"),"utf8");
 if(!routes.includes("managedGroups")||!routes.includes("endpointStates")) errors.push("供应商自动路由未聚合多协议端点");
 const dashboard=readFileSync(join(root,"web/src/views/DashboardView.vue"),"utf8");
 if(!dashboard.includes("heatmapRows")||!dashboard.includes("服务可用性热力图")) errors.push("概览热力图未接线");
+// src/types.ts and web/src/types.ts are independent hand-written views of the same JSON,
+// so a backend field change has no compile-time consequence for the console. Compare field
+// names by declared type name (not source text) against the contract in type-contract.mjs.
+errors.push(...checkTypeContract(root));
 if(errors.length){console.error(errors.map(v=>`✗ ${v}`).join("\n"));process.exit(1)}
 console.log("✓ Vue 3 + Vite + Naive UI 管理台结构检查通过");
