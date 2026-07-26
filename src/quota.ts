@@ -1,4 +1,5 @@
-import { getCredential, getProvider, updateCredentialTokens } from "./db";
+import { getCredential, getProvider, loadCachedProvider, updateCredentialTokens } from "./db";
+import type { ProviderCache } from "./db";
 import { providerAuthHeaders } from "./providers/headers";
 import { isOpenCodeAnonymousCredential } from "./providers/opencode-anonymous";
 import type { Credential, Env, ProviderConfig, QuotaSnapshot, QuotaSnapshotRow, QuotaWindow } from "./types";
@@ -492,9 +493,13 @@ async function saveSnapshot(
   return stored;
 }
 
-export async function refreshCredentialQuota(env: Env, credentialId: string): Promise<QuotaRefreshResult> {
+export async function refreshCredentialQuota(
+  env: Env,
+  credentialId: string,
+  providerCache?: ProviderCache,
+): Promise<QuotaRefreshResult> {
   let credential = await getCredential(env, credentialId);
-  const provider = await getProvider(env, credential.provider_id);
+  const provider = await loadCachedProvider(env, credential.provider_id, providerCache);
   const url = quotaUrl(provider, credential);
   if (!url) {
     const snapshot: QuotaSnapshot = {
@@ -577,9 +582,12 @@ export async function refreshAllQuotas(env: Env, limit = QUOTA_REFRESH_BATCH_LIM
      LIMIT ?`,
   ).bind(limit).all<{ id: string }>();
   const output: QuotaRefreshResult[] = [];
+  // Scoped to this sweep: accounts of one channel share a single provider read, and the
+  // cache is discarded when the sweep ends so nothing goes stale between runs.
+  const providerCache: ProviderCache = new Map();
   for (let index = 0; index < result.results.length; index += 4) {
     output.push(...await Promise.all(
-      result.results.slice(index, index + 4).map((row) => refreshCredentialQuota(env, row.id)),
+      result.results.slice(index, index + 4).map((row) => refreshCredentialQuota(env, row.id, providerCache)),
     ));
   }
   return output;

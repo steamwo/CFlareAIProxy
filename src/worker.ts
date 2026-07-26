@@ -4,6 +4,7 @@ import {
   activityCutoff, cleanupExpiredActivity, cleanupExpiredOAuthSessions, cleanupExpiredRequestLogs,
   oauthSessionCutoff, requestLogCutoff,
 } from "./log-retention";
+import { refreshAllModels } from "./models";
 import { refreshAllQuotas } from "./quota";
 import type { Env, UsageQueueEvent } from "./types";
 
@@ -49,6 +50,13 @@ async function runRetention(env: Env, scheduledTime: number): Promise<void> {
       // first, so a pool larger than one batch converges across successive hours.
       event: "quota_refresh",
       run: async () => (await refreshAllQuotas(env)).length,
+    },
+    {
+      // A stale catalogue is worse than a stale quota: routes keep pointing at upstream
+      // models that have since been withdrawn, and the failure only shows up as a request
+      // error. Same batching and oldest-first ordering as the quota sweep.
+      event: "model_refresh",
+      run: async () => (await refreshAllModels(env)).length,
     },
   ];
 

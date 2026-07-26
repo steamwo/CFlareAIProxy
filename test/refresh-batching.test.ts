@@ -78,3 +78,46 @@ describe("model refresh batching", () => {
     expect(capture.sql[0]).toMatch(/ORDER BY\s+COALESCE\(d\.discovered_at, 0\) ASC/);
   });
 });
+
+describe("provider reads are shared within a sweep", () => {
+  it("reads each provider once no matter how many of its accounts are in the batch", async () => {
+    const { encryptSecret } = await import("../src/crypto");
+    const masterKey = Buffer.alloc(32, 3).toString("base64");
+    const secret = await encryptSecret("token", masterKey);
+    const providerReads: string[] = [];
+    // Five accounts on one channel: a sweep without the shared cache issues five identical
+    // provider reads, one per account.
+    const ids = ["c1", "c2", "c3", "c4", "c5"];
+
+    const statement = (sql: string) => ({
+      bind: () => statement(sql),
+      all: async () => ({ results: sql.includes("FROM credentials c") ? ids.map((id) => ({ id })) : [] }),
+      first: async () => {
+        if (sql.includes("FROM providers WHERE id = ?")) {
+          providerReads.push(sql);
+          return {
+            id: "kimi", name: "Kimi", kind: "kimi", base_url: "https://example.test", enabled: 1,
+            pool_strategy: "round_robin", endpoints_json: "{}",
+            // No quota_url, so each account resolves to "unsupported" without a network call.
+            auth_json: "{}", headers_json: "{}", options_json: "{}", created_at: 0, updated_at: 0,
+          };
+        }
+        if (sql.includes("FROM credentials WHERE id")) {
+          return {
+            id: "c1", provider_id: "kimi", label: "a", auth_type: "oauth",
+            secret_ciphertext: secret, refresh_ciphertext: null, expires_at: null,
+            enabled: 1, priority: 0, weight: 1, max_concurrency: 1, metadata_json: "{}",
+            last_error: null, last_used_at: null, created_at: 0, updated_at: 0,
+          };
+        }
+        return null;
+      },
+      run: async () => ({ meta: { changes: 0 } }),
+    });
+    const env = { DB: { prepare: vi.fn(statement) }, MASTER_KEY: masterKey } as never;
+
+    const results = await refreshAllQuotas(env);
+    expect(results).toHaveLength(ids.length);
+    expect(providerReads).toHaveLength(1);
+  });
+});

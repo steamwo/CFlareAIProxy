@@ -1,4 +1,5 @@
-import { getCredential, getProvider, listCredentialRows } from "./db";
+import { getCredential, getProvider, listCredentialRows, loadCachedProvider } from "./db";
+import type { ProviderCache } from "./db";
 import { GatewayError } from "./errors";
 import { providerAuthHeaders } from "./providers/headers";
 import { buildQoderHeaders } from "./providers/qoder-crypto";
@@ -201,9 +202,13 @@ export async function ensureOpenCodeAnonymousModels(env: Env, maxAgeSeconds = 36
   return refreshOpenCodeAnonymousModels(env);
 }
 
-export async function refreshCredentialModels(env: Env, credentialId: string): Promise<ModelRefreshResult> {
+export async function refreshCredentialModels(
+  env: Env,
+  credentialId: string,
+  providerCache?: ProviderCache,
+): Promise<ModelRefreshResult> {
   const credential = await getCredential(env, credentialId);
-  const provider = await getProvider(env, credential.provider_id);
+  const provider = await loadCachedProvider(env, credential.provider_id, providerCache);
   try {
     const payload = await fetchModelPayload(env, provider, credential);
     const models = parseModels(payload);
@@ -278,8 +283,13 @@ export async function refreshAllModels(env: Env, limit = MODEL_REFRESH_BATCH_LIM
   const output: ModelRefreshResult[] = [];
   const openCode = await env.DB.prepare("SELECT enabled FROM providers WHERE id='opencode'").first<{ enabled: number }>();
   if (openCode?.enabled === 1) output.push(await refreshOpenCodeAnonymousModels(env));
+  // Scoped to this sweep, so accounts of one channel share a single provider read while
+  // nothing survives to go stale between runs.
+  const providerCache: ProviderCache = new Map();
   for (let index = 0; index < result.results.length; index += 4) {
-    output.push(...await Promise.all(result.results.slice(index, index + 4).map((row) => refreshCredentialModels(env, row.id))));
+    output.push(...await Promise.all(
+      result.results.slice(index, index + 4).map((row) => refreshCredentialModels(env, row.id, providerCache)),
+    ));
   }
   return output;
 }

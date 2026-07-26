@@ -33,6 +33,27 @@ export async function getProvider(env: Env, providerId: string): Promise<Provide
   return hydrateProvider(row);
 }
 
+/**
+ * Per-sweep provider cache for batch jobs.
+ *
+ * Quota and catalogue refreshes order accounts by staleness, so a batch routinely holds
+ * many accounts of the same channel; without a cache each re-reads the identical provider
+ * row. Passed explicitly rather than held at module scope so a long-lived isolate can never
+ * serve a provider row an operator has since edited.
+ */
+export type ProviderCache = Map<string, Promise<ProviderConfig>>;
+
+export function loadCachedProvider(env: Env, providerId: string, cache?: ProviderCache): Promise<ProviderConfig> {
+  if (!cache) return getProvider(env, providerId);
+  const cached = cache.get(providerId);
+  if (cached) return cached;
+  const pending = getProvider(env, providerId);
+  // A rejected lookup is evicted so a transient failure is retried by the next account.
+  pending.catch(() => cache.delete(providerId));
+  cache.set(providerId, pending);
+  return pending;
+}
+
 export function hydrateProvider(row: ProviderRow): ProviderConfig {
   const normalized = canonicalizeBuiltinRow(row);
   return {
