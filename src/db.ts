@@ -4,6 +4,7 @@ import { GatewayError } from "./errors";
 import {
   isOpenCodeAnonymousCredential, isOpenCodeAnonymousModel, openCodeAnonymousCredential, openCodeAnonymousCredentialRow,
 } from "./providers/opencode-anonymous";
+import { discoveredModelAllowed, normalizeAllowedModelNames, publicDiscoveredModelId, QODER_PROVIDER_ID, sortModelRoutes } from "./qoder-model-routing";
 import type {
   Credential,
   CredentialRow,
@@ -168,6 +169,47 @@ export async function deleteSystemProxyUrl(env: Env): Promise<void> {
   await env.DB.prepare("DELETE FROM system_settings WHERE key='system_proxy_url'").run();
 }
 
+export async function gatewayKeyAllowsModel(env: Env, publicModel: string, allowedModels: string[]): Promise<boolean> {
+  if (allowedModels.length === 0 || allowedModels.includes(publicModel)) return true;
+  const allowed = new Set(allowedModels);
+  if (![...allowed].some((model) => model.startsWith(`${QODER_PROVIDER_ID}/`))) return false;
+  const result = await env.DB.prepare(
+    `SELECT model_id FROM discovered_models
+     WHERE provider_id='qoder' AND credential_id='' AND display_name=? AND enabled=1
+     GROUP BY model_id`,
+  ).bind(publicModel).all<{ model_id: string }>();
+  return result.results.some((row) => allowed.has(`${QODER_PROVIDER_ID}/${row.model_id}`));
+}
+
+async function loadQoderAllowedModelAliases(env: Env): Promise<Map<string, string>> {
+  const result = await env.DB.prepare(
+    `SELECT model_id,display_name,discovered_at FROM discovered_models
+     WHERE provider_id='qoder' AND credential_id='' AND enabled=1
+     ORDER BY discovered_at DESC,model_id ASC`,
+  ).all<{ model_id: string; display_name: string; discovered_at: number }>();
+  const aliases = new Map<string, string>();
+  for (const row of result.results) {
+    const displayName = row.display_name.trim();
+    if (displayName && !aliases.has(row.model_id)) aliases.set(row.model_id, displayName);
+  }
+  return aliases;
+}
+
+export async function normalizeGatewayAllowedModelLists(
+  env: Env,
+  allowedModelLists: readonly (readonly string[])[],
+): Promise<string[][]> {
+  const normalized = allowedModelLists.map((models) => normalizeAllowedModelNames(models, new Map()));
+  const legacyPrefix = `${QODER_PROVIDER_ID}/`;
+  if (!normalized.some((models) => models.some((model) => model.startsWith(legacyPrefix)))) return normalized;
+  const aliases = await loadQoderAllowedModelAliases(env);
+  return normalized.map((models) => normalizeAllowedModelNames(models, aliases));
+}
+
+export async function normalizeGatewayAllowedModels(env: Env, allowedModels: readonly string[]): Promise<string[]> {
+  return (await normalizeGatewayAllowedModelLists(env, [allowedModels]))[0] ?? [];
+}
+
 export async function listRoutesForModel(
   env: Env,
   publicModel: string,
@@ -179,7 +221,39 @@ export async function listRoutesForModel(
      WHERE r.public_model = ? AND r.enabled = 1 AND r.endpoint = ?
      ORDER BY r.priority ASC, r.weight DESC, r.created_at ASC`,
   ).bind(publicModel, endpoint).all<ModelRouteRow>();
-  if (configured.results.length) return configured.results;
+
+  let qoderRoutes: ModelRouteRow[] = [];
+  if (!configured.results.some((route) => route.provider_id === QODER_PROVIDER_ID)) {
+    const discovered = await env.DB.prepare(
+      `SELECT dm.model_id, MIN(dm.discovered_at) AS created_at, p.options_json
+       FROM discovered_models dm
+       JOIN providers p ON p.id=dm.provider_id AND p.kind='qoder' AND p.enabled=1
+       WHERE dm.provider_id='qoder' AND dm.credential_id='' AND dm.display_name=?
+         AND dm.endpoint=? AND dm.enabled=1
+       GROUP BY dm.model_id,p.options_json
+       ORDER BY MAX(dm.discovered_at) DESC,dm.model_id ASC
+       LIMIT 1`,
+    ).bind(publicModel, endpoint).all<{ model_id: string; created_at: number; options_json: string }>();
+    qoderRoutes = discovered.results.map((row) => {
+      const options = parseJson<Record<string, unknown>>(row.options_json, {});
+      const weight = typeof options.routing_weight === "number" ? Math.max(1, Math.floor(options.routing_weight)) : 1;
+      return {
+        id: `discovered:qoder:${endpoint}:${row.model_id}`,
+        public_model: publicModel,
+        provider_id: QODER_PROVIDER_ID,
+        upstream_model: row.model_id,
+        endpoint,
+        enabled: 1,
+        priority: 100,
+        weight,
+        options_json: JSON.stringify({ dynamic: true, channel_mapping: true }),
+        created_at: row.created_at,
+        updated_at: row.created_at,
+      };
+    });
+  }
+  const directRoutes = sortModelRoutes([...configured.results, ...qoderRoutes]);
+  if (directRoutes.length) return directRoutes;
 
   // Dynamically discovered models use provider/model. OpenAI-compatible providers
   // with an explicit model selection only expose the chosen aliases above.
@@ -223,7 +297,7 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
   const cached = await env.CONFIG_CACHE.get(cacheKey, "json").catch(() => null) as Array<Record<string, unknown>> | null;
   if (cached) {
     const allowed = new Set(allowedModels);
-    return allowed.size ? cached.filter((model) => allowed.has(String(model.id))) : cached;
+    return allowed.size ? cached.filter((model) => discoveredModelAllowed(model, allowed)) : cached;
   }
 
   const [discoveredResult, routeResult] = await Promise.all([
@@ -235,7 +309,10 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
        FROM discovered_models dm
        JOIN providers p ON p.id=dm.provider_id AND p.enabled=1
        LEFT JOIN credentials c ON c.id=dm.credential_id AND c.enabled=1
-       WHERE dm.enabled=1 AND (dm.credential_id='' OR c.id IS NOT NULL)
+       WHERE dm.enabled=1 AND (
+         (p.kind='qoder' AND dm.credential_id='')
+         OR (p.kind<>'qoder' AND (dm.credential_id='' OR c.id IS NOT NULL))
+       )
        GROUP BY dm.provider_id,dm.model_id
        ORDER BY dm.provider_id,dm.model_id`,
     ).all<{
@@ -254,7 +331,7 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
   for (const row of discoveredResult.results) {
     const options = parseJson<Record<string, unknown>>(row.options_json, {});
     if (row.kind === "openai-compatible" && Array.isArray(options.selected_models)) continue;
-    const id = `${row.provider_id}/${row.model_id}`;
+    const id = publicDiscoveredModelId(row.kind, row.provider_id, row.model_id, row.display_name || row.model_id);
     modelMap.set(id, {
       id,
       object: "model",
@@ -268,21 +345,29 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
     });
   }
   for (const row of routeResult.results) {
+    const existing = modelMap.get(row.public_model);
+    const routeProviders = row.providers ? row.providers.split(",") : [];
+    const existingProviders = Array.isArray(existing?.x_cflare_providers)
+      ? existing.x_cflare_providers.map(String)
+      : typeof existing?.x_cflare_provider === "string" ? [existing.x_cflare_provider] : [];
+    const routeEndpoints = row.endpoints ? row.endpoints.split(",") : [];
+    const existingEndpoints = Array.isArray(existing?.x_cflare_endpoints) ? existing.x_cflare_endpoints.map(String) : [];
     modelMap.set(row.public_model, {
+      ...existing,
       id: row.public_model,
       object: "model",
-      created: row.created_at,
-      owned_by: "cflare-route",
+      created: Math.min(Number(existing?.created ?? row.created_at), row.created_at),
+      owned_by: existing?.owned_by ?? "cflare-route",
       display_name: row.public_model,
-      x_cflare_providers: row.providers ? row.providers.split(",") : [],
-      x_cflare_endpoints: row.endpoints ? row.endpoints.split(",") : [],
+      x_cflare_providers: [...new Set([...existingProviders, ...routeProviders])],
+      x_cflare_endpoints: [...new Set([...existingEndpoints, ...routeEndpoints])],
       x_cflare_managed_route: true,
     });
   }
   const models = [...modelMap.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
   await env.CONFIG_CACHE.put(cacheKey, JSON.stringify(models), { expirationTtl: 120 }).catch(() => undefined);
   const allowed = new Set(allowedModels);
-  return allowed.size ? models.filter((model) => allowed.has(String(model.id))) : models;
+  return allowed.size ? models.filter((model) => discoveredModelAllowed(model, allowed)) : models;
 }
 
 export async function listCredentialRows(env: Env, providerId: string): Promise<CredentialRow[]> {
@@ -529,6 +614,7 @@ export async function createGatewayKey(
   for (const byte of random) encoded += byte.toString(16).padStart(2, "0");
   const key = `sk_cfapi_${encoded}`;
   const now = Math.floor(Date.now() / 1000);
+  const allowedModels = await normalizeGatewayAllowedModels(env, input.allowedModels ?? []);
   await env.DB.prepare(
     `INSERT INTO gateway_keys
       (id, name, key_prefix, key_hash, enabled, rpm, max_concurrency,
@@ -543,7 +629,7 @@ export async function createGatewayKey(
       input.rpm ?? 60,
       input.maxConcurrency ?? 8,
       input.monthlyTokenLimit ?? 0,
-      JSON.stringify(input.allowedModels ?? []),
+      JSON.stringify(allowedModels),
       input.expiresAt ?? null,
       now,
       now,

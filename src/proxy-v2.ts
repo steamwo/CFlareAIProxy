@@ -3,7 +3,7 @@ import {
   isCodexMultiAgentClient, loadCodexMultiAgentModelProfiles, optimizeCodexMultiAgentV2Body,
 } from "./codex-multi-agent-v2";
 import { providerFetchForCredential } from "./credential-fetch";
-import { authenticateGatewayKey, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";
+import { authenticateGatewayKey, gatewayKeyAllowsModel, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";
 import type { CredentialAvailability } from "./db";
 import { GatewayError, errorResponse } from "./errors";
 import { getLoggingSettings, runtimeLog, shouldPersistError } from "./logging-settings";
@@ -113,7 +113,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
     if (!publicModel) throw new GatewayError(400, "INVALID_REQUEST", "The model field is required", "invalid_request_error");
 
     const allowedModels = parseJson<string[]>(gatewayKey.allowed_models_json, []);
-    if (allowedModels.length > 0 && !allowedModels.includes(publicModel)) {
+    if (!await gatewayKeyAllowsModel(c.env, publicModel, allowedModels)) {
       throw new GatewayError(403, "MODEL_NOT_ALLOWED", `API key is not allowed to use model ${publicModel}`, "permission_error");
     }
 

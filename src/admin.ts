@@ -4,7 +4,8 @@ import { encryptSecret } from "./crypto";
 import {
   createCredential, createGatewayKey, deleteProviderProxyConfig, deleteSystemProxyUrl, getCredential, getProvider,
   getProviderProxySummary, getSystemProxySummary, listCredentialAvailabilityForModel, listCredentialRows, listModels,
-  listProviderProxySummaries, listProviders, upsertProviderProxyConfig, upsertSystemProxyUrl,
+  listProviderProxySummaries, listProviders, normalizeGatewayAllowedModelLists, normalizeGatewayAllowedModels,
+  upsertProviderProxyConfig, upsertSystemProxyUrl,
 } from "./db";
 import { GatewayError, errorResponse } from "./errors";
 import { exchangeOAuthCode, pollOAuth, startOAuth } from "./oauth";
@@ -819,7 +820,13 @@ export function createAdminApp() {
 
   app.get("/api/keys", async (c) => {
     const result = await c.env.DB.prepare("SELECT * FROM gateway_keys ORDER BY created_at DESC").all<GatewayKeyRow>();
-    return c.json({ data: result.results.map(({key_hash,...row})=>row) });
+    const allowedModelLists = result.results.map((row) => parseJson<string[]>(row.allowed_models_json, []));
+    const normalizedLists = await normalizeGatewayAllowedModelLists(c.env, allowedModelLists);
+    const data = result.results.map(({ key_hash, ...row }, index) => ({
+      ...row,
+      allowed_models_json: JSON.stringify(normalizedLists[index] ?? []),
+    }));
+    return c.json({ data });
   });
   app.post("/api/keys", async (c) => {
     const body = await c.req.json<Record<string, unknown>>();
@@ -838,6 +845,12 @@ export function createAdminApp() {
     const expiresAt = body.expiresAt === null
       ? null
       : typeof body.expiresAt === "number" ? Math.floor(body.expiresAt) : row.expires_at;
+    const allowedModelsJson = Array.isArray(body.allowedModels)
+      ? JSON.stringify(await normalizeGatewayAllowedModels(
+        c.env,
+        body.allowedModels.filter((value): value is string => typeof value === "string"),
+      ))
+      : row.allowed_models_json;
     await c.env.DB.prepare(
       `UPDATE gateway_keys SET name=?,enabled=?,rpm=?,max_concurrency=?,monthly_token_limit=?,allowed_models_json=?,expires_at=?,updated_at=? WHERE id=?`,
     ).bind(
@@ -846,7 +859,7 @@ export function createAdminApp() {
       Math.max(1, optionalNumber(body.rpm) ?? row.rpm),
       Math.max(1, optionalNumber(body.maxConcurrency) ?? row.max_concurrency),
       Math.max(0, optionalNumber(body.monthlyTokenLimit) ?? row.monthly_token_limit),
-      Array.isArray(body.allowedModels) ? JSON.stringify(body.allowedModels.filter((value): value is string => typeof value === "string")) : row.allowed_models_json,
+      allowedModelsJson,
       expiresAt,
       Math.floor(Date.now()/1000), row.id,
     ).run();

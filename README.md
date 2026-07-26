@@ -65,7 +65,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | **OpenAI Codex** | PKCE OAuth / 授权 JSON / 本地助手 | Responses 为主，Chat 与 Completions 自动转换 | 支持流式错误识别、完成事件检查和输出重建。 |
 | **Kimi Coding** | Device OAuth | Chat、Responses、Completions 转换 | 处理工具消息关联、模型名归一化和流式 usage。 |
-| **Qoder** | PKCE Device OAuth | Qoder 专用请求与 SSE | 内置 COSY 签名、模型发现和个人/组织额度。 |
+| **Qoder** | PKCE Device OAuth | Qoder 专用请求与 SSE | 模型列表自动将 `display_name` 作为公开名称，渠道内部映射到匿名模型名；内置 COSY 签名和个人/组织额度。 |
 | **OpenCode Zen** | API Key / 匿名免费模型 | Responses、Anthropic Messages、Google GenerateContent、Chat | 官方线路失败后可按配置尝试镜像线路。 |
 | **OpenAI-compatible** | API Key | Chat、Responses 或 both | 可发现模型、设置公开别名、权重和代理。 |
 
