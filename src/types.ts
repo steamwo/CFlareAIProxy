@@ -40,8 +40,6 @@ export interface Env {
   CREDENTIAL_COOLDOWN_MS?: string;
   OPENCODE_MIRRORS_URL?: string;
   PUBLIC_BASE_URL?: string;
-  PROXY_BRIDGE_URL?: string;
-  PROXY_BRIDGE_TOKEN?: string;
 }
 
 export interface ProviderRow {
@@ -62,8 +60,10 @@ export interface ProviderRow {
 export interface ProviderProxyRow {
   provider_id: string;
   enabled: number;
+  /** Dead column from the removed proxy bridge; kept because migrations are append-only. */
   bridge_url: string;
   proxy_url_ciphertext: string | null;
+  /** Dead column from the removed proxy bridge; always written as NULL. */
   bridge_token_ciphertext: string | null;
   no_proxy_json: string;
   connect_timeout_ms: number;
@@ -75,9 +75,7 @@ export interface ProviderProxyRow {
 export interface ProviderProxyConfig {
   providerId: string;
   enabled: boolean;
-  bridgeUrl: string;
   proxyUrl: string;
-  bridgeToken: string;
   noProxy: string[];
   connectTimeoutMs: number;
   requestTimeoutMs: number;
@@ -91,7 +89,6 @@ export interface ProviderProxySummary {
   proxyHost?: string;
   hasProviderOverride: boolean;
   hasSystemProxy: boolean;
-  bridgeConfigured: boolean;
   runtimeReady: boolean;
 }
 
@@ -99,7 +96,6 @@ export interface SystemProxySummary {
   enabled: boolean;
   proxyProtocol?: ProxyProtocol;
   proxyHost?: string;
-  bridgeConfigured: boolean;
   runtimeReady: boolean;
 }
 

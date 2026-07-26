@@ -45,16 +45,6 @@ const PROVIDER_PROXY_DIALECT: ProxyDialect = {
   missingChunkCrlf: () => new Error("chunk 数据后缺少 CRLF"),
 };
 
-export function validateBridgeUrl(value: string): URL {
-  let url: URL;
-  try { url = new URL(value); } catch { throw new GatewayError(400, "PROXY_BRIDGE_URL_INVALID", "代理桥接地址格式无效"); }
-  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
-  if (url.protocol !== "https:" && !(local && url.protocol === "http:")) {
-    throw new GatewayError(400, "PROXY_BRIDGE_URL_INVALID", "旧版 Bridge 的远程地址必须使用 HTTPS");
-  }
-  return url;
-}
-
 export function hostnameMatchesProxyBypassRule(hostname: string, rule: string): boolean {
   let normalized = rule.trim().toLowerCase();
   if (!normalized) return false;

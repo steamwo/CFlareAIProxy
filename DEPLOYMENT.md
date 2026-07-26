@@ -139,7 +139,7 @@ PUBLIC_BASE_URL=
 OPENCODE_MIRRORS_URL   # 额外 OpenCode 镜像，使用逗号或换行分隔
 ```
 
-历史变量 `PROXY_BRIDGE_URL` 与 `PROXY_BRIDGE_TOKEN` 仅用于旧部署兼容。当前 Worker 原生支持 HTTP CONNECT / SOCKS5，不需要 Proxy Bridge。
+Worker 原生支持 HTTP CONNECT / SOCKS5，代理直接在 Worker 内完成。历史的 `PROXY_BRIDGE_URL` 与 `PROXY_BRIDGE_TOKEN` 已移除，设置它们不再有任何效果。
 
 ## 5. 推荐部署方式
 
@@ -298,7 +298,7 @@ socks5://user:pass@host:port
 socks5h://user:pass@host:port
 ```
 
-无需部署 `proxy-bridge/`。该目录和相关脚本只为旧环境保留。
+代理由 Worker 原生完成，无需部署任何额外的转发服务。
 
 代理配置优先级：
 

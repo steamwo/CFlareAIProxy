@@ -29,9 +29,6 @@
     "codex:refresh": "node scripts/codex-auth.mjs refresh",
     "codex:sync": "node scripts/codex-auth.mjs sync",
     "codex:watch": "node scripts/codex-auth.mjs watch",
-    "proxy-bridge:install": "npm --prefix proxy-bridge install",
-    "proxy-bridge:start": "npm --prefix proxy-bridge start",
-    "proxy-bridge:check": "npm --prefix proxy-bridge run check",
     "build:web": "vite build",
     "typecheck:worker": "tsc -p tsconfig.worker.json --noEmit",
     "typecheck:web": "vue-tsc -p web/tsconfig.json --noEmit",
@@ -81,12 +78,6 @@
       },
       "ADMIN_PASSWORD": {
         "description": "Administrator login password for /admin. Use a strong unique password."
-      },
-      "PROXY_BRIDGE_URL": {
-        "description": "Legacy compatibility setting. Native HTTP/SOCKS proxying no longer requires a bridge."
-      },
-      "PROXY_BRIDGE_TOKEN": {
-        "description": "Legacy compatibility setting. Native HTTP/SOCKS proxying no longer requires a bridge token."
       }
     }
   },

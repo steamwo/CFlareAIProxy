@@ -69,7 +69,6 @@ function maskedProxy(value: string | null): Omit<ProviderProxySummary, "source" 
     enabled: Boolean(value),
     proxyProtocol,
     proxyHost,
-    bridgeConfigured: false,
     runtimeReady,
   };
 }
@@ -96,9 +95,7 @@ export async function getProviderProxyConfig(env: Env, providerId: string): Prom
   return {
     providerId,
     enabled: true,
-    bridgeUrl: env.PROXY_BRIDGE_URL?.trim() ?? "",
     proxyUrl,
-    bridgeToken: env.PROXY_BRIDGE_TOKEN ?? "",
     noProxy: [],
     connectTimeoutMs: 20_000,
     requestTimeoutMs: 120_000,
@@ -133,16 +130,19 @@ export async function upsertProviderProxyConfig(
   const now = Math.floor(Date.now() / 1000);
   const proxyUrl = input.proxyUrl.trim();
   const ciphertext = proxyUrl ? await encryptSecret(proxyUrl, env.MASTER_KEY) : null;
+  // bridge_url / bridge_token_ciphertext are dead columns from the removed proxy bridge.
+  // Migration 0004 declares bridge_url NOT NULL and shipped migrations are append-only, so
+  // the write keeps pinning them to empty/NULL rather than dropping the columns.
   await env.DB.prepare(
     `INSERT INTO provider_proxies
       (provider_id,enabled,bridge_url,proxy_url_ciphertext,bridge_token_ciphertext,no_proxy_json,
        connect_timeout_ms,request_timeout_ms,created_at,updated_at)
-     VALUES(?,?,?, ?,NULL,'[]',20000,120000,?,?)
+     VALUES(?,?,'', ?,NULL,'[]',20000,120000,?,?)
      ON CONFLICT(provider_id) DO UPDATE SET
        enabled=excluded.enabled,bridge_url='',proxy_url_ciphertext=excluded.proxy_url_ciphertext,
        bridge_token_ciphertext=NULL,no_proxy_json='[]',connect_timeout_ms=20000,
        request_timeout_ms=120000,updated_at=excluded.updated_at`,
-  ).bind(input.providerId, proxyUrl ? 1 : 0, "", ciphertext, now, now).run();
+  ).bind(input.providerId, proxyUrl ? 1 : 0, ciphertext, now, now).run();
 }
 
 export async function deleteProviderProxyConfig(env: Env, providerId: string): Promise<void> {

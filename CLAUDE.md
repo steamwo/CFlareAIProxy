@@ -55,7 +55,7 @@ pnpm run db:migrate:local
 pnpm run db:migrate:remote
 ```
 
-Other scripts worth knowing: `pnpm run smoke` / `pnpm run smoke:admin` (end-to-end smoke checks), `pnpm run codex:login|import|refresh|sync|watch` (local Codex OAuth helpers), `pnpm run proxy-bridge:*` (legacy proxy bridge under `proxy-bridge/`, no longer required for HTTP/SOCKS proxying).
+Other scripts worth knowing: `pnpm run smoke` / `pnpm run smoke:admin` (end-to-end smoke checks), `pnpm run codex:login|import|refresh|sync|watch` (local Codex OAuth helpers).
 
 ## Architecture
 
