@@ -45,9 +45,21 @@ jobs:
       - name: Install dependencies
         working-directory: repo
         run: pnpm install --frozen-lockfile
-      - name: Run repository checks
+      - name: Check configuration
         working-directory: repo
-        run: pnpm run check
+        run: node scripts/check-config.mjs
+      - name: Check web assets
+        working-directory: repo
+        run: node scripts/check-web.mjs
+      - name: Typecheck worker
+        working-directory: repo
+        run: pnpm run typecheck:worker
+      - name: Typecheck web
+        working-directory: repo
+        run: pnpm run typecheck:web
+      - name: Run tests
+        working-directory: repo
+        run: pnpm run test
       - name: Build production web bundle
         working-directory: repo
         run: pnpm run build:web
