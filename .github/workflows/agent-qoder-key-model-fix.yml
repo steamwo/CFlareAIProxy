@@ -3,6 +3,9 @@ name: Validate Qoder gateway-key model names
 on:
   push:
     branches: [agent/qoder-display-name-routing]
+  pull_request:
+    branches: [dev]
+    types: [opened, reopened, synchronize]
 
 permissions:
   contents: write
@@ -46,4 +49,3 @@ jobs:
           git add -u .github/workflows/agent-qoder-key-model-fix.yml scripts/agent-fix-qoder-key-models.py
           git commit -m "Normalize Qoder models in gateway keys"
           git push origin HEAD:agent/qoder-display-name-routing
-# trigger after workflow registration
