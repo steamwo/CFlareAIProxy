@@ -5,9 +5,9 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: 42a00a2a6521b867c27f7ad096d08699db8e6d19 -->
+<!-- upstream-ref: 8423cce2d1004e80948a9e2c60ee69354c0aabc3 -->
 <!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
-<!-- last-reviewed: 2026-07-26 -->
+<!-- last-reviewed: 2026-07-27 -->
 
 ## 1. 当前基线
 
@@ -15,26 +15,27 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `42a00a2a6521b867c27f7ad096d08699db8e6d19` |
+| 已审阅上游提交 | `8423cce2d1004e80948a9e2c60ee69354c0aabc3` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
-| 审阅日期 | 2026-07-26 |
+| 审阅日期 | 2026-07-27 |
 
-本轮审阅范围为 `27fc3169..42a00a2a`，共 8 个提交：
+本轮审阅范围为 `42a00a2a..8423cce2`，共 18 个提交：
 
-- `f6c32ec3` 新增通用派生会话标识，并用于 Codex HTTP/Responses 的 `prompt_cache_key`、`session_id` 与 `Conversation_id` 回退；该行为与缓存连续性、租户隔离和账号切换相关，属于范围内实质变化。
-- 该提交同时包含 Codex Responses WebSocket 增量根节点连续性测试；WebSocket 部分仍属于明确排除范围。
-- `94cf4674` 位于 Codex translator 路径，但实际只调整 Codex→Claude 流式 thinking block，属于 Claude 协议范围。
-- `29406436` 及合并提交 `42a00a2a` 只修复 Claude cloaking reminder 与 `tool_result` 顺序，属于 Claude 专用变化。
-- `7cb71ed6` 为 Home/Redis 集群订阅重连与 failover 生命周期；`fe4ae498` 为 pluginhost 拆分重构；其余为 Antigravity/Gemini 与 xAI 专用变化，均不直接同步。
+- `6491ce39` 为 Codex Chat Completions → Responses 请求转换增加 `custom` tool 声明、命名 tool choice、长名称缩短、反向名称恢复和 function/custom 同名冲突处理。
+- `58ede93e` 为 Codex Responses → Chat Completions 的 HTTP/SSE 转换增加 `custom_tool_call`、`response.custom_tool_call_input.{delta,done}`、逐调用流状态、交错调用索引和重复事件抑制。
+- 上述两项属于范围内实质变化，但会改变公开工具调用协议和现有 Multi-Agent V2 转换边界；当前环境无法可靠执行本地类型检查与测试，因此未直接移植，已创建 Issue #38，且明确仅限 HTTP/SSE。
+- Kimi executor 的一行变化没有形成新的可移植行为；现有模型归一化、header/device ID 和 usage 语义未发生实质改变。
+- `f329b9d1` 的 PostgreSQL cooldown 持久化、`96f4b001`/`2135379c` 的 Go SDK executor 保留和 `22ec4159` 的本地 filestore 修复依赖本地进程、文件系统或 PostgreSQL，Workers 侧不直接移植。
+- Codex reasoning replay cache 变化仍需 KV/Durable Object 架构设计；Claude、Claude OAuth、Gemini、xAI/Grok、README 和赞助信息变化均按范围排除。
 
-Codex 派生会话标识无法在本轮可靠直接移植：CFlareAIProxy 已使用 `X-Session-Id` / `X-Conversation-Id` 做账号亲和，但需要先明确 Codex 上游 cache key 的优先级、网关 Key/租户/provider 隔离边界、账号切换时稳定性，以及无显式会话 ID 时的隐私安全回退。已创建 Issue #35，仅评估 HTTP/SSE；不启用或移植 WebSocket 实现。本轮没有安全可验证的运行代码或测试更新。
+本轮没有安全可验证的运行代码或测试更新；`local-implementation-ref` 保持不变。
 
 ## 2. 对齐程度
 
 以下比例是工程估算，用来表达工作量和行为覆盖，不是官方兼容认证，也不是逐测试用例通过率。
 
-- **当前目标范围（暂不包含 Claude 协议和未批准的 Codex Live）：约 76%，属于“大体对齐”。**
+- **当前目标范围（暂不包含 Claude 协议和未批准的 Codex Live）：约 75%，属于“大体对齐”。**
 - **相对 CLIProxyAPI 全部产品能力：约 44%，属于“部分对齐”。**
 
 等级定义：
@@ -50,17 +51,18 @@ Codex 派生会话标识无法在本轮可靠直接移植：CFlareAIProxy 已使
 | 能力 | 程度 | CFlareAIProxy 状态 | 后续动作 |
 | --- | --- | --- | --- |
 | OpenAI Chat Completions | 已对齐 | 支持流式、非流式、tools、多账号路由和 OpenAI-compatible 上游 | 跟进上游新增字段和错误语义 |
-| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses 转换和可选 Multi-Agent V2 请求/响应兼容 | 补齐更多事件、状态和工具边界测试 |
+| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses 转换和可选 Multi-Agent V2 请求/响应兼容 | 补齐 custom tool、交错调用和终止事件测试，跟进 Issue #38 |
 | OpenAI Completions | 大体对齐 | 可路由 generic、Codex、Kimi | 保持兼容，不扩大旧协议特性 |
 | Kimi Chat 上游 | 已对齐 | 专用 adapter，固定走 Chat Completions | 持续对比 `kimi_executor.go` |
 | Kimi 模型名归一化 | 已对齐 | 去除 `[1m]` 后缀 | 跟进上游新增 suffix/alias 规则 |
 | Kimi 多轮工具消息修复 | 已对齐 | 删除无效空 assistant、补 `reasoning_content`、修复 `call_id/tool_call_id` | 新增上游测试时同步移植测试语义 |
 | Kimi Responses/Completions 转换 | 大体对齐 | 支持文字、图片、工具定义、tool choice 和终止事件 | 跟进新的 Responses item/event 类型 |
 | Kimi 流式 usage | 大体对齐 | 自动请求 `include_usage` 并归集基础 Token | 接入规范化 Token 质量模型 |
-| Codex Responses 请求归一化 | 已对齐 | 清理不兼容字段、转换 tools/tool choice、透传 Codex 会话头 | 评估派生会话 UUID 与 prompt cache 连续性，跟进 Issue #35 |
+| Codex Responses 请求归一化 | 大体对齐 | 清理不兼容字段、转换 tools/tool choice、透传 Codex 会话头 | 评估派生会话 UUID（Issue #35）和 custom tool/name conflict（Issue #38） |
 | Codex `response.failed/error` | 已对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误 | 对比上游新增 code/type 分类 |
 | Codex 中断流检测 | 已对齐 | 未收到 `response.completed/incomplete` 时视为失败，不伪造成功 | 跟进上游中断流恢复策略 |
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
+| Codex custom tool HTTP/SSE | 部分对齐 | 基础 function tool 已覆盖；尚未验证 custom tool、交错调用、done fallback 与重复抑制 | 跟进 Issue #38，不涉及 WebSocket |
 | Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，覆盖 reasoning、modalities、context window、visibility、search-tool、service tier、稳定 priority 和 V2 标记 | 继续对比官方模板新增字段，不引入常驻模板缓存 |
 | Codex Multi-Agent V2 | 大体对齐 | 默认关闭；按 route/provider 开启；仅目标 UA；支持 spawn/agent/namespace、非 Codex 转换及流式/非流式恢复 | 运行完整 CI 与真实 Codex 客户端 smoke；WebSocket 单独设计 |
 | Codex Live / WebRTC / sideband | 未对齐 | 当前仅实现 HTTP/SSE，不提供媒体 relay 或 TCP candidate proxy | 重大安全与生命周期设计，跟进 Issue #17 |
@@ -68,7 +70,7 @@ Codex 派生会话标识无法在本轮可靠直接移植：CFlareAIProxy 已使
 | Codex Responses WebSocket | 未对齐 | Workers 网关当前仅实现 HTTP/SSE | 未单独批准前不自动移植 |
 | Codex Alpha Search / 特殊路由插件 | 未对齐 | 尚未实现插件式模型选择 | 有真实使用需求后再跟进 |
 | 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | 跟进 credential concurrency 和选择算法变化，保持无关 provider 更新不扰动既有租约 |
-| 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断 | 继续细化按错误类型的 cooldown |
+| 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断 | 继续细化按错误类型的 cooldown；不移植 PostgreSQL store |
 | Token/OAuth 刷新锁 | 大体对齐 | 使用 Durable Object 防止同账号并发刷新 | 跟进新的 OAuth 字段和刷新失败语义 |
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理 |
 | Provider/System 代理 | 已对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连 | 持续跟进 Workers Socket 限制 |
@@ -106,7 +108,7 @@ Codex 派生会话标识无法在本轮可靠直接移植：CFlareAIProxy 已使
 - `internal/client/codex/live/**`
 - `internal/config/codex_live.go`
 
-重点关键词：`response.failed`、`response.completed`、`response.output_item.done`、incomplete/disconnected stream、usage limit、capacity、context length、reasoning replay/signature、`spawn_agent`、`agent_message`、model catalog、WebRTC、sideband、ICE/STUN/TCP candidate。
+重点关键词：`response.failed`、`response.completed`、`response.output_item.done`、`custom_tool_call`、`response.custom_tool_call_input`、incomplete/disconnected stream、usage limit、capacity、context length、reasoning replay/signature、`spawn_agent`、`agent_message`、model catalog、WebRTC、sideband、ICE/STUN/TCP candidate。
 
 ### 通用 P1
 
@@ -121,7 +123,7 @@ Codex 派生会话标识无法在本轮可靠直接移植：CFlareAIProxy 已使
 以下变化通常只记录，不自动修改 CFlareAIProxy：
 
 - README、赞助商、展示项目和纯文档排版。
-- 仅适用于本地 Go 进程、Gin、文件系统或 Go SDK 的实现。
+- 仅适用于本地 Go 进程、Gin、文件系统、PostgreSQL 或 Go SDK 的实现。
 - Claude 协议、Claude OAuth、Claude Token 估算。
 - 与当前供应商无关的 Gemini、Grok/xAI 专用修复。
 - WebSocket、WebRTC、媒体 relay、sideband 或 TCP candidate proxy，除非已经单独批准设计。
@@ -152,6 +154,7 @@ Codex 派生会话标识无法在本轮可靠直接移植：CFlareAIProxy 已使
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-27 | `42a00a2a..8423cce2` | 文档更新；Issue #38 | 18 个提交中 `6491ce39` 与 `58ede93e` 为 Codex HTTP/SSE custom tool 请求/响应转换的实质变化，涉及名称冲突、长名称映射、逐调用流状态、交错事件与重复抑制；因无法在本轮可靠执行本地类型检查和测试，未直接移植，创建仅限 HTTP/SSE 的跟进。PostgreSQL cooldown、Go SDK/filestore 属架构不适用；reasoning replay 仍需 KV/DO 设计；Claude、Gemini、xAI/Grok 和文档变化排除。 |
 | 2026-07-26 | `27fc3169..42a00a2a` | 文档更新；Issue #35 | 8 个提交中 `f6c32ec3` 含 Codex HTTP/Responses 派生会话 UUID 与 prompt cache/session header 回退语义，属于相关变化；因租户隔离、账号切换稳定性和隐私回退无法在本轮可靠验证，未直接移植，建立仅限 HTTP/SSE 的设计与测试跟进。其 WebSocket 测试以及 Claude、Home/Redis、pluginhost、Gemini/Antigravity、xAI 变化均排除。 |
 | 2026-07-26 | `f8dffa05..27fc3169` | 文档更新 | 11 个提交中仅 `27fc3169` 含通用 executor 注册串行化和 Codex executor 保留语义；Workers 侧由 Durable Object 串行租约、按请求配置快照和无进程内 executor registry 自然覆盖，不移植 Go 生命周期代码。OAuth 选择日志无行为变化；其余为 Windows plugin、Claude、Gemini/Antigravity 或 Grok/xAI 专用变化。 |
 | 2026-07-25 | Issue #16 + `71d59129` | `88f703c9..86b7eb4c` | 已实现 Workers 原生 Multi-Agent V2 HTTP/SSE 兼容层和动态 Codex client model catalog：默认关闭、目标 UA 门禁、route/provider 灰度、冲突安全回退、公开模型/能力继承、SSE frame metadata 保留；不引入常驻 registry、文件系统或 WebSocket 假设。 |
