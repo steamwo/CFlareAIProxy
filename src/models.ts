@@ -255,8 +255,26 @@ export async function refreshProviderModels(env: Env, providerId: string): Promi
   return results;
 }
 
-export async function refreshAllModels(env: Env): Promise<ModelRefreshResult[]> {
-  const result = await env.DB.prepare("SELECT id FROM credentials WHERE enabled=1 ORDER BY provider_id,priority,created_at").all<{ id: string }>();
+/**
+ * Accounts whose catalogue is refreshed per invocation. Same reasoning as the quota sweep:
+ * every account is an upstream request plus a rewrite of its discovered models, and a
+ * Worker's subrequest ceiling does not grow with the account pool.
+ */
+export const MODEL_REFRESH_BATCH_LIMIT = 40;
+
+/**
+ * Refreshes the least recently discovered catalogues first, so successive runs rotate
+ * through a pool larger than one batch instead of repeatedly redoing the same head.
+ */
+export async function refreshAllModels(env: Env, limit = MODEL_REFRESH_BATCH_LIMIT): Promise<ModelRefreshResult[]> {
+  const result = await env.DB.prepare(
+    `SELECT c.id FROM credentials c
+     LEFT JOIN (SELECT credential_id, MAX(discovered_at) AS discovered_at FROM discovered_models GROUP BY credential_id) d
+       ON d.credential_id = c.id
+     WHERE c.enabled=1
+     ORDER BY COALESCE(d.discovered_at, 0) ASC, c.provider_id, c.priority, c.created_at
+     LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
   const output: ModelRefreshResult[] = [];
   const openCode = await env.DB.prepare("SELECT enabled FROM providers WHERE id='opencode'").first<{ enabled: number }>();
   if (openCode?.enabled === 1) output.push(await refreshOpenCodeAnonymousModels(env));

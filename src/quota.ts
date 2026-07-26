@@ -550,10 +550,32 @@ export async function refreshCredentialQuota(env: Env, credentialId: string): Pr
   }
 }
 
-export async function refreshAllQuotas(env: Env): Promise<QuotaRefreshResult[]> {
+/**
+ * Accounts refreshed per invocation.
+ *
+ * Each account costs a credential read, two decrypts, a provider lookup, an upstream fetch
+ * and a snapshot write. A Worker has a hard subrequest ceiling and a wall-clock budget, so
+ * an unbounded sweep is a deployment that works until someone adds the account that breaks
+ * it. Anything past the limit is left for the next pass — hourly cron for the scheduled
+ * sweep, or the operator pressing refresh again.
+ */
+export const QUOTA_REFRESH_BATCH_LIMIT = 40;
+
+/**
+ * Refreshes quotas for the least recently checked accounts first.
+ *
+ * Ordering by snapshot age rather than by provider means repeated runs rotate through the
+ * whole pool instead of re-refreshing the same head of the list, so a deployment with more
+ * accounts than the batch limit still converges.
+ */
+export async function refreshAllQuotas(env: Env, limit = QUOTA_REFRESH_BATCH_LIMIT): Promise<QuotaRefreshResult[]> {
   const result = await env.DB.prepare(
-    "SELECT id FROM credentials WHERE enabled=1 ORDER BY provider_id,priority,created_at",
-  ).all<{ id: string }>();
+    `SELECT c.id FROM credentials c
+     LEFT JOIN quota_snapshots q ON q.credential_id = c.id
+     WHERE c.enabled=1
+     ORDER BY COALESCE(q.fetched_at, 0) ASC, c.provider_id, c.priority, c.created_at
+     LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
   const output: QuotaRefreshResult[] = [];
   for (let index = 0; index < result.results.length; index += 4) {
     output.push(...await Promise.all(

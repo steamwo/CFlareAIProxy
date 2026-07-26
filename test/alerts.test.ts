@@ -328,6 +328,9 @@ describe("trigger points", () => {
     const env = {
       ...harness.env,
       DB: {
+        // The cron also refreshes quotas, which reads rather than deletes. Returning an
+        // empty account list keeps that task successful so this test observes exactly one
+        // failing sweep — the point being that the failure alerts without being swallowed.
         prepare: (sql: string) => ({
           bind: () => ({
             run: async () => {
@@ -336,7 +339,10 @@ describe("trigger points", () => {
               return { meta: { changes: 0 } };
             },
             first: async () => (sql.includes("system_settings") ? harness.row : null),
+            all: async () => ({ results: [] }),
           }),
+          all: async () => ({ results: [] }),
+          first: async () => (sql.includes("system_settings") ? harness.row : null),
         }),
       },
     } as unknown as Env;

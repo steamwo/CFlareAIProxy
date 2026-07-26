@@ -9,16 +9,20 @@ import type { Env } from "../src/types";
  */
 function createEnv(failOn: string | null) {
   const swept: string[] = [];
-  const prepare = vi.fn((sql: string) => ({
-    bind: () => ({
-      run: async () => {
-        const table = sql.match(/DELETE FROM (\w+)/)?.[1] ?? "?";
-        swept.push(table);
-        if (failOn && table === failOn) throw new Error(`${table} is unavailable`);
-        return { meta: { changes: 0 } };
-      },
-    }),
-  }));
+  // The cron runs deletions alongside the quota refresh, which only reads. Answering both
+  // shapes keeps this test about task isolation rather than about SQL plumbing.
+  const statement = (sql: string) => ({
+    bind: () => statement(sql),
+    run: async () => {
+      const table = sql.match(/DELETE FROM (\w+)/)?.[1] ?? "?";
+      swept.push(table);
+      if (failOn && table === failOn) throw new Error(`${table} is unavailable`);
+      return { meta: { changes: 0 } };
+    },
+    all: async () => ({ results: [] }),
+    first: async () => null,
+  });
+  const prepare = vi.fn(statement);
   return { swept, env: { DB: { prepare } } as unknown as Env };
 }
 

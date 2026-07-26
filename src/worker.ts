@@ -4,13 +4,16 @@ import {
   activityCutoff, cleanupExpiredActivity, cleanupExpiredOAuthSessions, cleanupExpiredRequestLogs,
   oauthSessionCutoff, requestLogCutoff,
 } from "./log-retention";
+import { refreshAllQuotas } from "./quota";
 import type { Env, UsageQueueEvent } from "./types";
 
 export { AccountPool, RateLimiter } from "./index";
 
 interface RetentionTask {
   event: string;
-  cutoff: number;
+  /** Retention boundary for a sweep; absent for tasks that are not time-bounded. */
+  cutoff?: number;
+  /** Rows removed, or items processed for tasks that are not deletions. */
   run: () => Promise<number>;
 }
 
@@ -39,6 +42,13 @@ async function runRetention(env: Env, scheduledTime: number): Promise<void> {
       event: "oauth_session_cleanup",
       cutoff: oauthSessionCutoff(scheduledTime),
       run: () => cleanupExpiredOAuthSessions(env, scheduledTime),
+    },
+    {
+      // Quotas drive the account pool's availability decisions, so they must stay fresh even
+      // when nobody opens the console. Batched inside refreshAllQuotas and ordered oldest
+      // first, so a pool larger than one batch converges across successive hours.
+      event: "quota_refresh",
+      run: async () => (await refreshAllQuotas(env)).length,
     },
   ];
 
