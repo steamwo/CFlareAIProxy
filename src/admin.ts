@@ -263,6 +263,13 @@ async function adminJsonBody(request: Request): Promise<Record<string, unknown>>
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * Upper bound for the admin list endpoints. Credentials, routes and gateway keys are
+ * created by hand, so this is a backstop against a runaway table rather than a paging
+ * scheme — the console renders the full list and paginates client-side.
+ */
+const ADMIN_LIST_LIMIT = 1000;
+
 async function invalidateModelCache(env: Env): Promise<void> {
   await Promise.all([
     env.CONFIG_CACHE.delete("models:public"),
@@ -646,7 +653,12 @@ export function createAdminApp() {
 
   app.get("/api/credentials", async (c) => {
     const provider = c.req.query("provider");
-    const sql = provider ? "SELECT * FROM credentials WHERE provider_id=? ORDER BY created_at DESC" : "SELECT * FROM credentials ORDER BY created_at DESC";
+    // These tables grow with operator action, not with traffic, so a cap is a backstop
+    // rather than pagination: it bounds worst-case response size and D1 rows read without
+    // changing the response shape the console already consumes.
+    const sql = provider
+      ? `SELECT * FROM credentials WHERE provider_id=? ORDER BY created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`
+      : `SELECT * FROM credentials ORDER BY created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`;
     const result = provider
       ? await c.env.DB.prepare(sql).bind(provider).all<CredentialRow>()
       : await c.env.DB.prepare(sql).all<CredentialRow>();
@@ -772,7 +784,7 @@ export function createAdminApp() {
 
   app.get("/api/routes", async (c) => {
     const [result, providerResult] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM model_routes ORDER BY public_model,priority,created_at").all<ModelRouteRow>(),
+      c.env.DB.prepare(`SELECT * FROM model_routes ORDER BY public_model,priority,created_at LIMIT ${ADMIN_LIST_LIMIT}`).all<ModelRouteRow>(),
       c.env.DB.prepare("SELECT id,enabled FROM providers").all<{ id: string; enabled: number }>(),
     ]);
     const providerEnabled = new Map(providerResult.results.map((row) => [row.id, row.enabled === 1]));
@@ -880,7 +892,7 @@ export function createAdminApp() {
   });
 
   app.get("/api/keys", async (c) => {
-    const result = await c.env.DB.prepare("SELECT * FROM gateway_keys ORDER BY created_at DESC").all<GatewayKeyRow>();
+    const result = await c.env.DB.prepare(`SELECT * FROM gateway_keys ORDER BY created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`).all<GatewayKeyRow>();
     const allowedModelLists = result.results.map((row) => parseJson<string[]>(row.allowed_models_json, []));
     const normalizedLists = await normalizeGatewayAllowedModelLists(c.env, allowedModelLists);
     const data = result.results.map(({ key_hash, ...row }, index) => ({
