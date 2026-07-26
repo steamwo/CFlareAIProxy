@@ -28,11 +28,15 @@ interface StubRows {
 }
 
 function stubEnv(rows: StubRows, previous?: string): Env {
+  // `run` is present because pollOAuth records its poll timestamp; this stub only needs the
+  // call to succeed, since the assertions here are about which key opened the ciphertext.
   const prepare = (query: string) => ({
     bind: (..._args: unknown[]) => ({
       first: <T>(): Promise<T | null> => Promise.resolve(rowFor(query) as T | null),
+      run: (): Promise<{ meta: { changes: number } }> => Promise.resolve({ meta: { changes: 1 } }),
     }),
     first: <T>(): Promise<T | null> => Promise.resolve(rowFor(query) as T | null),
+    run: (): Promise<{ meta: { changes: number } }> => Promise.resolve({ meta: { changes: 1 } }),
   });
   const rowFor = (query: string): Record<string, unknown> | null => {
     if (query.includes("FROM credentials")) return rows.credential ?? null;

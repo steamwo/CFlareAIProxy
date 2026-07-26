@@ -331,10 +331,45 @@ async function finalizeCredential(
   return { status: "complete", credentialId, message: "OAuth credential created" };
 }
 
+/**
+ * Shortest gap the gateway will forward a poll upstream, in seconds.
+ *
+ * `intervalSeconds` in the start response is only advice — nothing stopped a client from
+ * polling in a tight loop, which hammers the provider's device-code endpoint and pays for a
+ * session read plus a decrypt on every iteration. This floor sits just under the smallest
+ * interval we hand out (2s for Qoder) so a well-behaved console is never throttled by the
+ * advice it was given, while a loop collapses to one upstream call per window.
+ */
+const POLL_MIN_INTERVAL_SECONDS = 2;
+
+/**
+ * Records when a poll actually reached the provider.
+ *
+ * Written only after an upstream call, never on a throttled one: a throttled poll must not
+ * cost a D1 write, otherwise a hot loop simply trades an upstream request for a database
+ * write, which is the more expensive of the two.
+ */
+async function markPolled(env: Env, row: OAuthSessionRow, payload: Record<string, unknown>, at: number): Promise<void> {
+  await env.DB.prepare("UPDATE oauth_sessions SET payload_json=? WHERE id=?")
+    .bind(JSON.stringify({ ...payload, lastPolledAt: at }), row.id)
+    .run();
+}
+
 export async function pollOAuth(env: Env, providerId: string, sessionId: string): Promise<OAuthPollResult> {
   const provider = await getProvider(env, providerId);
   const session = await readSession(env, sessionId);
   if (session.row.provider_id !== providerId) throw new GatewayError(400, "OAUTH_PROVIDER_MISMATCH", "OAuth session belongs to another provider");
+
+  const now = nowSeconds();
+  const lastPolledAt = numberValue(session.payload, "lastPolledAt");
+  if (lastPolledAt !== undefined && now - lastPolledAt < POLL_MIN_INTERVAL_SECONDS) {
+    // Deliberately shaped like any other pending result: a caller that is polling too fast
+    // learns only that authorization has not completed, which is also what it would have
+    // learned from the upstream. Surfacing "you are rate limited" would tell an abuser
+    // exactly how to pace itself.
+    return { status: "pending", retryAfterSeconds: POLL_MIN_INTERVAL_SECONDS };
+  }
+  await markPolled(env, session.row, session.payload, now);
 
   if (session.row.flow === "device_code") {
     const tokenUrl = stringValue(provider.auth, "token_url");
