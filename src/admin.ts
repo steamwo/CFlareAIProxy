@@ -399,7 +399,10 @@ export function createAdminApp() {
       Math.floor(Date.now() / 1000),
       id,
     ).run();
-    await c.env.CONFIG_CACHE.delete(`provider:${id}`);
+    // listModels joins providers ON p.enabled=1 and caches for 120s, so toggling a channel
+    // must drop that cache — otherwise /v1/models keeps advertising a disabled channel's
+    // models for the rest of the TTL.
+    await invalidateModelCache(c.env);
     return c.json({ ok: true });
   });
 
@@ -516,7 +519,7 @@ export function createAdminApp() {
       c.executionCtx.waitUntil(refreshCredentialModels(c.env, credentialId).then(() => undefined));
     }
     await syncProviderModelRoutes(c.env, id, selections, routingWeight);
-    await Promise.all([c.env.CONFIG_CACHE.delete(`provider:${id}`), recordProviderSuccess(c.env, id), invalidateModelCache(c.env)]);
+    await Promise.all([recordProviderSuccess(c.env, id), invalidateModelCache(c.env)]);
     return c.json({ ok: true, credentialId: credentialId ?? null, routeCount: selections.reduce((sum, item) => sum + item.endpoints.length, 0) });
   });
 
@@ -526,7 +529,7 @@ export function createAdminApp() {
     const exists = await c.env.DB.prepare("SELECT id FROM providers WHERE id=?").bind(id).first<{ id: string }>();
     if (!exists) throw new GatewayError(404, "PROVIDER_NOT_FOUND", "Provider not found");
     await c.env.DB.prepare("DELETE FROM providers WHERE id=?").bind(id).run();
-    await Promise.all([c.env.CONFIG_CACHE.delete(`provider:${id}`), invalidateModelCache(c.env)]);
+    await invalidateModelCache(c.env);
     return c.json({ ok: true });
   });
 
@@ -661,7 +664,7 @@ export function createAdminApp() {
       body.metadata ? JSON.stringify(jsonObject(body.metadata)) : row.metadata_json,
       Math.floor(Date.now()/1000), row.id,
     ).run();
-    await Promise.all([c.env.CONFIG_CACHE.delete(`provider:${row.provider_id}`), invalidateModelCache(c.env)]);
+    await invalidateModelCache(c.env);
     c.executionCtx.waitUntil(Promise.allSettled([
       refreshCredentialModels(c.env, row.id), refreshCredentialQuota(c.env, row.id),
     ]).then(() => undefined));
@@ -676,7 +679,7 @@ export function createAdminApp() {
       c.env.DB.prepare("DELETE FROM quota_snapshots WHERE credential_id=?").bind(c.req.param("id")),
       c.env.DB.prepare("DELETE FROM credentials WHERE id=?").bind(c.req.param("id")),
     ]);
-    await Promise.all([c.env.CONFIG_CACHE.delete(`provider:${row.provider_id}`), invalidateModelCache(c.env)]);
+    await invalidateModelCache(c.env);
     return c.json({ ok: true });
   });
 
