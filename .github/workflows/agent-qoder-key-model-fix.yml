@@ -34,9 +34,9 @@ jobs:
           source_import = 'import type { PublicModel } from "../types";\\n\\n'
           typed_import = 'import type { SelectOption } from "naive-ui";\\nimport type { PublicModel } from "../types";\\n\\n'
           option_interface = 'export interface ModelSelectOption {\\n  label: string;\\n  value: string;\\n}\\n\\n'
-          if text.count(source_import) != 1 or text.count(option_interface) != 1:
+          if text.count(source_import) < 1 or text.count(option_interface) != 1:
               raise SystemExit("model option source context not found")
-          text = text.replace(source_import, typed_import).replace(option_interface, "")
+          text = text.replace(source_import, typed_import, 1).replace(option_interface, "")
           text = text.replace("): ModelSelectOption[] {", "): SelectOption[] {")
           path.write_text(text)
           PY
