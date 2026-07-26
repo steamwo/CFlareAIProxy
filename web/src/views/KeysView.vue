@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { h, onMounted, reactive, ref } from "vue";
+import { computed, h, onMounted, reactive, ref } from "vue";
 import { NAlert, NButton, NCard, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSpace, NSwitch, NTag, useMessage } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import { Copy, Plus, RefreshCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import { api, jsonBody } from "../api";
 import { formatTokens } from "../utils/format";
+import { normalizeAllowedModelSelection, publicModelOptions } from "../utils/model-selection";
 import type { GatewayKey, PublicModel } from "../types";
 
 const rows = ref<GatewayKey[]>([]);
@@ -18,6 +19,7 @@ const editing = ref<GatewayKey | null>(null);
 const message = useMessage();
 const tablePagination = { pageSize: 10, pageSizes: [10, 20, 50], showSizePicker: true, showQuickJumper: true };
 const form = reactive({ name: "", rpm: 60, maxConcurrency: 8, monthlyTokenLimit: 0, allowedModels: [] as string[], enabled: true });
+const modelOptions = computed(() => publicModelOptions(models.value));
 async function load() {
   loading.value = true;
   try {
@@ -28,12 +30,23 @@ async function load() {
   finally { loading.value = false; }
 }
 function create() { editing.value = null; Object.assign(form, { name: "", rpm: 60, maxConcurrency: 8, monthlyTokenLimit: 0, allowedModels: [], enabled: true }); modal.value = true; }
-function edit(row: GatewayKey) { editing.value = row; Object.assign(form, { name: row.name, rpm: row.rpm, maxConcurrency: row.max_concurrency, monthlyTokenLimit: row.monthly_token_limit, allowedModels: JSON.parse(row.allowed_models_json || "[]"), enabled: row.enabled === 1 }); modal.value = true; }
+function edit(row: GatewayKey) {
+  editing.value = row;
+  const storedModels = JSON.parse(row.allowed_models_json || "[]") as string[];
+  Object.assign(form, {
+    name: row.name, rpm: row.rpm, maxConcurrency: row.max_concurrency,
+    monthlyTokenLimit: row.monthly_token_limit,
+    allowedModels: normalizeAllowedModelSelection(storedModels, models.value),
+    enabled: row.enabled === 1,
+  });
+  modal.value = true;
+}
 async function save() {
   try {
-    if (editing.value) await api(`/keys/${editing.value.id}`, { method: "PATCH", body: jsonBody(form) });
+    const payload = { ...form, allowedModels: normalizeAllowedModelSelection(form.allowedModels, models.value) };
+    if (editing.value) await api(`/keys/${editing.value.id}`, { method: "PATCH", body: jsonBody(payload) });
     else {
-      const result = await api<{ id: string; key: string }>("/keys", { method: "POST", body: jsonBody(form) });
+      const result = await api<{ id: string; key: string }>("/keys", { method: "POST", body: jsonBody(payload) });
       createdKey.value = result.key;
       secretModal.value = true;
     }
@@ -61,7 +74,7 @@ onMounted(load);
   </page-header>
   <n-card><n-data-table :columns="columns" :data="rows" :loading="loading" :pagination="tablePagination" :scroll-x="960" /></n-card>
   <n-modal v-model:show="modal" preset="card" :title="editing ? '编辑网关密钥' : '创建网关密钥'" style="width:min(680px,calc(100vw - 32px))">
-    <n-form label-placement="top"><n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item><div class="grid-stats" style="grid-template-columns:repeat(3,1fr)"><n-form-item label="RPM"><n-input-number v-model:value="form.rpm" :min="1" /></n-form-item><n-form-item label="最大并发"><n-input-number v-model:value="form.maxConcurrency" :min="1" /></n-form-item><n-form-item label="月 Token（0=不限）"><n-input-number v-model:value="form.monthlyTokenLimit" :min="0" /></n-form-item></div><n-form-item label="允许模型（空=全部）"><n-select v-model:value="form.allowedModels" multiple filterable clearable :options="models.map(model => ({ label: model.id, value: model.id }))" /></n-form-item><n-form-item label="启用"><n-switch v-model:value="form.enabled" /></n-form-item><n-space justify="end"><n-button @click="modal = false">取消</n-button><n-button type="primary" @click="save">保存</n-button></n-space></n-form>
+    <n-form label-placement="top"><n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item><div class="grid-stats" style="grid-template-columns:repeat(3,1fr)"><n-form-item label="RPM"><n-input-number v-model:value="form.rpm" :min="1" /></n-form-item><n-form-item label="最大并发"><n-input-number v-model:value="form.maxConcurrency" :min="1" /></n-form-item><n-form-item label="月 Token（0=不限）"><n-input-number v-model:value="form.monthlyTokenLimit" :min="0" /></n-form-item></div><n-form-item label="允许模型（空=全部）"><n-select v-model:value="form.allowedModels" multiple filterable clearable :options="modelOptions" /></n-form-item><n-form-item label="启用"><n-switch v-model:value="form.enabled" /></n-form-item><n-space justify="end"><n-button @click="modal = false">取消</n-button><n-button type="primary" @click="save">保存</n-button></n-space></n-form>
   </n-modal>
   <n-modal v-model:show="secretModal" preset="card" title="保存新密钥" style="width:min(640px,calc(100vw - 32px))"><n-alert type="warning" :bordered="false">完整密钥只显示这一次，请立即复制到安全位置。</n-alert><n-input :value="createdKey" readonly class="mono" style="margin:16px 0"><template #suffix><n-button text @click="copy"><copy /></n-button></template></n-input><n-button block type="primary" @click="secretModal = false">我已保存</n-button></n-modal>
 </template>

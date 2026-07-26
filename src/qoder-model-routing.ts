@@ -24,6 +24,25 @@ export function discoveredModelAllowed(
   return typeof upstreamModel === "string" && allowedModels.has(`${QODER_PROVIDER_ID}/${upstreamModel}`);
 }
 
+export function normalizeAllowedModelNames(
+  allowedModels: readonly string[],
+  qoderAliases: ReadonlyMap<string, string>,
+): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  const legacyPrefix = `${QODER_PROVIDER_ID}/`;
+  for (const raw of allowedModels) {
+    const value = raw.trim();
+    if (!value) continue;
+    const upstreamModel = value.startsWith(legacyPrefix) ? value.slice(legacyPrefix.length) : "";
+    const normalized = upstreamModel ? qoderAliases.get(upstreamModel)?.trim() || value : value;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  return output;
+}
+
 export function sortModelRoutes<T extends { priority: number; weight: number; created_at: number }>(routes: T[]): T[] {
   return [...routes].sort((left, right) =>
     left.priority - right.priority

@@ -4,7 +4,7 @@ import { GatewayError } from "./errors";
 import {
   isOpenCodeAnonymousCredential, isOpenCodeAnonymousModel, openCodeAnonymousCredential, openCodeAnonymousCredentialRow,
 } from "./providers/opencode-anonymous";
-import { discoveredModelAllowed, publicDiscoveredModelId, QODER_PROVIDER_ID, sortModelRoutes } from "./qoder-model-routing";
+import { discoveredModelAllowed, normalizeAllowedModelNames, publicDiscoveredModelId, QODER_PROVIDER_ID, sortModelRoutes } from "./qoder-model-routing";
 import type {
   Credential,
   CredentialRow,
@@ -179,6 +179,35 @@ export async function gatewayKeyAllowsModel(env: Env, publicModel: string, allow
      GROUP BY model_id`,
   ).bind(publicModel).all<{ model_id: string }>();
   return result.results.some((row) => allowed.has(`${QODER_PROVIDER_ID}/${row.model_id}`));
+}
+
+async function loadQoderAllowedModelAliases(env: Env): Promise<Map<string, string>> {
+  const result = await env.DB.prepare(
+    `SELECT model_id,display_name,discovered_at FROM discovered_models
+     WHERE provider_id='qoder' AND credential_id='' AND enabled=1
+     ORDER BY discovered_at DESC,model_id ASC`,
+  ).all<{ model_id: string; display_name: string; discovered_at: number }>();
+  const aliases = new Map<string, string>();
+  for (const row of result.results) {
+    const displayName = row.display_name.trim();
+    if (displayName && !aliases.has(row.model_id)) aliases.set(row.model_id, displayName);
+  }
+  return aliases;
+}
+
+export async function normalizeGatewayAllowedModelLists(
+  env: Env,
+  allowedModelLists: readonly (readonly string[])[],
+): Promise<string[][]> {
+  const normalized = allowedModelLists.map((models) => normalizeAllowedModelNames(models, new Map()));
+  const legacyPrefix = `${QODER_PROVIDER_ID}/`;
+  if (!normalized.some((models) => models.some((model) => model.startsWith(legacyPrefix)))) return normalized;
+  const aliases = await loadQoderAllowedModelAliases(env);
+  return normalized.map((models) => normalizeAllowedModelNames(models, aliases));
+}
+
+export async function normalizeGatewayAllowedModels(env: Env, allowedModels: readonly string[]): Promise<string[]> {
+  return (await normalizeGatewayAllowedModelLists(env, [allowedModels]))[0] ?? [];
 }
 
 export async function listRoutesForModel(
@@ -585,6 +614,7 @@ export async function createGatewayKey(
   for (const byte of random) encoded += byte.toString(16).padStart(2, "0");
   const key = `sk_cfapi_${encoded}`;
   const now = Math.floor(Date.now() / 1000);
+  const allowedModels = await normalizeGatewayAllowedModels(env, input.allowedModels ?? []);
   await env.DB.prepare(
     `INSERT INTO gateway_keys
       (id, name, key_prefix, key_hash, enabled, rpm, max_concurrency,
@@ -599,7 +629,7 @@ export async function createGatewayKey(
       input.rpm ?? 60,
       input.maxConcurrency ?? 8,
       input.monthlyTokenLimit ?? 0,
-      JSON.stringify(input.allowedModels ?? []),
+      JSON.stringify(allowedModels),
       input.expiresAt ?? null,
       now,
       now,

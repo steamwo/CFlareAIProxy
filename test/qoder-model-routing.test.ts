@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { gatewayKeyAllowsModel, listRoutesForModel } from "../src/db";
+import { gatewayKeyAllowsModel, listRoutesForModel, normalizeGatewayAllowedModelLists, normalizeGatewayAllowedModels } from "../src/db";
 import {
   discoveredModelAllowed,
   discoveryCredentialScopes,
+  normalizeAllowedModelNames,
   publicDiscoveredModelId,
   sortModelRoutes,
 } from "../src/qoder-model-routing";
@@ -74,6 +75,37 @@ describe("Qoder channel model routing", () => {
     expect(discoveredModelAllowed(model, new Set(["Claude Sonnet"]))).toBe(true);
     expect(discoveredModelAllowed(model, new Set(["qoder/anon-a8f3"]))).toBe(true);
     expect(discoveredModelAllowed(model, new Set(["qoder/another-model"]))).toBe(false);
+  });
+
+  it("normalizes legacy Qoder model restrictions and removes duplicates", () => {
+    const aliases = new Map([["anon-a8f3", "Claude Sonnet"]]);
+    expect(normalizeAllowedModelNames(
+      [" qoder/anon-a8f3 ", "Claude Sonnet", "codex/gpt-5", "", "qoder/unknown"],
+      aliases,
+    )).toEqual(["Claude Sonnet", "codex/gpt-5", "qoder/unknown"]);
+  });
+
+  it("normalizes multiple gateway-key model lists with one channel lookup", async () => {
+    let queries = 0;
+    const db = new FakeDatabase((sql) => {
+      queries += 1;
+      expect(sql).toContain("credential_id='' AND enabled=1");
+      return { all: [
+        { model_id: "anon-a8f3", display_name: "Claude Sonnet", discovered_at: 20 },
+        { model_id: "anon-a8f3", display_name: "Old Name", discovered_at: 10 },
+      ] };
+    });
+    const env = envWithDatabase(db);
+    await expect(normalizeGatewayAllowedModelLists(env, [
+      ["qoder/anon-a8f3", "codex/gpt-5"],
+      ["qoder/anon-a8f3", "Claude Sonnet"],
+    ])).resolves.toEqual([
+      ["Claude Sonnet", "codex/gpt-5"],
+      ["Claude Sonnet"],
+    ]);
+    expect(queries).toBe(1);
+    await expect(normalizeGatewayAllowedModels(env, ["codex/gpt-5"])).resolves.toEqual(["codex/gpt-5"]);
+    expect(queries).toBe(1);
   });
 
   it("sorts automatic Qoder routes together with explicit provider routes", () => {
