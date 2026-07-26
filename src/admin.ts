@@ -250,11 +250,42 @@ async function invalidateModelCache(env: Env): Promise<void> {
   ]);
 }
 
+/**
+ * The only admin endpoints reachable without a session. Everything else under /admin/api
+ * is protected, and the guard below decides by consulting this set rather than by relying
+ * on Hono's registration order — a route added above the middleware used to become public
+ * silently, which is a bad property for an admin surface to have.
+ */
+const PUBLIC_ADMIN_PATHS = new Set([
+  "/admin/api/version",
+  "/admin/api/login",
+  "/admin/api/session",
+  "/admin/api/logout",
+]);
+
 export function createAdminApp() {
   // Keep the complete admin route tree on an explicit base path. Using
   // strict:false makes /admin and /admin/ equivalent and avoids a fragile
   // redirect + nested-root combination in local Wrangler development.
   const app = new Hono<{ Bindings: Env }>({ strict: false }).basePath("/admin");
+
+  app.use("/api/*", async (c, next) => {
+    // strict:false treats /admin/api/x and /admin/api/x/ as the same route, so normalise
+    // the trailing slash before matching the allow-list.
+    const path = new URL(c.req.url).pathname.replace(/\/+$/, "") || "/";
+    if (PUBLIC_ADMIN_PATHS.has(path)) {
+      await next();
+      return;
+    }
+    try {
+      await requireAdmin(c.req.raw, c.env);
+      c.header("cache-control", "no-store");
+      await next();
+    } catch (error) {
+      return errorResponse(error);
+    }
+  });
+
   app.get("/api/version", (c) => c.json({ service: c.env.APP_NAME ?? "CFlareAIProxy", version: ADMIN_UI_VERSION }));
 
   app.post("/api/login", async (c) => {
@@ -280,16 +311,6 @@ export function createAdminApp() {
     c.header("set-cookie", sessionCookie("", c.req.raw, 0));
     c.header("cache-control", "no-store");
     return c.json({ ok: true });
-  });
-
-  app.use("/api/*", async (c, next) => {
-    try {
-      await requireAdmin(c.req.raw, c.env);
-      c.header("cache-control", "no-store");
-      await next();
-    } catch (error) {
-      return errorResponse(error);
-    }
   });
 
   app.get("/api/overview", async (c) => {

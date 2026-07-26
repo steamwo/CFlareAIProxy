@@ -45,6 +45,65 @@ describe("admin route mounting", () => {
   });
 });
 
+describe("admin API authentication", () => {
+  it("leaves exactly the four public endpoints reachable without a session", async () => {
+    const app = createTestApp();
+
+    // /api/version answers anonymously; the other three report their own 401 rather than
+    // being rejected by the guard, which is what keeps the login flow usable.
+    expect((await app.request("https://example.test/admin/api/version", {}, env)).status).toBe(200);
+    expect((await app.request("https://example.test/admin/api/session", {}, env)).status).toBe(401);
+
+    const logout = await app.request("https://example.test/admin/api/logout", { method: "POST" }, env);
+    expect(logout.status).toBe(200);
+  });
+
+  it("keeps the public surface to exactly those four, whatever gets registered", async () => {
+    // Enumerating Hono's own route table means a route added anywhere — before or after
+    // the guard, in this file or another — is covered automatically. Asserting against a
+    // hand-written list of paths would go stale the moment someone adds an endpoint.
+    const adminApp = createAdminApp();
+    const app = createTestApp();
+    const seen = new Set<string>();
+    const publicPaths: string[] = [];
+
+    for (const route of adminApp.routes) {
+      // Hono registers middleware as ALL /admin/api/*; only probe concrete handlers.
+      if (route.path.includes("*") || seen.has(route.path)) continue;
+      seen.add(route.path);
+      const url = `https://example.test${route.path.replace(/:[^/]+/g, "probe")}`;
+      const response = await app.request(url, { method: route.method === "ALL" ? "GET" : route.method }, env);
+      if (response.status !== 401) publicPaths.push(`${route.method} ${route.path}`);
+    }
+
+    // /api/login and /api/session answer 401 of their own accord (bad credentials, no
+    // session), so they are indistinguishable from a guarded route by status alone and
+    // are covered by the dedicated test above instead.
+    expect(seen.size).toBeGreaterThan(10);
+    expect(publicPaths.sort()).toEqual([
+      "GET /admin/api/version",
+      "POST /admin/api/logout",
+    ]);
+  });
+
+  it("protects the routes index.ts attaches after createAdminApp returns", async () => {
+    // These live on the worker's real app, mounted after the factory hands the instance
+    // back. Asserting through createAdminApp alone would be vacuous: the guard rejects
+    // unregistered paths with 401 too, so a 401 there proves nothing about wiring.
+    const { default: worker } = await import("./index");
+    for (const path of ["/admin/api/settings/logging", "/admin/api/credentials/paged", "/admin/api/overview-v2"]) {
+      const response = await worker.fetch(new Request(`https://example.test${path}`), env, {} as ExecutionContext);
+      expect(response.status, `${path} must require a session`).toBe(401);
+    }
+  });
+
+  it("does not let a trailing slash bypass the guard", async () => {
+    const app = createTestApp();
+    const response = await app.request("https://example.test/admin/api/channels/", {}, env);
+    expect(response.status).toBe(401);
+  });
+});
+
 describe("built-in channel updates", () => {
   /** Signs in through the real handler so the test exercises the deployed auth path. */
   async function signedInCookie(app: ReturnType<typeof createTestApp>, testEnv: Env): Promise<string> {
