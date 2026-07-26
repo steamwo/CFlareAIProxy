@@ -12,8 +12,9 @@ import { GatewayError, errorResponse } from "./errors";
 import { exchangeOAuthCode, pollOAuth, startOAuth } from "./oauth";
 import { listDiscoveredModels, refreshAllModels, refreshCredentialModels, refreshProviderModels } from "./models";
 import { listQuotaSnapshots, refreshAllQuotas, refreshCredentialQuota } from "./quota";
+import type { LoginThrottleCheck } from "./rate-limiter";
 import type { CredentialRow, Env, GatewayEndpoint, GatewayKeyRow, ModelRouteRow, PoolStrategy, ProviderConfig, ProviderRow } from "./types";
-import { normalizeBaseUrl, parseJson, timingSafeEqualText } from "./utils";
+import { normalizeBaseUrl, parseJson, readJsonBody, timingSafeEqualText } from "./utils";
 import { providerFetch, testProviderProxy, testSystemProxy, validateProxyUrl } from "./upstream-fetch";
 import { getProviderHealthMap, recordProviderSuccess } from "./routing-health";
 
@@ -81,6 +82,63 @@ async function readSession(request: Request, env: Env): Promise<AdminSession | n
   } catch {
     return null;
   }
+}
+
+/**
+ * Login throttling lives in a single named RateLimiter instance rather than in KV.
+ *
+ * KV is the wrong store here for a reason specific to this threat: a brute force is by
+ * definition a high-frequency write stream against one key, and KV caps writes to a key at
+ * roughly one per second and is only eventually consistent — the attacker's own traffic
+ * pattern is exactly what makes the counter unreliable. A SQLite-backed DO is strongly
+ * consistent and serialises attempts. The cost is one DO round trip per login attempt,
+ * which is negligible for a hand-driven endpoint. Reads (the common case: a successful or
+ * merely-wrong login) touch no alarm and write no rows; only failures write.
+ */
+const LOGIN_THROTTLE_DO_NAME = "admin-login";
+
+/**
+ * Counting keys. Per-IP is the primary control, since it is the only one that isolates the
+ * attacker from everyone else. It is bypassable with a proxy pool, so a global counter backs
+ * it up. Deliberately absent: a per-username key — the admin username is effectively a
+ * singleton here, so keying on it is indistinguishable from a global key except that it hands
+ * an attacker a trivial way to lock the real operator out by name.
+ */
+function loginScopes(request: Request): string[] {
+  const ip = request.headers.get("cf-connecting-ip")?.trim();
+  return [`ip:${ip || "unknown"}`, "global"];
+}
+
+async function callLoginThrottle<T>(env: Env, path: string, scopes: string[]): Promise<T | null> {
+  // No binding at all (unit tests, a stripped local env): throttling is skipped rather than
+  // making the console unreachable. A bound-but-failing DO is handled by the callers.
+  const namespace = env.RATE_LIMITER;
+  if (!namespace) return null;
+  const stub = namespace.get(namespace.idFromName(LOGIN_THROTTLE_DO_NAME));
+  const response = await stub.fetch(`https://do.internal${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ scopes }),
+  });
+  if (!response.ok) throw new Error(`login throttle returned ${response.status}`);
+  return await response.json() as T;
+}
+
+const LOGIN_LOCKED_MESSAGE = "登录尝试过于频繁，请稍后再试";
+
+async function assertLoginAllowed(env: Env, scopes: string[]): Promise<string[]> {
+  let check: LoginThrottleCheck | null;
+  try {
+    check = await callLoginThrottle<LoginThrottleCheck>(env, "/login/check", scopes);
+  } catch {
+    // Fail closed: an unreadable counter must not become a way to switch throttling off.
+    throw new GatewayError(503, "ADMIN_LOGIN_THROTTLED", LOGIN_LOCKED_MESSAGE, "authentication_error");
+  }
+  if (!check) return [];
+  if (!check.allowed) {
+    throw new GatewayError(429, "ADMIN_LOGIN_THROTTLED", LOGIN_LOCKED_MESSAGE, "authentication_error");
+  }
+  return check.trackedScopes;
 }
 
 function adminCredentials(env: Env): { username: string; password: string } {
@@ -279,6 +337,329 @@ async function invalidateModelCache(env: Env): Promise<void> {
 }
 
 /**
+ * Configuration backup and restore.
+ *
+ * Only operator-authored configuration is covered. The runtime tables are deliberately left
+ * out because they are all reproducible and would otherwise dominate the payload:
+ * request_logs / request_activity_5m (traffic history, swept by the retention cron),
+ * discovered_models (re-populated by model discovery against the restored credentials),
+ * quota_snapshots (re-fetched from the upstreams), and oauth_sessions / usage_flush_dedupe
+ * (short-lived transient state). The reasons ship inside the export as `excludedTables` so a
+ * backup file explains its own scope without the reader consulting this source.
+ *
+ * Ciphertext columns are copied verbatim and never decrypted, so the file itself holds no
+ * plaintext secret. The flip side is that a restore is only meaningful into a deployment
+ * holding the same MASTER_KEY; under a different key the credentials restore but cannot be
+ * decrypted. That is a deliberate trade: an export that decrypted secrets would turn every
+ * backup file into a full credential dump.
+ *
+ * gateway_keys.key_hash is exported exactly as stored. The hash is irreversible, but it is
+ * also the only value the gateway ever compares an incoming key against — so client keys
+ * issued before the backup keep working after a restore. There is nothing to re-issue and
+ * nothing to redistribute; operators should not rotate keys "because the hash looks opaque".
+ */
+const BACKUP_FORMAT = "cflare-api-backup";
+const BACKUP_FORMAT_VERSION = 1;
+
+/**
+ * Restore overwrites row-by-row on primary key and leaves rows absent from the file alone;
+ * it never truncates a table first.
+ *
+ * Two reasons for upsert over replace-all. First, `DELETE FROM providers` cascades into
+ * credentials, model_routes, provider_proxies, discovered_models and quota_snapshots, so a
+ * destructive restore from a slightly stale file would drop configuration the file simply
+ * did not know about — the opposite of what someone reaching for a backup wants. Second, the
+ * common partial case ("a provider was deleted by mistake") is served correctly: the missing
+ * rows come back and everything else keeps its current state.
+ *
+ * Skip-on-conflict was rejected because it makes restore a no-op exactly when it matters —
+ * repairing rows that exist but were corrupted. Overwrite also makes the operation
+ * idempotent: importing the same file twice converges on the same state.
+ */
+const BACKUP_CONFLICT_POLICY = "overwrite-by-primary-key";
+
+/**
+ * Backups intentionally ignore ADMIN_LIST_LIMIT — a truncated backup that restores a subset
+ * of the configuration is worse than no backup at all. These caps exist for a different
+ * reason: the export must fit in one Worker response, and the import must fit in one
+ * DB.batch() (a single implicit transaction). Splitting either across calls would give up
+ * exactly the atomicity this feature is for, so an oversized dataset is reported as an error
+ * instead of being silently chunked. The limits are far above any hand-maintained
+ * configuration; hitting one means something is writing config rows programmatically.
+ */
+const BACKUP_MAX_TABLE_ROWS = 20_000;
+const BACKUP_MAX_TOTAL_ROWS = 50_000;
+const BACKUP_MAX_IMPORT_BYTES = 32 * 1024 * 1024;
+
+type BackupValue = string | number | null;
+type BackupColumnType = "text" | "int" | "textOrNull" | "intOrNull";
+
+interface BackupColumn {
+  readonly name: string;
+  readonly type: BackupColumnType;
+}
+
+interface BackupTable {
+  readonly name: string;
+  /** Conflict target for the restore upsert. */
+  readonly primaryKey: readonly string[];
+  readonly columns: readonly BackupColumn[];
+}
+
+/**
+ * Columns are enumerated rather than taken from `SELECT *` so that the restore path can
+ * build statements from a fixed allow-list: a table name or column name coming from an
+ * uploaded file never reaches the SQL text. A migration that adds a configuration column
+ * must extend this list, otherwise the column silently drops out of backups.
+ *
+ * Order matters on import: providers is first because credentials, model_routes and
+ * provider_proxies all carry a foreign key onto it.
+ */
+const BACKUP_TABLES: readonly BackupTable[] = [
+  {
+    name: "providers",
+    primaryKey: ["id"],
+    columns: [
+      { name: "id", type: "text" }, { name: "name", type: "text" }, { name: "kind", type: "text" },
+      { name: "base_url", type: "text" }, { name: "enabled", type: "int" }, { name: "pool_strategy", type: "text" },
+      { name: "endpoints_json", type: "text" }, { name: "auth_json", type: "text" },
+      { name: "headers_json", type: "text" }, { name: "options_json", type: "text" },
+      { name: "created_at", type: "int" }, { name: "updated_at", type: "int" },
+    ],
+  },
+  {
+    name: "credentials",
+    primaryKey: ["id"],
+    columns: [
+      { name: "id", type: "text" }, { name: "provider_id", type: "text" }, { name: "label", type: "text" },
+      { name: "auth_type", type: "text" }, { name: "secret_ciphertext", type: "text" },
+      { name: "refresh_ciphertext", type: "textOrNull" }, { name: "expires_at", type: "intOrNull" },
+      { name: "enabled", type: "int" }, { name: "priority", type: "int" }, { name: "weight", type: "int" },
+      { name: "max_concurrency", type: "int" }, { name: "metadata_json", type: "text" },
+      { name: "last_error", type: "textOrNull" }, { name: "last_used_at", type: "intOrNull" },
+      { name: "created_at", type: "int" }, { name: "updated_at", type: "int" },
+    ],
+  },
+  {
+    name: "model_routes",
+    primaryKey: ["id"],
+    columns: [
+      { name: "id", type: "text" }, { name: "public_model", type: "text" }, { name: "provider_id", type: "text" },
+      { name: "upstream_model", type: "text" }, { name: "endpoint", type: "text" }, { name: "enabled", type: "int" },
+      { name: "priority", type: "int" }, { name: "weight", type: "int" }, { name: "options_json", type: "text" },
+      { name: "created_at", type: "int" }, { name: "updated_at", type: "int" },
+    ],
+  },
+  {
+    name: "gateway_keys",
+    primaryKey: ["id"],
+    columns: [
+      { name: "id", type: "text" }, { name: "name", type: "text" }, { name: "key_prefix", type: "text" },
+      { name: "key_hash", type: "text" }, { name: "enabled", type: "int" }, { name: "rpm", type: "int" },
+      { name: "max_concurrency", type: "int" }, { name: "monthly_token_limit", type: "int" },
+      { name: "allowed_models_json", type: "text" }, { name: "expires_at", type: "intOrNull" },
+      { name: "created_at", type: "int" }, { name: "updated_at", type: "int" },
+    ],
+  },
+  {
+    name: "model_prices",
+    primaryKey: ["provider_id", "model"],
+    columns: [
+      { name: "provider_id", type: "text" }, { name: "model", type: "text" },
+      { name: "input_micros_per_million", type: "int" }, { name: "output_micros_per_million", type: "int" },
+      { name: "cache_micros_per_million", type: "int" }, { name: "updated_at", type: "int" },
+    ],
+  },
+  {
+    name: "provider_proxies",
+    primaryKey: ["provider_id"],
+    columns: [
+      { name: "provider_id", type: "text" }, { name: "enabled", type: "int" }, { name: "bridge_url", type: "text" },
+      { name: "proxy_url_ciphertext", type: "textOrNull" }, { name: "bridge_token_ciphertext", type: "textOrNull" },
+      { name: "no_proxy_json", type: "text" }, { name: "connect_timeout_ms", type: "int" },
+      { name: "request_timeout_ms", type: "int" }, { name: "created_at", type: "int" }, { name: "updated_at", type: "int" },
+    ],
+  },
+  {
+    name: "system_settings",
+    primaryKey: ["key"],
+    columns: [
+      { name: "key", type: "text" }, { name: "value_ciphertext", type: "textOrNull" },
+      { name: "value_json", type: "text" }, { name: "updated_at", type: "int" },
+    ],
+  },
+];
+
+const BACKUP_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
+  request_logs: "请求历史，由保留任务定期清理，非配置数据",
+  request_activity_5m: "5 分钟活跃度聚合，可由后续流量重新累积",
+  discovered_models: "模型发现结果，恢复凭据后可重新发现",
+  quota_snapshots: "配额快照，可向上游重新拉取",
+  oauth_sessions: "登录流程的临时会话，1 小时内过期",
+  usage_flush_dedupe: "用量写入去重标记，属于运行时状态",
+};
+
+interface BackupDocument {
+  format: string;
+  version: number;
+  exportedAt: number;
+  conflictPolicy: string;
+  excludedTables: Readonly<Record<string, string>>;
+  tables: Record<string, Record<string, BackupValue>[]>;
+}
+
+/** Quoting keeps identifiers such as system_settings."key" valid regardless of SQLite keywords. */
+function quoteIdentifier(name: string): string {
+  return `"${name}"`;
+}
+
+function toBackupValue(value: unknown, table: string, column: string): BackupValue {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  // A configuration column holding something else means the schema drifted away from the
+  // spec above; emitting it would produce a backup that cannot be restored.
+  throw new GatewayError(
+    500,
+    "BACKUP_UNSUPPORTED_VALUE",
+    `导出失败：${table}.${column} 的值类型无法序列化`,
+    "internal_error",
+  );
+}
+
+async function exportBackup(env: Env): Promise<BackupDocument> {
+  // One extra row is selected so an over-cap table is detectable without counting the table.
+  const results = await Promise.all(BACKUP_TABLES.map((table) => env.DB.prepare(
+    `SELECT ${table.columns.map((column) => quoteIdentifier(column.name)).join(",")} `
+    + `FROM ${quoteIdentifier(table.name)} LIMIT ${BACKUP_MAX_TABLE_ROWS + 1}`,
+  ).all<Record<string, unknown>>()));
+
+  const tables: Record<string, Record<string, BackupValue>[]> = {};
+  for (const [index, table] of BACKUP_TABLES.entries()) {
+    const rows = results[index]?.results ?? [];
+    if (rows.length > BACKUP_MAX_TABLE_ROWS) {
+      throw new GatewayError(
+        413,
+        "BACKUP_TOO_LARGE",
+        `${table.name} 超过 ${BACKUP_MAX_TABLE_ROWS} 行，无法在单次响应内完整导出`,
+        "invalid_request_error",
+      );
+    }
+    tables[table.name] = rows.map((row) => {
+      const output: Record<string, BackupValue> = {};
+      for (const column of table.columns) output[column.name] = toBackupValue(row[column.name], table.name, column.name);
+      return output;
+    });
+  }
+
+  return {
+    format: BACKUP_FORMAT,
+    version: BACKUP_FORMAT_VERSION,
+    exportedAt: Math.floor(Date.now() / 1000),
+    conflictPolicy: BACKUP_CONFLICT_POLICY,
+    excludedTables: BACKUP_EXCLUDED_TABLES,
+    tables,
+  };
+}
+
+function invalidBackup(message: string): GatewayError {
+  return new GatewayError(400, "BACKUP_INVALID", message, "invalid_request_error");
+}
+
+function readBackupValue(raw: unknown, column: BackupColumn, table: string, index: number): BackupValue {
+  const nullable = column.type === "textOrNull" || column.type === "intOrNull";
+  if (raw === null || raw === undefined) {
+    if (nullable) return null;
+    throw invalidBackup(`${table}[${index}].${column.name} 不能为空`);
+  }
+  if (column.type === "text" || column.type === "textOrNull") {
+    if (typeof raw !== "string") throw invalidBackup(`${table}[${index}].${column.name} 必须是字符串`);
+    return raw;
+  }
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    throw invalidBackup(`${table}[${index}].${column.name} 必须是数字`);
+  }
+  return raw;
+}
+
+function parseBackupTable(table: BackupTable, raw: unknown): Record<string, BackupValue>[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw invalidBackup(`tables.${table.name} 必须是数组`);
+  if (raw.length > BACKUP_MAX_TABLE_ROWS) throw invalidBackup(`tables.${table.name} 行数超过 ${BACKUP_MAX_TABLE_ROWS}`);
+
+  const known = new Set(table.columns.map((column) => column.name));
+  const primaryKeys = new Set<string>();
+  return raw.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw invalidBackup(`tables.${table.name}[${index}] 必须是对象`);
+    }
+    const record: Record<string, unknown> = { ...entry };
+    for (const key of Object.keys(record)) {
+      // An unrecognised column is either tampering or a file from a schema this build does
+      // not know; both are safer to reject than to import partially.
+      if (!known.has(key)) throw invalidBackup(`tables.${table.name}[${index}] 含未知字段 ${key}`);
+    }
+    const row: Record<string, BackupValue> = {};
+    for (const column of table.columns) row[column.name] = readBackupValue(record[column.name], column, table.name, index);
+
+    const identity = table.primaryKey.map((name) => {
+      const value = row[name];
+      if (typeof value === "string" && !value) throw invalidBackup(`tables.${table.name}[${index}].${name} 不能是空字符串`);
+      return String(value);
+    }).join(String.fromCharCode(31));
+    // D1 rejects the whole batch on a duplicate upsert target, so catching it here yields a
+    // useful message instead of an opaque constraint failure.
+    if (primaryKeys.has(identity)) throw invalidBackup(`tables.${table.name}[${index}] 主键重复`);
+    primaryKeys.add(identity);
+    return row;
+  });
+}
+
+function backupUpsertSql(table: BackupTable): string {
+  const columns = table.columns.map((column) => quoteIdentifier(column.name));
+  const assignments = table.columns
+    .filter((column) => !table.primaryKey.includes(column.name))
+    .map((column) => `${quoteIdentifier(column.name)}=excluded.${quoteIdentifier(column.name)}`);
+  const conflict = table.primaryKey.map(quoteIdentifier).join(",");
+  return `INSERT INTO ${quoteIdentifier(table.name)}(${columns.join(",")}) `
+    + `VALUES(${columns.map(() => "?").join(",")}) `
+    + `ON CONFLICT(${conflict}) DO UPDATE SET ${assignments.join(",")}`;
+}
+
+async function importBackup(env: Env, body: Record<string, unknown>): Promise<Record<string, number>> {
+  if (body.format !== BACKUP_FORMAT) throw invalidBackup("不是 CFlareAIProxy 备份文件");
+  if (body.version !== BACKUP_FORMAT_VERSION) {
+    throw invalidBackup(`不支持的备份格式版本 ${String(body.version)}，当前仅支持 ${BACKUP_FORMAT_VERSION}`);
+  }
+  const tables = body.tables;
+  if (!tables || typeof tables !== "object" || Array.isArray(tables)) throw invalidBackup("tables 必须是对象");
+  const tablesRecord: Record<string, unknown> = { ...tables };
+  const known = new Set(BACKUP_TABLES.map((table) => table.name));
+  for (const key of Object.keys(tablesRecord)) {
+    if (!known.has(key)) throw invalidBackup(`备份包含未知表 ${key}`);
+  }
+
+  const statements: D1PreparedStatement[] = [];
+  const counts: Record<string, number> = {};
+  let total = 0;
+  for (const table of BACKUP_TABLES) {
+    const rows = parseBackupTable(table, tablesRecord[table.name]);
+    counts[table.name] = rows.length;
+    total += rows.length;
+    if (total > BACKUP_MAX_TOTAL_ROWS) throw invalidBackup(`备份总行数超过 ${BACKUP_MAX_TOTAL_ROWS}，无法在单个事务内恢复`);
+    const sql = backupUpsertSql(table);
+    for (const row of rows) statements.push(env.DB.prepare(sql).bind(...table.columns.map((column) => row[column.name] ?? null)));
+  }
+
+  if (!statements.length) throw invalidBackup("备份文件不包含任何配置行");
+  // One batch is one implicit transaction: a foreign-key violation or a constraint failure
+  // anywhere rolls the entire restore back, so the gateway never runs on half a config.
+  await env.DB.batch(statements);
+  await invalidateModelCache(env);
+  return counts;
+}
+
+/**
  * The only admin endpoints reachable without a session. Everything else under /admin/api
  * is protected, and the guard below decides by consulting this set rather than by relying
  * on Hono's registration order — a route added above the middleware used to become public
@@ -317,13 +698,28 @@ export function createAdminApp() {
   app.get("/api/version", (c) => c.json({ service: c.env.APP_NAME ?? "CFlareAIProxy", version: ADMIN_UI_VERSION }));
 
   app.post("/api/login", async (c) => {
+    const scopes = loginScopes(c.req.raw);
+    // Checked before the credential comparison, so a locked scope is rejected identically
+    // for a right and a wrong password — the lock leaks nothing but its own existence.
+    const trackedScopes = await assertLoginAllowed(c.env, scopes);
+
+    // Unlike every other handler this one tolerates a malformed body instead of reporting
+    // 400: a login attempt that cannot be parsed is still a failed attempt, and answering
+    // differently would tell an attacker which requests reached the credential check.
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
     const username = typeof body.username === "string" ? body.username.trim() : "";
     const password = typeof body.password === "string" ? body.password : "";
     const expected = adminCredentials(c.env);
-    if (!expected.password || !timingSafeEqualText(username, expected.username) || !timingSafeEqualText(password, expected.password)) {
+    const usernameMatches = timingSafeEqualText(username, expected.username);
+    const passwordMatches = timingSafeEqualText(password, expected.password);
+    if (!expected.password || !usernameMatches || !passwordMatches) {
+      await callLoginThrottle(c.env, "/login/fail", scopes).catch(() => null);
+      // One message for every failure mode: an unknown username and a wrong password must
+      // stay indistinguishable, and neither reveals the remaining attempt budget.
       throw new GatewayError(401, "ADMIN_LOGIN_FAILED", "用户名或密码错误", "authentication_error");
     }
+    // Only write when there is something to clear; a clean login must not cost a DO write.
+    if (trackedScopes.length) await callLoginThrottle(c.env, "/login/reset", trackedScopes).catch(() => null);
     const session = await createSessionToken(expected.username, c.env);
     c.header("set-cookie", sessionCookie(session.token, c.req.raw));
     c.header("cache-control", "no-store");
@@ -990,6 +1386,21 @@ export function createAdminApp() {
     await c.env.DB.prepare("DELETE FROM model_prices WHERE provider_id=? AND model=?")
       .bind(c.req.param("provider"), decodeURIComponent(c.req.param("model"))).run();
     return c.json({ ok: true });
+  });
+
+  app.get("/api/backup/export", async (c) => {
+    const document = await exportBackup(c.env);
+    // Content-Disposition makes a plain browser navigation save a usable file; the console
+    // can still fetch and read the JSON normally.
+    c.header("content-disposition", `attachment; filename="cflare-api-backup-${document.exportedAt}.json"`);
+    c.header("cache-control", "no-store");
+    return c.json(document);
+  });
+  app.post("/api/backup/import", async (c) => {
+    // readJsonBody caps the payload before it is buffered; adminJsonBody has no size guard
+    // and a restore body is the one admin request that can legitimately be megabytes.
+    const body = await readJsonBody(c.req.raw, BACKUP_MAX_IMPORT_BYTES);
+    return c.json({ ok: true, imported: await importBackup(c.env, body) });
   });
 
   app.get("/api/logs", async (c) => {

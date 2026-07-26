@@ -1,3 +1,4 @@
+import { dispatchAlert } from "./alerts";
 import type { Env, ModelRouteRow } from "./types";
 import { parseJson, truncate } from "./utils";
 
@@ -233,6 +234,25 @@ export async function recordProviderFailure(
     // into a single KV write instead of one write each.
     memoSet(mirrorMemo, providerId, state);
     await env.CONFIG_CACHE.put(key(providerId), JSON.stringify(state), { expirationTtl: STATE_TTL_SECONDS }).catch(() => undefined);
+  }
+  // Fired on every open breaker, not only on the closed -> open transition: a provider that
+  // stays broken re-arms its backoff repeatedly, and the alert dedupe window (not this call
+  // site) decides how often that becomes a notification, so the operator still gets a
+  // periodic "still down" reminder instead of a single edge-triggered message.
+  if (state.disabledUntil > now) {
+    dispatchAlert(env, {
+      type: "provider_circuit_open",
+      severity: "critical",
+      target: providerId,
+      title: `渠道 ${providerId} 已被熔断`,
+      detail: `连续 ${failures} 次失败，已暂停调度至 ${new Date(state.disabledUntil).toISOString()}。最近错误：${state.lastError ?? "未知"}`,
+      context: {
+        providerId,
+        failures,
+        disabledUntil: state.disabledUntil,
+        lastStatus: status,
+      },
+    });
   }
   return publicState(state);
 }

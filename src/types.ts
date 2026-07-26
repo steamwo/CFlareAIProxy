@@ -29,6 +29,8 @@ export interface Env {
   USAGE_QUEUE: UsageQueueBinding;
   ASSETS: Fetcher;
   MASTER_KEY: string;
+  /** Retired MASTER_KEY kept during a rotation so existing ciphertext stays readable. */
+  MASTER_KEY_PREVIOUS?: string;
   ADMIN_TOKEN: string;
   ADMIN_USERNAME?: string;
   ADMIN_PASSWORD?: string;

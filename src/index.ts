@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createAdminApp } from "./admin";
 import { AccountPool } from "./account-pool";
+import {
+  deleteAlertSettings, getAlertSettings, sendAlert, updateAlertSettings, validateWebhookUrl,
+} from "./alerts";
 import { BUILTIN_CHANNELS } from "./builtin-channels";
 import { buildCodexClientModelsResponse } from "./codex-client-models";
 import { authenticateGatewayKey, getCredential, listModels } from "./db";
@@ -91,6 +94,44 @@ adminApp.put("/api/settings/logging", async (c) => {
     ok: true,
     data: await updateLoggingSettings(c.env, { requestLoggingEnabled, level }),
   });
+});
+
+adminApp.get("/api/settings/alerts", async (c) => c.json({ data: await getAlertSettings(c.env) }));
+adminApp.put("/api/settings/alerts", async (c) => {
+  const body: Record<string, unknown> = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  if (body.webhookUrl !== undefined && typeof body.webhookUrl !== "string") {
+    throw new GatewayError(400, "ALERT_WEBHOOK_INVALID", "告警 Webhook 必须是字符串", "invalid_request_error");
+  }
+  if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+    throw new GatewayError(400, "ALERT_ENABLED_INVALID", "告警开关必须是布尔值", "invalid_request_error");
+  }
+  if (body.dedupeWindowMinutes !== undefined && typeof body.dedupeWindowMinutes !== "number") {
+    throw new GatewayError(400, "ALERT_WINDOW_INVALID", "去重窗口必须是分钟数", "invalid_request_error");
+  }
+  const webhookUrl = typeof body.webhookUrl === "string" ? body.webhookUrl.trim() : undefined;
+  if (webhookUrl) validateWebhookUrl(webhookUrl);
+  return c.json({
+    ok: true,
+    data: await updateAlertSettings(c.env, {
+      ...(webhookUrl === undefined ? {} : { webhookUrl }),
+      ...(typeof body.enabled === "boolean" ? { enabled: body.enabled } : {}),
+      ...(typeof body.dedupeWindowMinutes === "number" ? { dedupeWindowMinutes: body.dedupeWindowMinutes } : {}),
+    }),
+  });
+});
+adminApp.delete("/api/settings/alerts", async (c) => c.json({ ok: true, data: await deleteAlertSettings(c.env) }));
+adminApp.post("/api/settings/alerts/test", async (c) => {
+  // The operator is waiting on the result, so this one send is awaited and both gates are
+  // bypassed — a test that reported success without leaving the Worker would be useless.
+  const result = await sendAlert(c.env, {
+    type: "alert_test",
+    severity: "info",
+    target: "admin_console",
+    title: "CFlareAIProxy 告警连通性测试",
+    detail: "这是一条来自管理台的测试告警，收到即表示 Webhook 配置正确。",
+    context: { source: "admin_console" },
+  }, { bypassDedupe: true, bypassEnabled: true });
+  return c.json({ ok: result.delivered, data: result });
 });
 
 adminApp.get("/api/overview-v2", async (c) => {
@@ -257,9 +298,34 @@ app.onError((error, c) => {
   return errorResponse(error);
 });
 
+/**
+ * Mirrors `max_retries` in wrangler.jsonc. A message delivered for the (max_retries + 1)-th
+ * time has no retry left, so a failure on that delivery is what actually sends it to the DLQ —
+ * there is no DLQ consumer to observe it after the fact.
+ */
+const USAGE_QUEUE_MAX_RETRIES = 3;
+
 export default {
   fetch: app.fetch,
-  async queue(batch: MessageBatch<UsageQueueEvent>, env: Env): Promise<void> {
-    await persistUsageQueueBatch(env, batch.messages.map((message) => message.body));
+  async queue(batch: MessageBatch<UsageQueueEvent>, env: Env, ctx: ExecutionContext): Promise<void> {
+    try {
+      await persistUsageQueueBatch(env, batch.messages.map((message) => message.body));
+    } catch (error) {
+      const attempts = Math.max(0, ...batch.messages.map((message) => message.attempts));
+      if (attempts > USAGE_QUEUE_MAX_RETRIES) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Dedupe target is the queue, not the batch: a broken D1 fails every batch, and one
+        // notification per window is the useful signal.
+        ctx.waitUntil(sendAlert(env, {
+          type: "usage_queue_dlq",
+          severity: "critical",
+          target: batch.queue,
+          title: `用量队列 ${batch.queue} 消息进入死信队列`,
+          detail: `批次重试 ${attempts} 次后仍然失败，${batch.messages.length} 条用量记录将丢失，统计与计费数据会出现缺口。错误：${message}`,
+          context: { queue: batch.queue, attempts, batchSize: batch.messages.length },
+        }).then(() => undefined));
+      }
+      throw error;
+    }
   },
 };

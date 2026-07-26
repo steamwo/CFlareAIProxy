@@ -34,11 +34,58 @@ interface PendingFlushRow extends ActivityRow {
   flush_id: string;
 }
 
+interface LoginScopeRow {
+  [key: string]: SqlStorageValue;
+  scope: string;
+  failures: number;
+  last_failure_at: number;
+  locked_until: number;
+}
+
+export interface LoginThrottleCheck {
+  allowed: boolean;
+  /** Scopes that currently hold a failure counter, so the caller can skip a no-op reset. */
+  trackedScopes: string[];
+}
+
 const ACTIVITY_BUCKET_SECONDS = 5 * 60;
 const QUEUE_BATCH_SIZE = 100;
 const LEASE_TTL_MS = 15 * 60_000;
 /** How long an expired-lease tombstone is kept so a late release() can still be billed. */
 const LEASE_TOMBSTONE_TTL_MS = 60 * 60_000;
+
+/**
+ * Idle time after which a login-failure counter decays. Measured from the later of the last
+ * failure and the end of the lock it produced, so serving a long lock does not erase the
+ * escalation that earned it.
+ */
+const LOGIN_WINDOW_MS = 15 * 60_000;
+
+interface LoginPolicy {
+  /** Failures tolerated inside the window before the scope locks. */
+  threshold: number;
+  /** Lock applied at the threshold; each further failure doubles it up to maxLockMs. */
+  baseLockMs: number;
+  maxLockMs: number;
+}
+
+/** Per-IP: tight, escalating — the shape that actually stops a single-source brute force. */
+const LOGIN_IP_POLICY: LoginPolicy = { threshold: 5, baseLockMs: 60_000, maxLockMs: 30 * 60_000 };
+/**
+ * Global backstop against a proxy-pool attack that never reuses an IP. Deliberately flat and
+ * short: it caps a distributed attacker at a few guesses per minute while bounding how long a
+ * legitimate operator can be caught in the blast radius.
+ */
+const LOGIN_GLOBAL_POLICY: LoginPolicy = { threshold: 50, baseLockMs: 5 * 60_000, maxLockMs: 5 * 60_000 };
+
+function loginPolicy(scope: string): LoginPolicy {
+  return scope.startsWith("ip:") ? LOGIN_IP_POLICY : LOGIN_GLOBAL_POLICY;
+}
+
+function loginScopeList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+}
 
 export class RateLimiter extends DurableObject<Env> {
   private alarmAt: number | null = null;
@@ -88,6 +135,12 @@ export class RateLimiter extends DurableObject<Env> {
           updated_at INTEGER NOT NULL,
           PRIMARY KEY(bucket,provider_id,credential_id,public_model,upstream_model,endpoint)
         );
+        CREATE TABLE IF NOT EXISTS login_attempts (
+          scope TEXT PRIMARY KEY,
+          failures INTEGER NOT NULL DEFAULT 0,
+          last_failure_at INTEGER NOT NULL DEFAULT 0,
+          locked_until INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS pending_flush (
           flush_id TEXT PRIMARY KEY,
           bucket INTEGER NOT NULL,
@@ -123,6 +176,20 @@ export class RateLimiter extends DurableObject<Env> {
     if (request.method === "POST" && url.pathname === "/release") {
       const payload = await request.json() as { leaseId: string; actualTokens?: number; activity?: UsageEvent };
       await this.release(payload.leaseId, payload.actualTokens, payload.activity);
+      return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/login/check") {
+      const payload = await request.json() as { scopes?: unknown };
+      return Response.json(this.checkLogin(loginScopeList(payload.scopes)));
+    }
+    if (request.method === "POST" && url.pathname === "/login/fail") {
+      const payload = await request.json() as { scopes?: unknown };
+      this.recordLoginFailure(loginScopeList(payload.scopes));
+      return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/login/reset") {
+      const payload = await request.json() as { scopes?: unknown };
+      this.resetLogin(loginScopeList(payload.scopes));
       return Response.json({ ok: true });
     }
     return new Response("Not found", { status: 404 });
@@ -365,6 +432,81 @@ export class RateLimiter extends DurableObject<Env> {
     // Unknown lease id (tombstone already purged, or a duplicate release): accounting is
     // no longer possible, but the request must still show up in the activity buckets.
     if (activity) await this.recordActivity(activity);
+  }
+
+  /**
+   * Drops counters that have been idle for a full window. This is the whole expiry
+   * mechanism: state decays on the next touch of the same DO, so a lock always lifts on
+   * its own without an alarm — which would otherwise cost a storage write per login.
+   *
+   * The unindexed scan is safe because the table is self-limiting: once the global scope
+   * locks, checkLogin rejects before any failure is recorded, so a distributed attack can
+   * only add ~LOGIN_GLOBAL_POLICY.threshold rows per lock cycle before insertions stop.
+   */
+  private pruneLoginScopes(now: number): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM login_attempts WHERE MAX(last_failure_at, locked_until) <= ?",
+      now - LOGIN_WINDOW_MS,
+    );
+  }
+
+  private checkLogin(scopes: string[]): LoginThrottleCheck {
+    const now = Date.now();
+    this.pruneLoginScopes(now);
+    if (!scopes.length) return { allowed: true, trackedScopes: [] };
+
+    const rows = this.loginScopeRows(scopes);
+    // Any locked scope blocks. The caller is told nothing but "locked", so a probe cannot
+    // learn which scope tripped, how many attempts remain, or whether the user exists.
+    const allowed = !rows.some((row) => row.locked_until > now);
+    return { allowed, trackedScopes: rows.map((row) => row.scope) };
+  }
+
+  private loginScopeRows(scopes: string[]): LoginScopeRow[] {
+    const placeholders = scopes.map(() => "?").join(",");
+    return this.ctx.storage.sql
+      .exec<LoginScopeRow>(
+        `SELECT scope, failures, last_failure_at, locked_until FROM login_attempts WHERE scope IN (${placeholders})`,
+        ...scopes,
+      )
+      .toArray();
+  }
+
+  private recordLoginFailure(scopes: string[]): void {
+    const now = Date.now();
+    this.pruneLoginScopes(now);
+    const existing = new Map(this.loginScopeRows(scopes).map((row) => [row.scope, row]));
+
+    for (const scope of scopes) {
+      const policy = loginPolicy(scope);
+      const row = existing.get(scope);
+      // pruneLoginScopes already removed decayed rows, so a surviving row is in-window.
+      const failures = (row ? row.failures : 0) + 1;
+      let lockedUntil = row?.locked_until ?? 0;
+      if (failures >= policy.threshold) {
+        const overshoot = failures - policy.threshold;
+        const lockMs = Math.min(policy.maxLockMs, policy.baseLockMs * 2 ** Math.min(overshoot, 20));
+        // Never shorten a lock that is already running.
+        lockedUntil = Math.max(lockedUntil, now + lockMs);
+      }
+      this.ctx.storage.sql.exec(
+        `INSERT INTO login_attempts(scope, failures, last_failure_at, locked_until) VALUES(?,?,?,?)
+         ON CONFLICT(scope) DO UPDATE SET
+           failures=excluded.failures,
+           last_failure_at=excluded.last_failure_at,
+           locked_until=excluded.locked_until`,
+        scope,
+        failures,
+        now,
+        lockedUntil,
+      );
+    }
+  }
+
+  private resetLogin(scopes: string[]): void {
+    if (!scopes.length) return;
+    const placeholders = scopes.map(() => "?").join(",");
+    this.ctx.storage.sql.exec(`DELETE FROM login_attempts WHERE scope IN (${placeholders})`, ...scopes);
   }
 
   private async recordActivity(event: UsageEvent): Promise<void> {

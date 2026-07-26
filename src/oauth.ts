@@ -119,7 +119,12 @@ async function readSession(env: Env, sessionIdOrState: string): Promise<{
     .bind(sessionIdOrState, sessionIdOrState, nowSeconds())
     .first<OAuthSessionRow>();
   if (!row) throw new GatewayError(404, "OAUTH_SESSION_NOT_FOUND", "OAuth session was not found or has expired");
-  const secret = parseJson<OAuthSessionSecret>(await decryptSecret(row.secret_ciphertext, env.MASTER_KEY), {});
+  // Sessions written just before a MASTER_KEY rotation must stay readable, otherwise an
+  // authorization flow already in flight dies mid-callback with an opaque DECRYPT_FAILED.
+  const secret = parseJson<OAuthSessionSecret>(
+    await decryptSecret(row.secret_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS),
+    {},
+  );
   return { row, secret, payload: parseJson<Record<string, unknown>>(row.payload_json, {}) };
 }
 

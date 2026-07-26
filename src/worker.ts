@@ -1,4 +1,5 @@
 import handler from "./index";
+import { sendAlert } from "./alerts";
 import {
   activityCutoff, cleanupExpiredActivity, cleanupExpiredOAuthSessions, cleanupExpiredRequestLogs,
   oauthSessionCutoff, requestLogCutoff,
@@ -46,11 +47,24 @@ async function runRetention(env: Env, scheduledTime: number): Promise<void> {
       const deleted = await task.run();
       console.log(JSON.stringify({ event: `${task.event}_completed`, cutoff: task.cutoff, deleted }));
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       console.error(JSON.stringify({
         event: `${task.event}_failed`,
         cutoff: task.cutoff,
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       }));
+      // Awaited rather than dispatched: this already runs inside the scheduled waitUntil, and
+      // sendAlert never rejects, so awaiting only delays the sweep's own rejection. The dedupe
+      // target is the task name, so an hourly cron failing on one table alerts once per window
+      // instead of once per hour.
+      await sendAlert(env, {
+        type: "cron_cleanup_failed",
+        severity: "warning",
+        target: task.event,
+        title: `定时清理任务 ${task.event} 失败`,
+        detail: `保留清理未能完成，过期数据将持续累积。错误：${message}`,
+        context: { task: task.event, cutoff: task.cutoff, scheduledTime },
+      });
       throw error;
     }
   }));

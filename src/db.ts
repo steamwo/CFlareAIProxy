@@ -76,7 +76,7 @@ function maskedProxy(value: string | null): Omit<ProviderProxySummary, "source" 
 async function readSystemProxyUrl(env: Env): Promise<string> {
   const row = await env.DB.prepare("SELECT value_ciphertext FROM system_settings WHERE key='system_proxy_url'")
     .first<{ value_ciphertext: string | null }>();
-  return row?.value_ciphertext ? await decryptSecret(row.value_ciphertext, env.MASTER_KEY) : "";
+  return row?.value_ciphertext ? await decryptSecret(row.value_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS) : "";
 }
 
 async function readProviderProxyUrl(env: Env, providerId: string): Promise<string> {
@@ -84,7 +84,7 @@ async function readProviderProxyUrl(env: Env, providerId: string): Promise<strin
     .bind(providerId)
     .first<{ enabled: number; proxy_url_ciphertext: string | null }>();
   if (!row || row.enabled !== 1 || !row.proxy_url_ciphertext) return "";
-  return decryptSecret(row.proxy_url_ciphertext, env.MASTER_KEY);
+  return decryptSecret(row.proxy_url_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS);
 }
 
 export async function getProviderProxyConfig(env: Env, providerId: string): Promise<ProviderProxyConfig | null> {
@@ -485,8 +485,8 @@ export async function getCredential(env: Env, credentialId: string): Promise<Cre
   // Both decryptions await the same memoized CryptoKey; running them together
   // removes one serial await from the hot path.
   const [secret, refreshToken] = await Promise.all([
-    decryptSecret(row.secret_ciphertext, env.MASTER_KEY),
-    row.refresh_ciphertext ? decryptSecret(row.refresh_ciphertext, env.MASTER_KEY) : Promise.resolve(undefined),
+    decryptSecret(row.secret_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS),
+    row.refresh_ciphertext ? decryptSecret(row.refresh_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS) : Promise.resolve(undefined),
   ]);
   return {
     ...row,
