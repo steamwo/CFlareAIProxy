@@ -22,6 +22,16 @@ jobs:
       - name: Apply gateway-key model fix
         working-directory: repo
         run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/agent-fix-qoder-key-models.py")
+          text = path.read_text()
+          old = '''    count = text.count(old)\n    if count != 1:\n        raise SystemExit(f"{path}: expected one match, found {count}")\n    target.write_text(text.replace(old, new))'''
+          new = '''    count = text.count(old)\n    if count == 0:\n        raise SystemExit(f"{path}: expected one match, found 0")\n    if count > 1:\n        if path == "src/admin.ts" and old.startswith("    const expiresAt = body.expiresAt"):\n            head, separator, tail = text.rpartition(old)\n            target.write_text(head + new + tail)\n            return\n        raise SystemExit(f"{path}: expected one match, found {count}")\n    target.write_text(text.replace(old, new))'''
+          if text.count(old) != 1:
+              raise SystemExit("replacement helper context not found")
+          path.write_text(text.replace(old, new))
+          PY
           python3 scripts/agent-fix-qoder-key-models.py
           rm scripts/agent-fix-qoder-key-models.py .github/workflows/agent-qoder-key-model-fix.yml
       - uses: pnpm/action-setup@v4
