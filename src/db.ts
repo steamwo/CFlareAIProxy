@@ -8,7 +8,6 @@ import { discoveredModelAllowed, normalizeAllowedModelNames, publicDiscoveredMod
 import type {
   Credential,
   CredentialRow,
-  DiscoveredModelRow,
   Env,
   GatewayEndpoint,
   GatewayKeyRow,
@@ -22,7 +21,7 @@ import type {
   ProxyProtocol,
   QuotaSnapshot,
   QuotaSnapshotRow,
-  UsageEvent,
+  QuotaWindow,
 } from "./types";
 import { parseJson, sha256Hex } from "./utils";
 
@@ -403,8 +402,13 @@ function exhaustedUntil(snapshot: QuotaSnapshot, row: Pick<QuotaSnapshotRow, "fe
     return { exhausted: retryAt > now, reason: "可用余额已耗尽", retryAt };
   }
 
+  // Response rate-limit headers are short rolling counters (typically per minute) captured on every
+  // upstream call. They are display-only: treating `remaining: 0` as quota exhaustion would park the
+  // account for the whole snapshot TTL over a limit that resets within a minute.
+  const windowSource = (window: QuotaWindow): QuotaSnapshot["source"] => window.source ?? snapshot.source;
   const windows = snapshot.windows.filter((window) =>
-    window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined,
+    windowSource(window) !== "headers"
+    && (window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined),
   );
   if (!windows.length) return { exhausted: false };
   const isEmpty = (window: QuotaSnapshot["windows"][number]) =>
@@ -468,24 +472,6 @@ export async function listCredentialAvailabilityForModel(
     output.push({ row: openCodeAnonymousCredentialRow(), available: true });
   }
   return output;
-}
-
-export async function listCredentialRowsForModel(
-  env: Env,
-  providerId: string,
-  upstreamModel: string,
-  endpoint: GatewayEndpoint,
-): Promise<CredentialRow[]> {
-  return (await listCredentialAvailabilityForModel(env, providerId, upstreamModel, endpoint))
-    .filter((entry) => entry.available)
-    .map((entry) => entry.row);
-}
-
-export async function listDiscoveredModelRows(env: Env, providerId?: string): Promise<DiscoveredModelRow[]> {
-  const result = providerId
-    ? await env.DB.prepare("SELECT * FROM discovered_models WHERE provider_id=? ORDER BY model_id,endpoint,credential_id").bind(providerId).all<DiscoveredModelRow>()
-    : await env.DB.prepare("SELECT * FROM discovered_models ORDER BY provider_id,model_id,endpoint,credential_id").all<DiscoveredModelRow>();
-  return result.results;
 }
 
 export async function getCredential(env: Env, credentialId: string): Promise<Credential> {
@@ -638,54 +624,3 @@ export async function createGatewayKey(
   return { id, key };
 }
 
-export async function insertUsage(env: Env, event: UsageEvent): Promise<void> {
-  let costMicros = 0;
-  if (event.providerId && event.upstreamModel) {
-    const price = await env.DB.prepare(
-      `SELECT input_micros_per_million, output_micros_per_million, cache_micros_per_million
-       FROM model_prices WHERE provider_id = ? AND model = ?`,
-    ).bind(event.providerId, event.upstreamModel).first<{
-      input_micros_per_million: number;
-      output_micros_per_million: number;
-      cache_micros_per_million: number;
-    }>();
-    if (price) {
-      const cachedTokens = Math.min(event.usage.promptTokens, event.usage.cachedTokens);
-      const uncachedInputTokens = Math.max(0, event.usage.promptTokens - cachedTokens);
-      costMicros = Math.max(0, Math.ceil(
-        (uncachedInputTokens * price.input_micros_per_million
-          + cachedTokens * price.cache_micros_per_million
-          + event.usage.completionTokens * price.output_micros_per_million) / 1_000_000,
-      ));
-    }
-  }
-
-  await env.DB.prepare(
-    `INSERT OR REPLACE INTO request_logs
-      (request_id, gateway_key_id, provider_id, credential_id, public_model, upstream_model,
-       endpoint, status_code, prompt_tokens, completion_tokens, cached_tokens, total_tokens, cost_micros, latency_ms,
-       first_token_ms, error_code, error_message, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      event.requestId,
-      event.gatewayKeyId ?? null,
-      event.providerId ?? null,
-      event.credentialId ?? null,
-      event.publicModel ?? null,
-      event.upstreamModel ?? null,
-      event.endpoint ?? null,
-      event.statusCode,
-      event.usage.promptTokens,
-      event.usage.completionTokens,
-      event.usage.cachedTokens,
-      event.usage.totalTokens,
-      costMicros,
-      event.latencyMs,
-      event.firstTokenMs ?? null,
-      event.errorCode ?? null,
-      event.errorMessage?.slice(0, 1000) ?? null,
-      event.createdAt,
-    )
-    .run();
-}

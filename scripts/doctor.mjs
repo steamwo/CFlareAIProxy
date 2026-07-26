@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { hasLocalWrangler, root, runWranglerResult } from "./lib.mjs";
+import { EXPECTED_WORKER_NAME, hasLocalWrangler, root, runWranglerResult } from "./lib.mjs";
 
 const checks = [];
 const pass = (message) => checks.push({ ok: true, message });
@@ -28,8 +28,8 @@ if (existsSync(packagePath)) {
 if (existsSync(configPath)) {
   try {
     const config = JSON.parse(readFileSync(configPath, "utf8"));
-    if (config.name === "cflare-api") pass("Worker 名称为 cflare-api");
-    else fail("wrangler.jsonc 的 name 必须为 cflare-api");
+    if (config.name === EXPECTED_WORKER_NAME) pass(`Worker 名称为 ${EXPECTED_WORKER_NAME}`);
+    else fail(`wrangler.jsonc 的 name 必须为 ${EXPECTED_WORKER_NAME}`);
 
     const raw = JSON.stringify(config);
     if (!raw.includes("REPLACE_WITH")) pass("没有占位资源 ID");
@@ -67,15 +67,34 @@ if (hasLocalWrangler()) {
 }
 
 
+const ADMIN_IMPORT = /import\s*\{[^}]*\bcreateAdminApp\b[^}]*\}\s*from\s*["']\.\/admin["']/;
+const ROOT_MOUNT = /app\.route\(\s*["']\/["']\s*,\s*([A-Za-z_$][\w$]*)\s*(\(\s*\))?\s*\)/g;
+
+/**
+ * Structural check: the admin app must be imported and mounted at the root.
+ * Accepts both a direct `app.route("/", createAdminApp())` and an indirect
+ * mount through a local binding — the wiring is the contract, not its spelling.
+ */
+function mountsAdminApp(source) {
+  if (!ADMIN_IMPORT.test(source)) return false;
+  for (const match of source.matchAll(ROOT_MOUNT)) {
+    const identifier = match[1];
+    if (!identifier) continue;
+    if (identifier === "createAdminApp" && match[2]) return true;
+    if (new RegExp(`(?:const|let|var)\\s+${identifier}\\s*=\\s*createAdminApp\\s*\\(`).test(source)) return true;
+  }
+  return false;
+}
+
 const indexSourcePath = join(root, "src", "index.ts");
 const adminSourcePath = join(root, "src", "admin.ts");
 if (existsSync(indexSourcePath) && existsSync(adminSourcePath)) {
   const indexSource = readFileSync(indexSourcePath, "utf8");
   const adminSource = readFileSync(adminSourcePath, "utf8");
-  if (indexSource.includes('app.route("/", createAdminApp())') && adminSource.includes('.basePath("/admin")')) {
+  if (mountsAdminApp(indexSource) && adminSource.includes('.basePath("/admin")')) {
     pass("管理 API /admin/api 路由接线完整");
   } else {
-    fail("管理台路由接线不完整；请使用完整的 0.5.1 源码覆盖旧版本");
+    fail("管理台路由接线不完整：src/index.ts 需要导入 createAdminApp 并用 app.route(\"/\", ...) 挂载，src/admin.ts 需要 .basePath(\"/admin\")");
   }
   const adminVersion = adminSource.match(/const\s+ADMIN_UI_VERSION\s*=\s*["']([^"']+)["']/)?.[1] ?? "";
   if (packageVersion && adminVersion === packageVersion) pass(`管理 API 版本与 package.json 一致（${adminVersion}）`);
@@ -88,16 +107,21 @@ if (existsSync(webIndex) && existsSync(webMain)) pass("Vue 3 管理台源码存�
 else fail("缺少 web/ Vue 管理台源码");
 
 const proxyMigrationPath = join(root, "migrations", "0004_provider_proxy.sql");
-const upstreamFetchPath = join(root, "src", "upstream-fetch.ts");
 if (existsSync(proxyMigrationPath) && readFileSync(proxyMigrationPath, "utf8").includes("CREATE TABLE IF NOT EXISTS provider_proxies")) {
   pass("供应商代理 D1 migration 存在");
 } else {
   fail("缺少供应商代理 migration 0004_provider_proxy.sql");
 }
-if (existsSync(upstreamFetchPath) && readFileSync(upstreamFetchPath, "utf8").includes('from "cloudflare:sockets"')) {
+
+// Native TCP proxying must exist somewhere under src/, but which module owns
+// the cloudflare:sockets import is an implementation detail that may move.
+const nativeSocketOwner = readdirSync(join(root, "src"), { withFileTypes: true, recursive: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"))
+  .find((entry) => readFileSync(join(entry.parentPath ?? entry.path, entry.name), "utf8").includes('from "cloudflare:sockets"'));
+if (nativeSocketOwner) {
   pass("供应商代理使用 Cloudflare 原生 TCP（无需 Bridge）");
 } else {
-  fail("缺少 Cloudflare 原生 HTTP/SOCKS 代理实现");
+  fail("缺少 Cloudflare 原生 HTTP/SOCKS 代理实现：src/ 下没有任何模块导入 cloudflare:sockets");
 }
 
 const devVars = join(root, ".dev.vars");

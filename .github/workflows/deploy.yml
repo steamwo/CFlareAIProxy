@@ -8,12 +8,18 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      # Toolchain must match check.yml so the validated dependency tree is the
+      # deployed one (pnpm-lock.yaml is authoritative for wrangler/hono versions).
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - run: npm install --no-audit --no-fund
-      - run: npm run check
-      - run: npm run deploy
+          node-version: 22.13.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+      - run: pnpm run deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

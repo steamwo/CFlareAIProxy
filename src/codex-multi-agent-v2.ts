@@ -1,6 +1,5 @@
 import { listModels } from "./db";
 import { enrichModelsWithCapabilities } from "./model-capabilities";
-import { responseEncoder, responseHeaders, transformResponseSse } from "./response-utils";
 import type { Env, GatewayEndpoint, ProviderKind } from "./types";
 
 const SPAWN_AGENT_MARKER = "Spawns an agent";
@@ -259,24 +258,6 @@ export function optimizeCodexMultiAgentV2Body(
   return { body: output, collaborationNamespaceOptimized: optimized };
 }
 
-export async function optimizeCodexMultiAgentV2Request(
-  env: Env,
-  body: Record<string, unknown>,
-  options: {
-    enabled: boolean;
-    endpoint: GatewayEndpoint;
-    providerKind: ProviderKind;
-    userAgent?: string | null;
-    allowedModels?: string[];
-  },
-): Promise<CodexMultiAgentOptimization> {
-  if (!options.enabled || options.endpoint !== "responses" || !isCodexMultiAgentClient(options.userAgent)) {
-    return { body, collaborationNamespaceOptimized: false };
-  }
-  const models = await loadCodexMultiAgentModelProfiles(env, options.allowedModels).catch(() => []);
-  return optimizeCodexMultiAgentV2Body(body, { ...options, models });
-}
-
 export function restoreCollaborationNamespaceValue(value: unknown, depth = 0): unknown {
   if (depth > 24 || value == null) return value;
   if (Array.isArray(value)) return value.map((entry) => restoreCollaborationNamespaceValue(entry, depth + 1));
@@ -297,33 +278,3 @@ export function restoreCollaborationNamespaceValue(value: unknown, depth = 0): u
   return output;
 }
 
-export async function restoreCodexMultiAgentV2Response(response: Response, optimized: boolean): Promise<Response> {
-  if (!optimized || !response.body) return response;
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("text/event-stream")) {
-    const body = transformResponseSse(response.body, (data, controller) => {
-      if (data === "[DONE]") {
-        controller.enqueue(responseEncoder.encode("data: [DONE]\n\n"));
-        return;
-      }
-      try {
-        controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify(restoreCollaborationNamespaceValue(JSON.parse(data)))}\n\n`));
-      } catch {
-        controller.enqueue(responseEncoder.encode(`data: ${data}\n\n`));
-      }
-    }, () => undefined);
-    return new Response(body, { status: response.status, statusText: response.statusText, headers: responseHeaders(response.headers, contentType) });
-  }
-  const text = await response.text();
-  if (!contentType.includes("json")) {
-    return new Response(text, { status: response.status, statusText: response.statusText, headers: responseHeaders(response.headers, contentType || undefined) });
-  }
-  try {
-    return Response.json(restoreCollaborationNamespaceValue(JSON.parse(text)), {
-      status: response.status,
-      headers: responseHeaders(response.headers, "application/json; charset=utf-8"),
-    });
-  } catch {
-    return new Response(text, { status: response.status, statusText: response.statusText, headers: responseHeaders(response.headers, contentType) });
-  }
-}

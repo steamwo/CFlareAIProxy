@@ -84,8 +84,7 @@
       "/",
       "/health",
       "/v1/*",
-      "/admin/api/*",
-      "/oauth/*"
+      "/admin/api/*"
     ]
   }
 }

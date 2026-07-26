@@ -168,6 +168,10 @@ export interface QuotaWindow {
   remainingPercent?: number;
   resetAt?: number;
   windowSeconds?: number;
+  // Per-window provenance. A snapshot can mix windows fetched from a quota API with windows
+  // captured from response rate-limit headers, so availability decisions must look here
+  // instead of at the snapshot-level source.
+  source?: "api" | "configured" | "headers";
 }
 
 export interface QuotaSnapshot {
@@ -259,6 +263,12 @@ export interface UsageEvent {
 
 export interface UsageAggregateEvent {
   kind: "aggregate";
+  /**
+   * Unique id of the flush that produced this delta. Stable across Durable Object
+   * retries so the D1 consumer can drop redelivered messages instead of double counting.
+   * Optional only for messages produced before this field existed.
+   */
+  flushId?: string;
   bucket: number;
   sourceId: string;
   gatewayKeyId: string;

@@ -30,8 +30,15 @@ interface ActivityRow {
   updated_at: number;
 }
 
+interface PendingFlushRow extends ActivityRow {
+  flush_id: string;
+}
+
 const ACTIVITY_BUCKET_SECONDS = 5 * 60;
 const QUEUE_BATCH_SIZE = 100;
+const LEASE_TTL_MS = 15 * 60_000;
+/** How long an expired-lease tombstone is kept so a late release() can still be billed. */
+const LEASE_TOMBSTONE_TTL_MS = 60 * 60_000;
 
 export class RateLimiter extends DurableObject<Env> {
   private alarmAt: number | null = null;
@@ -55,6 +62,11 @@ export class RateLimiter extends DurableObject<Env> {
           reserved_tokens INTEGER NOT NULL,
           expires_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS lease_tombstones (
+          lease_id TEXT PRIMARY KEY,
+          refunded_tokens INTEGER NOT NULL,
+          created_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS activity_buckets (
           bucket INTEGER NOT NULL,
           gateway_key_id TEXT NOT NULL,
@@ -76,6 +88,27 @@ export class RateLimiter extends DurableObject<Env> {
           updated_at INTEGER NOT NULL,
           PRIMARY KEY(bucket,provider_id,credential_id,public_model,upstream_model,endpoint)
         );
+        CREATE TABLE IF NOT EXISTS pending_flush (
+          flush_id TEXT PRIMARY KEY,
+          bucket INTEGER NOT NULL,
+          gateway_key_id TEXT NOT NULL,
+          provider_id TEXT NOT NULL,
+          credential_id TEXT NOT NULL,
+          public_model TEXT NOT NULL,
+          upstream_model TEXT NOT NULL,
+          endpoint TEXT NOT NULL,
+          requests INTEGER NOT NULL,
+          successes INTEGER NOT NULL,
+          failures INTEGER NOT NULL,
+          prompt_tokens INTEGER NOT NULL,
+          completion_tokens INTEGER NOT NULL,
+          cached_tokens INTEGER NOT NULL,
+          total_tokens INTEGER NOT NULL,
+          latency_sum_ms INTEGER NOT NULL,
+          first_token_sum_ms INTEGER NOT NULL,
+          first_token_samples INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
       `);
       this.alarmAt = await this.ctx.storage.getAlarm();
     });
@@ -96,22 +129,25 @@ export class RateLimiter extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
-    const rows = this.ctx.storage.sql.exec<ActivityRow>(
-      `SELECT bucket,gateway_key_id,provider_id,credential_id,public_model,upstream_model,endpoint,
+    this.stagePendingFlush();
+    const pending = this.ctx.storage.sql.exec<PendingFlushRow>(
+      `SELECT flush_id,bucket,gateway_key_id,provider_id,credential_id,public_model,upstream_model,endpoint,
               requests,successes,failures,prompt_tokens,completion_tokens,cached_tokens,total_tokens,
               latency_sum_ms,first_token_sum_ms,first_token_samples,updated_at
-       FROM activity_buckets ORDER BY bucket`,
+       FROM pending_flush ORDER BY bucket`,
     ).toArray();
-    if (!rows.length) {
+    if (!pending.length) {
       this.alarmAt = null;
       return;
     }
 
     try {
-      for (let index = 0; index < rows.length; index += QUEUE_BATCH_SIZE) {
-        await this.environment.USAGE_QUEUE.sendBatch(rows.slice(index, index + QUEUE_BATCH_SIZE).map((row) => ({
+      for (let index = 0; index < pending.length; index += QUEUE_BATCH_SIZE) {
+        const slice = pending.slice(index, index + QUEUE_BATCH_SIZE);
+        await this.environment.USAGE_QUEUE.sendBatch(slice.map((row) => ({
           body: {
             kind: "aggregate",
+            flushId: row.flush_id,
             bucket: row.bucket,
             sourceId: row.gateway_key_id,
             gatewayKeyId: row.gateway_key_id,
@@ -133,29 +169,11 @@ export class RateLimiter extends DurableObject<Env> {
             updatedAt: row.updated_at,
           } satisfies UsageAggregateEvent,
         })));
+        for (const row of slice) {
+          this.ctx.storage.sql.exec("DELETE FROM pending_flush WHERE flush_id = ?", row.flush_id);
+        }
       }
-
-      for (const row of rows) {
-        this.ctx.storage.sql.exec(
-          `DELETE FROM activity_buckets
-           WHERE bucket=? AND provider_id=? AND credential_id=? AND public_model=?
-             AND upstream_model=? AND endpoint=? AND updated_at<=?`,
-          row.bucket,
-          row.provider_id,
-          row.credential_id,
-          row.public_model,
-          row.upstream_model,
-          row.endpoint,
-          row.updated_at,
-        );
-      }
-      const remaining = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM activity_buckets").one();
-      if ((remaining?.count ?? 0) > 0) {
-        this.alarmAt = Date.now() + 60_000;
-        await this.ctx.storage.setAlarm(this.alarmAt);
-      } else {
-        this.alarmAt = null;
-      }
+      await this.rescheduleFlush();
     } catch (error) {
       this.alarmAt = Date.now() + 60_000;
       await this.ctx.storage.setAlarm(this.alarmAt);
@@ -163,21 +181,101 @@ export class RateLimiter extends DurableObject<Env> {
     }
   }
 
-  private cleanup(now: number): void {
-    const expired = this.ctx.storage.sql
-      .exec<{ count: number; reserved: number }>(
-        "SELECT COUNT(*) AS count, COALESCE(SUM(reserved_tokens), 0) AS reserved FROM leases WHERE expires_at <= ?",
-        now,
+  /**
+   * Move the live counters into immutable pending_flush snapshots, each with its own
+   * flush id. Snapshots never change afterwards, so a retried alarm resends byte-identical
+   * events and the D1 consumer can drop them by flush id instead of double counting.
+   * There is no await between the read and the delete, so counters cannot advance in between.
+   */
+  private stagePendingFlush(): void {
+    const rows = this.ctx.storage.sql.exec<ActivityRow>(
+      `SELECT bucket,gateway_key_id,provider_id,credential_id,public_model,upstream_model,endpoint,
+              requests,successes,failures,prompt_tokens,completion_tokens,cached_tokens,total_tokens,
+              latency_sum_ms,first_token_sum_ms,first_token_samples,updated_at
+       FROM activity_buckets ORDER BY bucket`,
+    ).toArray();
+    for (const row of rows) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO pending_flush
+          (flush_id,bucket,gateway_key_id,provider_id,credential_id,public_model,upstream_model,endpoint,
+           requests,successes,failures,prompt_tokens,completion_tokens,cached_tokens,total_tokens,
+           latency_sum_ms,first_token_sum_ms,first_token_samples,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        crypto.randomUUID(),
+        row.bucket,
+        row.gateway_key_id,
+        row.provider_id,
+        row.credential_id,
+        row.public_model,
+        row.upstream_model,
+        row.endpoint,
+        row.requests,
+        row.successes,
+        row.failures,
+        row.prompt_tokens,
+        row.completion_tokens,
+        row.cached_tokens,
+        row.total_tokens,
+        row.latency_sum_ms,
+        row.first_token_sum_ms,
+        row.first_token_samples,
+        row.updated_at,
+      );
+      this.ctx.storage.sql.exec(
+        `DELETE FROM activity_buckets
+         WHERE bucket=? AND provider_id=? AND credential_id=? AND public_model=?
+           AND upstream_model=? AND endpoint=?`,
+        row.bucket,
+        row.provider_id,
+        row.credential_id,
+        row.public_model,
+        row.upstream_model,
+        row.endpoint,
+      );
+    }
+  }
+
+  private async rescheduleFlush(): Promise<void> {
+    const remaining = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        "SELECT (SELECT COUNT(*) FROM activity_buckets) + (SELECT COUNT(*) FROM pending_flush) AS count",
       )
       .one();
-    if ((expired?.count ?? 0) > 0) {
+    if ((remaining?.count ?? 0) > 0) {
+      this.alarmAt = Date.now() + 60_000;
+      await this.ctx.storage.setAlarm(this.alarmAt);
+    } else {
+      this.alarmAt = null;
+    }
+  }
+
+  private cleanup(now: number): void {
+    const expired = this.ctx.storage.sql
+      .exec<{ lease_id: string; reserved_tokens: number }>(
+        "SELECT lease_id, reserved_tokens FROM leases WHERE expires_at <= ?",
+        now,
+      )
+      .toArray();
+    if (expired.length > 0) {
+      const reserved = expired.reduce((sum, row) => sum + row.reserved_tokens, 0);
       this.ctx.storage.sql.exec(
         "UPDATE state SET inflight = MAX(0, inflight - ?), month_tokens = MAX(0, month_tokens - ?) WHERE singleton = 1",
-        expired!.count,
-        expired!.reserved,
+        expired.length,
+        reserved,
       );
+      // Keep a tombstone: a stream can outlive the lease TTL, and its release() must still
+      // bill the tokens it actually consumed and record the request in the activity buckets.
+      for (const row of expired) {
+        this.ctx.storage.sql.exec(
+          "INSERT OR REPLACE INTO lease_tombstones(lease_id, refunded_tokens, created_at) VALUES (?, ?, ?)",
+          row.lease_id,
+          row.reserved_tokens,
+          now,
+        );
+      }
       this.ctx.storage.sql.exec("DELETE FROM leases WHERE expires_at <= ?", now);
     }
+    this.ctx.storage.sql.exec("DELETE FROM lease_tombstones WHERE created_at <= ?", now - LEASE_TOMBSTONE_TTL_MS);
   }
 
   private acquire(payload: AcquirePayload): RateLease {
@@ -229,7 +327,7 @@ export class RateLimiter extends DurableObject<Env> {
       "INSERT INTO leases(lease_id, reserved_tokens, expires_at) VALUES (?, ?, ?)",
       leaseId,
       reservation,
-      now + 15 * 60_000,
+      now + LEASE_TTL_MS,
     );
     return { leaseId, allowed: true };
   }
@@ -238,14 +336,34 @@ export class RateLimiter extends DurableObject<Env> {
     const lease = this.ctx.storage.sql
       .exec<{ reserved_tokens: number }>("SELECT reserved_tokens FROM leases WHERE lease_id = ?", leaseId)
       .toArray()[0];
-    if (!lease) return;
-    this.ctx.storage.sql.exec("DELETE FROM leases WHERE lease_id = ?", leaseId);
-    const chargedTokens = typeof actualTokens === "number" ? Math.max(0, actualTokens) : lease.reserved_tokens;
-    const delta = chargedTokens - lease.reserved_tokens;
-    this.ctx.storage.sql.exec(
-      "UPDATE state SET inflight = MAX(0, inflight - 1), month_tokens = MAX(0, month_tokens + ?) WHERE singleton = 1",
-      delta,
-    );
+    if (lease) {
+      this.ctx.storage.sql.exec("DELETE FROM leases WHERE lease_id = ?", leaseId);
+      const chargedTokens = typeof actualTokens === "number" ? Math.max(0, actualTokens) : lease.reserved_tokens;
+      this.ctx.storage.sql.exec(
+        "UPDATE state SET inflight = MAX(0, inflight - 1), month_tokens = MAX(0, month_tokens + ?) WHERE singleton = 1",
+        chargedTokens - lease.reserved_tokens,
+      );
+      if (activity) await this.recordActivity(activity);
+      return;
+    }
+
+    const tombstone = this.ctx.storage.sql
+      .exec<{ refunded_tokens: number }>("SELECT refunded_tokens FROM lease_tombstones WHERE lease_id = ?", leaseId)
+      .toArray()[0];
+    if (tombstone) {
+      // cleanup() already released the inflight slot and refunded the reservation, so only
+      // the tokens actually consumed are re-billed here.
+      this.ctx.storage.sql.exec("DELETE FROM lease_tombstones WHERE lease_id = ?", leaseId);
+      const chargedTokens = typeof actualTokens === "number" ? Math.max(0, actualTokens) : tombstone.refunded_tokens;
+      if (chargedTokens > 0) {
+        this.ctx.storage.sql.exec(
+          "UPDATE state SET month_tokens = MAX(0, month_tokens + ?) WHERE singleton = 1",
+          chargedTokens,
+        );
+      }
+    }
+    // Unknown lease id (tombstone already purged, or a duplicate release): accounting is
+    // no longer possible, but the request must still show up in the activity buckets.
     if (activity) await this.recordActivity(activity);
   }
 

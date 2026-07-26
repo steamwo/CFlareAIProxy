@@ -23,6 +23,28 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      # Incremental caches. Every check step keeps continue-on-error so one run
+      # still reports all failing dimensions; caching only trims repeated work.
+      # tsconfig.worker.json sets composite:true, so tsc --noEmit still writes
+      # tsconfig.worker.tsbuildinfo and can skip unchanged files on re-runs.
+      # vue-tsc has no incremental output here (web/tsconfig.json is not
+      # composite), so only the worker project benefits.
+      - name: Restore TypeScript incremental cache
+        uses: actions/cache@v4
+        with:
+          path: tsconfig.worker.tsbuildinfo
+          key: tsbuildinfo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'tsconfig.worker.json') }}-${{ github.sha }}
+          restore-keys: |
+            tsbuildinfo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'tsconfig.worker.json') }}-
+            tsbuildinfo-${{ runner.os }}-
+      - name: Restore Vitest cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.vite/vitest
+          key: vitest-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'vitest.config.ts') }}-${{ github.sha }}
+          restore-keys: |
+            vitest-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'vitest.config.ts') }}-
+            vitest-${{ runner.os }}-
       - name: Check configuration
         id: config
         continue-on-error: true
