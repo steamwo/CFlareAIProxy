@@ -11,9 +11,9 @@ permissions:
   contents: write
 
 jobs:
-  validate-and-commit:
+  diagnose-web-types:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - name: Checkout branch
         env:
@@ -33,48 +33,12 @@ jobs:
           path.write_text(text.replace(old, new))
           PY
           python3 scripts/agent-fix-qoder-key-models.py
-          rm scripts/agent-fix-qoder-key-models.py .github/workflows/agent-qoder-key-model-fix.yml
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.9.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.13.0
-          cache: pnpm
-          cache-dependency-path: repo/pnpm-lock.yaml
       - name: Install dependencies
         working-directory: repo
-        run: pnpm install --frozen-lockfile
-      - name: Check configuration
-        working-directory: repo
-        run: node scripts/check-config.mjs
-      - name: Check web assets
-        working-directory: repo
-        run: node scripts/check-web.mjs
-      - name: Typecheck worker
-        working-directory: repo
-        run: pnpm run typecheck:worker
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+          pnpm install --frozen-lockfile --reporter=silent
       - name: Typecheck web
         working-directory: repo
         run: pnpm run typecheck:web
-      - name: Run tests
-        working-directory: repo
-        run: pnpm run test
-      - name: Build production web bundle
-        working-directory: repo
-        run: pnpm run build:web
-      - name: Run Wrangler dry run
-        working-directory: repo
-        run: pnpm run config:check
-      - name: Commit validated fix
-        working-directory: repo
-        run: |
-          git config user.name "openai-agent"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/qoder-model-routing.ts src/db.ts src/admin.ts \
-            web/src/types.ts web/src/views/KeysView.vue \
-            web/src/utils/model-selection.ts web/src/utils/model-selection.test.ts \
-            test/qoder-model-routing.test.ts docs/qoder-model-routing.md
-          git add -u .github/workflows/agent-qoder-key-model-fix.yml scripts/agent-fix-qoder-key-models.py
-          git commit -m "Normalize Qoder models in gateway keys"
-          git push origin HEAD:agent/qoder-display-name-routing
