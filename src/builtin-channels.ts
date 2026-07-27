@@ -2,6 +2,8 @@ import type { PoolStrategy, ProviderKind, ProviderRow } from "./types";
 
 export type BuiltinChannelId = "codex" | "kimi" | "qoder" | "opencode";
 
+export const CODEX_CLIENT_VERSION = "0.144.1";
+
 export interface BuiltinChannelDefinition {
   id: BuiltinChannelId;
   name: string;
@@ -29,7 +31,7 @@ export const BUILTIN_CHANNELS: readonly BuiltinChannelDefinition[] = [
       responses: "/responses",
       chat: "/responses",
       completions: "/responses",
-      models: "/models",
+      models: `/models?client_version=${CODEX_CLIENT_VERSION}`,
     },
     auth: {
       flow: "authorization_code_pkce",
@@ -48,7 +50,7 @@ export const BUILTIN_CHANNELS: readonly BuiltinChannelDefinition[] = [
       "OpenAI-Beta": "responses=experimental",
       originator: "codex_cli_rs",
     },
-    options: { session_affinity: true },
+    options: { session_affinity: true, codex_client_version: CODEX_CLIENT_VERSION },
   },
   {
     id: "kimi",
