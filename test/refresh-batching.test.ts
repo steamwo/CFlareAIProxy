@@ -64,6 +64,10 @@ describe("quota refresh batching", () => {
 });
 
 describe("model refresh batching", () => {
+  it("keeps the default inside the verified Free-plan D1 budget", () => {
+    expect(MODEL_REFRESH_BATCH_LIMIT).toBe(6);
+  });
+
   it("asks the database for at most one batch", async () => {
     const capture: Capture = { sql: [], binds: [] };
     const env = { DB: createDb(capture, []) } as never;
@@ -72,12 +76,36 @@ describe("model refresh batching", () => {
     expect(capture.binds[0]?.[0]).toBe(MODEL_REFRESH_BATCH_LIMIT);
   });
 
-  it("takes the least recently attempted catalogues first", async () => {
+  it("takes the least recently attempted catalogues from enabled providers first", async () => {
     const capture: Capture = { sql: [], binds: [] };
     const env = { DB: createDb(capture, []) } as never;
     await refreshAllModels(env);
+    expect(capture.sql[0]).toContain("JOIN providers p ON p.id=c.provider_id AND p.enabled=1");
     expect(capture.sql[0]).toContain("LEFT JOIN credential_refresh_attempts");
     expect(capture.sql[0]).toMatch(/ORDER BY\s+COALESCE\(a\.model_attempted_at, 0\) ASC/);
+  });
+
+  it("packs attempt markers once per group instead of once per account", async () => {
+    const capture: Capture = { sql: [], binds: [] };
+    const ids = ["c1", "c2", "c3", "c4", "c5", "c6"];
+    const env = { DB: createDb(capture, ids) } as never;
+    const results = await refreshAllModels(env);
+    const markers = capture.sql
+      .map((sql, index) => ({ sql, binds: capture.binds[index] ?? [] }))
+      .filter((entry) => entry.sql.includes("INSERT INTO credential_refresh_attempts"));
+    expect(markers).toHaveLength(2);
+    expect(JSON.parse(String(markers[0]?.binds[1]))).toEqual(ids.slice(0, 4));
+    expect(JSON.parse(String(markers[1]?.binds[1]))).toEqual(ids.slice(4));
+    expect(results).toHaveLength(ids.length);
+  });
+
+  it("returns setup failures and still reaches later groups", async () => {
+    const capture: Capture = { sql: [], binds: [] };
+    const ids = ["c1", "c2", "c3", "c4", "c5"];
+    const env = { DB: createDb(capture, ids) } as never;
+    const results = await refreshAllModels(env);
+    expect(results).toHaveLength(ids.length);
+    expect(results.every((result) => result.error)).toBe(true);
   });
 });
 

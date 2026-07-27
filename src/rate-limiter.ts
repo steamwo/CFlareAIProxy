@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { runModelRefreshSweep, type ModelRefreshResult } from "./models";
 import type { Env, RateLease, UsageAggregateEvent, UsageEvent } from "./types";
 
 interface AcquirePayload {
@@ -53,6 +54,22 @@ export interface AlertClaimResult {
   claimedAt: number;
 }
 
+/** Coalesces overlapping refresh requests inside one Durable Object instance. */
+export class ModelRefreshGate {
+  private running: Promise<ModelRefreshResult[]> | null = null;
+
+  run(task: () => Promise<ModelRefreshResult[]>): Promise<ModelRefreshResult[]> {
+    if (!this.running) {
+      const execution = task();
+      this.running = execution;
+      void execution.finally(() => {
+        if (this.running === execution) this.running = null;
+      }).catch(() => undefined);
+    }
+    return this.running;
+  }
+}
+
 const ACTIVITY_BUCKET_SECONDS = 5 * 60;
 const QUEUE_BATCH_SIZE = 100;
 const LEASE_TTL_MS = 15 * 60_000;
@@ -96,6 +113,7 @@ function loginScopeList(value: unknown): string[] {
 export class RateLimiter extends DurableObject<Env> {
   private alarmAt: number | null = null;
   private readonly environment: Env;
+  private readonly modelRefreshGate = new ModelRefreshGate();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -201,6 +219,13 @@ export class RateLimiter extends DurableObject<Env> {
       const payload = await request.json() as { scopes?: unknown };
       this.resetLogin(loginScopeList(payload.scopes));
       return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/models/refresh") {
+      const payload = await request.json() as { limit?: unknown };
+      const limit = typeof payload.limit === "number" && Number.isFinite(payload.limit)
+        ? Math.max(1, Math.floor(payload.limit))
+        : undefined;
+      return Response.json(await this.modelRefreshGate.run(() => runModelRefreshSweep(this.environment, limit)));
     }
     if (request.method === "POST" && url.pathname === "/alerts/claim") {
       const payload = await request.json() as { scope?: unknown; windowMs?: unknown; now?: unknown };

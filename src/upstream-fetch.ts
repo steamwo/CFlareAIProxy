@@ -8,6 +8,8 @@ export { validateProxyUrl };
 export interface ProviderFetchOptions {
   timeoutMs?: number;
   purpose?: "inference" | "models" | "quota" | "oauth" | "test";
+  /** Preloaded by bounded batch jobs so repeated attempts do not re-read D1 proxy settings. */
+  proxyConfig?: ProviderProxyConfig | null;
 }
 
 function errorMessage(error: unknown): string {
@@ -98,7 +100,7 @@ export async function providerFetch(
     throw new GatewayError(400, "UPSTREAM_URL_INVALID", "上游 URL 必须使用 HTTP 或 HTTPS");
   }
   const timeoutMs = Math.max(1000, options.timeoutMs ?? 120_000);
-  const config = await getProviderProxyConfig(env, provider.id);
+  const config = options.proxyConfig === undefined ? await getProviderProxyConfig(env, provider.id) : options.proxyConfig;
   if (!config?.enabled || shouldBypass(config, url)) {
     return fetch(url.toString(), { ...init, signal: init.signal ?? AbortSignal.timeout(timeoutMs) });
   }

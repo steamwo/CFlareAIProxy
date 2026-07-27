@@ -1,1 +1,0 @@
-Applied PR #40 model-refresh follow-up fixes
