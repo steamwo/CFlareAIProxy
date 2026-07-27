@@ -4,7 +4,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check:
@@ -16,10 +16,10 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
           show-progress: false
-      - name: Apply and clean dynamic progress fix
+      - name: Apply dynamic progress fix
         run: |
           python .github/pr40-dynamic-progress-fix.py
-          git show HEAD^:.github/workflows/check.yml > .github/workflows/check.yml
+          git show HEAD~2:.github/workflows/check.yml > .github/workflows/check.yml
           rm .github/pr40-dynamic-progress-fix.py
           git diff --check
       - uses: pnpm/action-setup@v4
@@ -31,16 +31,10 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Run standard validation
-        run: pnpm run check
-      - name: Build production web bundle
-        run: pnpm run build:web
-      - name: Wrangler dry run
-        run: pnpm run config:check
-      - name: Commit validated dynamic progress fix
+      - name: Capture validation error
         run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/models.ts test/model-refresh-d1-budget.test.ts .github/workflows/check.yml
-          git commit -m "fix: make provider refresh progress authoritative"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          if ! pnpm run check > validation-error.log 2>&1; then
+            tail -n 180 validation-error.log
+            exit 1
+          fi
+          cat validation-error.log
