@@ -19,7 +19,7 @@ jobs:
       - name: Apply dynamic progress fix
         run: |
           python .github/pr40-dynamic-progress-fix.py
-          git show HEAD~2:.github/workflows/check.yml > .github/workflows/check.yml
+          git show HEAD~3:.github/workflows/check.yml > .github/workflows/check.yml
           rm .github/pr40-dynamic-progress-fix.py
           git diff --check
       - uses: pnpm/action-setup@v4
@@ -31,10 +31,17 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Capture validation error
-        run: |
-          if ! pnpm run check > validation-error.log 2>&1; then
-            tail -n 180 validation-error.log
-            exit 1
-          fi
-          cat validation-error.log
+      - name: Run validation
+        id: validation
+        continue-on-error: true
+        run: pnpm run check > validation-error.log 2>&1
+      - name: Upload validation error
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dynamic-progress-validation
+          path: validation-error.log
+          if-no-files-found: error
+      - name: Enforce validation
+        if: always()
+        run: test "${{ steps.validation.outcome }}" = success
