@@ -279,4 +279,31 @@ describe("model refresh budgets", () => {
     });
   });
 
+  it("continues an existing provider cycle with MASTER_KEY_PREVIOUS after rotation", async () => {
+    const ids = Array.from({ length: 6 }, (_, index) => `c${index + 1}`);
+    const { env } = await createEnv({ ids, providerFor: () => "p1" });
+    const previousMasterKey = env.MASTER_KEY;
+    const first = await runProviderModelRefreshPage(env, "p1");
+    expect(first.processed).toBe(MODEL_REFRESH_BATCH_LIMIT);
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    Object.assign(env, {
+      MASTER_KEY: Buffer.alloc(32, 8).toString("base64"),
+      MASTER_KEY_PREVIOUS: previousMasterKey,
+    });
+
+    const second = await runProviderModelRefreshPage(
+      env,
+      "p1",
+      MODEL_REFRESH_BATCH_LIMIT,
+      first.nextCursor,
+    );
+    expect(second.processed).toBe(1);
+    expect(second.processedInCycle).toBe(6);
+    expect(second.remaining).toBe(0);
+    expect(second.complete).toBe(true);
+    expect(second.nextCursor).toBeUndefined();
+    expect(second.results.map((result) => result.credentialId)).toEqual(["c6"]);
+  });
+
 });
