@@ -1057,7 +1057,17 @@ export function createAdminApp() {
     return c.json({ data, public: publicModels });
   });
   app.post("/api/models/refresh", async (c) => c.json({ data: await refreshAllModels(c.env) }));
-  app.post("/api/models/refresh/provider/:id", async (c) => c.json({ data: await refreshProviderModels(c.env, c.req.param("id")) }));
+  app.post("/api/models/refresh/provider/:id", async (c) => {
+    const page = await refreshProviderModels(c.env, c.req.param("id"));
+    return c.json({
+      data: page.results,
+      providerId: page.providerId,
+      processed: page.processed,
+      total: page.total,
+      remaining: page.remaining,
+      complete: page.remaining === 0,
+    });
+  });
   app.post("/api/models/refresh/credential/:id", async (c) => c.json(await refreshCredentialModels(c.env, c.req.param("id"))));
 
   app.get("/api/quotas", async (c) => c.json({ data: await listQuotaSnapshots(c.env) }));

@@ -65,7 +65,7 @@ describe("quota refresh batching", () => {
 
 describe("model refresh batching", () => {
   it("keeps the default inside the verified Free-plan D1 budget", () => {
-    expect(MODEL_REFRESH_BATCH_LIMIT).toBe(6);
+    expect(MODEL_REFRESH_BATCH_LIMIT).toBe(5);
   });
 
   it("asks the database for at most one batch", async () => {

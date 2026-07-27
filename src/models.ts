@@ -1,4 +1,4 @@
-import { getCredential, getProvider, getProviderProxyConfig, listCredentialRows, loadCachedProvider } from "./db";
+import { getCredential, getProvider, getProviderProxyConfig, loadCachedProvider } from "./db";
 import type { ProviderCache } from "./db";
 import { GatewayError } from "./errors";
 import { providerAuthHeaders } from "./providers/headers";
@@ -27,7 +27,23 @@ export interface ModelRefreshResult {
   error?: string;
 }
 
+export interface ProviderModelRefreshPage {
+  providerId: string;
+  results: ModelRefreshResult[];
+  processed: number;
+  total: number;
+  remaining: number;
+}
+
 type ProviderProxyCache = Map<string, Promise<ProviderProxyConfig | null>>;
+
+async function invalidateModelCache(env: Env): Promise<void> {
+  await Promise.all([
+    env.CONFIG_CACHE.delete("models:public"),
+    env.CONFIG_CACHE.delete("models:public:v2"),
+    env.CONFIG_CACHE.delete("models:public:v3"),
+  ]);
+}
 
 function loadCachedProviderProxy(
   env: Env,
@@ -239,6 +255,7 @@ export async function refreshOpenCodeAnonymousModels(
   env: Env,
   providerCache?: ProviderCache,
   proxyCache?: ProviderProxyCache,
+  invalidateCache = true,
 ): Promise<ModelRefreshResult> {
   let provider: ProviderConfig | undefined;
   try {
@@ -265,7 +282,7 @@ export async function refreshOpenCodeAnonymousModels(
       }
     }
     await env.DB.batch(discoveredModelRewriteStatements(env, provider.id, [""], rows));
-    await Promise.all([env.CONFIG_CACHE.delete("models:public"), env.CONFIG_CACHE.delete("models:public:v2"), env.CONFIG_CACHE.delete("models:public:v3")]);
+    if (invalidateCache) await invalidateModelCache(env);
     return { providerId: "opencode", credentialId: "", count: models.length, endpoints: [...endpointSet] };
   } catch (error) {
     return {
@@ -292,6 +309,7 @@ export async function refreshCredentialModels(
   credentialId: string,
   providerCache?: ProviderCache,
   proxyCache?: ProviderProxyCache,
+  invalidateCache = true,
 ): Promise<ModelRefreshResult> {
   let credential: Credential | undefined;
   let provider: ProviderConfig | undefined;
@@ -323,7 +341,7 @@ export async function refreshCredentialModels(
       }
     }
     await env.DB.batch(discoveredModelRewriteStatements(env, provider.id, discoveryScopes, rows));
-    await Promise.all([env.CONFIG_CACHE.delete("models:public"), env.CONFIG_CACHE.delete("models:public:v2"), env.CONFIG_CACHE.delete("models:public:v3")]);
+    if (invalidateCache) await invalidateModelCache(env);
     return { providerId: provider.id, credentialId, count: models.length, endpoints: [...endpointSet] };
   } catch (error) {
     return {
@@ -336,33 +354,13 @@ export async function refreshCredentialModels(
   }
 }
 
-export async function refreshProviderModels(env: Env, providerId: string): Promise<ModelRefreshResult[]> {
-  const provider = await getProvider(env, providerId);
-  const rows = await listCredentialRows(env, providerId);
-  const results: ModelRefreshResult[] = [];
-  const providerCache: ProviderCache = new Map([[providerId, Promise.resolve(provider)]]);
-  const proxyCache: ProviderProxyCache = new Map();
-  if (providerId === "opencode") results.push(await refreshOpenCodeAnonymousModels(env, providerCache, proxyCache));
-  for (let index = 0; index < rows.length; index += 4) {
-    results.push(...await Promise.all(
-      rows.slice(index, index + 4).map((row) => refreshCredentialModels(env, row.id, providerCache, proxyCache)),
-    ));
-  }
-  return results;
-}
-
 /**
- * Six credentials leave a verified Free-plan D1 budget:
- *
- * selection + OpenCode probe + two packed attempt markers = 4 queries;
- * six worst-case credentials on distinct providers cost 36 queries
- * (credential, provider, provider/system proxy and two packed rewrite statements each);
- * the anonymous OpenCode refresh can use the remaining six-query margin.
- *
- * The sweep itself runs inside one fixed-name Durable Object, so its D1 budget is isolated
- * from the hourly retention/quota invocation and overlapping admin/cron refreshes coalesce.
+ * Five credentials fit both Free-plan ceilings in the true worst case: distinct providers,
+ * no provider-specific proxy, successful writes and an enabled OpenCode anonymous catalogue.
+ * That path uses at most 39 D1 queries and 48 total subrequests after cache invalidation is
+ * collapsed to one three-key operation per sweep.
  */
-export const MODEL_REFRESH_BATCH_LIMIT = 6;
+export const MODEL_REFRESH_BATCH_LIMIT = 5;
 const MODEL_REFRESH_CONCURRENCY = 4;
 const MODEL_REFRESH_DO_NAME = "model-refresh";
 
@@ -399,15 +397,16 @@ export async function runModelRefreshSweep(
   const providerCache: ProviderCache = new Map();
   const proxyCache: ProviderProxyCache = new Map();
   const openCode = await env.DB.prepare("SELECT enabled FROM providers WHERE id='opencode'").first<{ enabled: number }>();
-  if (openCode?.enabled === 1) output.push(await refreshOpenCodeAnonymousModels(env, providerCache, proxyCache));
+  if (openCode?.enabled === 1) output.push(await refreshOpenCodeAnonymousModels(env, providerCache, proxyCache, false));
 
   for (let index = 0; index < result.results.length; index += MODEL_REFRESH_CONCURRENCY) {
     const group = result.results.slice(index, index + MODEL_REFRESH_CONCURRENCY);
     await markModelRefreshAttempts(env, group.map((row) => row.id));
     output.push(...await Promise.all(
-      group.map((row) => refreshCredentialModels(env, row.id, providerCache, proxyCache)),
+      group.map((row) => refreshCredentialModels(env, row.id, providerCache, proxyCache, false)),
     ));
   }
+  if (output.some((item) => item.count > 0)) await invalidateModelCache(env);
   return output;
 }
 
@@ -416,6 +415,63 @@ export async function runModelRefreshSweep(
  * active sweep, so admin and cron requests that overlap receive the same result instead of
  * selecting and processing the same accounts twice.
  */
+export async function runProviderModelRefreshPage(
+  env: Env,
+  providerId: string,
+  limit = MODEL_REFRESH_BATCH_LIMIT,
+): Promise<ProviderModelRefreshPage> {
+  const boundedLimit = Math.max(1, Math.min(MODEL_REFRESH_BATCH_LIMIT, Math.floor(limit) || MODEL_REFRESH_BATCH_LIMIT));
+  const provider = await getProvider(env, providerId);
+  const page = await env.DB.prepare(
+    `SELECT c.id,
+       (SELECT COUNT(*) FROM credentials total WHERE total.provider_id=? AND total.enabled=1) AS total
+     FROM credentials c
+     LEFT JOIN credential_refresh_attempts a ON a.credential_id=c.id
+     WHERE c.provider_id=? AND c.enabled=1
+     ORDER BY COALESCE(a.model_attempted_at, 0) ASC, c.priority, c.created_at
+     LIMIT ?`,
+  ).bind(providerId, providerId, boundedLimit).all<{ id: string; total: number }>();
+  const results: ModelRefreshResult[] = [];
+  const providerCache: ProviderCache = new Map([[providerId, Promise.resolve(provider)]]);
+  const proxyCache: ProviderProxyCache = new Map();
+  if (providerId === "opencode") {
+    results.push(await refreshOpenCodeAnonymousModels(env, providerCache, proxyCache, false));
+  }
+  for (let index = 0; index < page.results.length; index += MODEL_REFRESH_CONCURRENCY) {
+    const group = page.results.slice(index, index + MODEL_REFRESH_CONCURRENCY);
+    await markModelRefreshAttempts(env, group.map((row) => row.id));
+    results.push(...await Promise.all(
+      group.map((row) => refreshCredentialModels(env, row.id, providerCache, proxyCache, false)),
+    ));
+  }
+  if (results.some((item) => item.count > 0)) await invalidateModelCache(env);
+  const total = Number(page.results[0]?.total ?? 0);
+  return {
+    providerId,
+    results,
+    processed: page.results.length,
+    total,
+    remaining: Math.max(0, total - page.results.length),
+  };
+}
+
+export async function refreshProviderModels(
+  env: Env,
+  providerId: string,
+  limit = MODEL_REFRESH_BATCH_LIMIT,
+): Promise<ProviderModelRefreshPage> {
+  const namespace = env.RATE_LIMITER;
+  if (!namespace) return runProviderModelRefreshPage(env, providerId, limit);
+  const stub = namespace.get(namespace.idFromName(MODEL_REFRESH_DO_NAME));
+  const response = await stub.fetch(`https://do.internal/models/refresh/provider/${encodeURIComponent(providerId)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  if (!response.ok) throw new Error(`provider model refresh coordinator returned ${response.status}`);
+  return await response.json() as ProviderModelRefreshPage;
+}
+
 export async function refreshAllModels(
   env: Env,
   limit = MODEL_REFRESH_BATCH_LIMIT,

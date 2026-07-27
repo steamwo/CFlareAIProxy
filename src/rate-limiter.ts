@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { runModelRefreshSweep, type ModelRefreshResult } from "./models";
+import { runModelRefreshSweep, runProviderModelRefreshPage } from "./models";
 import type { Env, RateLease, UsageAggregateEvent, UsageEvent } from "./types";
 
 interface AcquirePayload {
@@ -54,19 +54,21 @@ export interface AlertClaimResult {
   claimedAt: number;
 }
 
-/** Coalesces overlapping refresh requests inside one Durable Object instance. */
+/** Serialises all catalogue sweeps and coalesces duplicate work by scope. */
 export class ModelRefreshGate {
-  private running: Promise<ModelRefreshResult[]> | null = null;
+  private readonly active = new Map<string, Promise<unknown>>();
+  private tail: Promise<void> = Promise.resolve();
 
-  run(task: () => Promise<ModelRefreshResult[]>): Promise<ModelRefreshResult[]> {
-    if (!this.running) {
-      const execution = task();
-      this.running = execution;
-      void execution.finally(() => {
-        if (this.running === execution) this.running = null;
-      }).catch(() => undefined);
-    }
-    return this.running;
+  run<T>(key: string, task: () => Promise<T>): Promise<T> {
+    const existing = this.active.get(key);
+    if (existing) return existing as Promise<T>;
+    const execution = this.tail.then(() => task(), () => task());
+    this.active.set(key, execution);
+    this.tail = execution.then(() => undefined, () => undefined);
+    void execution.finally(() => {
+      if (this.active.get(key) === execution) this.active.delete(key);
+    }).catch(() => undefined);
+    return execution;
   }
 }
 
@@ -225,7 +227,19 @@ export class RateLimiter extends DurableObject<Env> {
       const limit = typeof payload.limit === "number" && Number.isFinite(payload.limit)
         ? Math.max(1, Math.floor(payload.limit))
         : undefined;
-      return Response.json(await this.modelRefreshGate.run(() => runModelRefreshSweep(this.environment, limit)));
+      return Response.json(await this.modelRefreshGate.run("all", () => runModelRefreshSweep(this.environment, limit)));
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/models/refresh/provider/")) {
+      const providerId = decodeURIComponent(url.pathname.slice("/models/refresh/provider/".length));
+      if (!providerId) return new Response("Provider is required", { status: 400 });
+      const payload = await request.json() as { limit?: unknown };
+      const limit = typeof payload.limit === "number" && Number.isFinite(payload.limit)
+        ? Math.max(1, Math.floor(payload.limit))
+        : undefined;
+      return Response.json(await this.modelRefreshGate.run(
+        `provider:${providerId}`,
+        () => runProviderModelRefreshPage(this.environment, providerId, limit),
+      ));
     }
     if (request.method === "POST" && url.pathname === "/alerts/claim") {
       const payload = await request.json() as { scope?: unknown; windowMs?: unknown; now?: unknown };
