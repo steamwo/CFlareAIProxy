@@ -1,1 +1,1 @@
-RuntimeError: src/models.ts: expected one match, found 2: '{ purpose: "models", timeoutMs })'
+Applied PR #40 model-refresh follow-up fixes
