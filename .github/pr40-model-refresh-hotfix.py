@@ -30,14 +30,14 @@ old = '''replace_once(
     '  const config = options.proxyConfig === undefined ? await getProviderProxyConfig(env, provider.id) : options.proxyConfig;',
 )
 '''
-new = '''replace_once(
+new = """replace_once(
     "src/upstream-fetch.ts",
     '''  const timeoutMs = Math.max(1000, options.timeoutMs ?? 120_000);
   const config = await getProviderProxyConfig(env, provider.id);''',
     '''  const timeoutMs = Math.max(1000, options.timeoutMs ?? 120_000);
   const config = options.proxyConfig === undefined ? await getProviderProxyConfig(env, provider.id) : options.proxyConfig;''',
 )
-'''
+"""
 if text.count(old) != 1:
     raise RuntimeError(f'expected one upstream proxy replacement block, found {text.count(old)}')
 text = text.replace(old, new)
