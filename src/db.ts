@@ -8,7 +8,6 @@ import { discoveredModelAllowed, normalizeAllowedModelNames, publicDiscoveredMod
 import type {
   Credential,
   CredentialRow,
-  DiscoveredModelRow,
   Env,
   GatewayEndpoint,
   GatewayKeyRow,
@@ -22,7 +21,7 @@ import type {
   ProxyProtocol,
   QuotaSnapshot,
   QuotaSnapshotRow,
-  UsageEvent,
+  QuotaWindow,
 } from "./types";
 import { parseJson, sha256Hex } from "./utils";
 
@@ -32,6 +31,27 @@ export async function getProvider(env: Env, providerId: string): Promise<Provide
     .first<ProviderRow>();
   if (!row) throw new GatewayError(404, "PROVIDER_NOT_FOUND", `Provider ${providerId} was not found`);
   return hydrateProvider(row);
+}
+
+/**
+ * Per-sweep provider cache for batch jobs.
+ *
+ * Quota and catalogue refreshes order accounts by staleness, so a batch routinely holds
+ * many accounts of the same channel; without a cache each re-reads the identical provider
+ * row. Passed explicitly rather than held at module scope so a long-lived isolate can never
+ * serve a provider row an operator has since edited.
+ */
+export type ProviderCache = Map<string, Promise<ProviderConfig>>;
+
+export function loadCachedProvider(env: Env, providerId: string, cache?: ProviderCache): Promise<ProviderConfig> {
+  if (!cache) return getProvider(env, providerId);
+  const cached = cache.get(providerId);
+  if (cached) return cached;
+  const pending = getProvider(env, providerId);
+  // A rejected lookup is evicted so a transient failure is retried by the next account.
+  pending.catch(() => cache.delete(providerId));
+  cache.set(providerId, pending);
+  return pending;
 }
 
 export function hydrateProvider(row: ProviderRow): ProviderConfig {
@@ -70,7 +90,6 @@ function maskedProxy(value: string | null): Omit<ProviderProxySummary, "source" 
     enabled: Boolean(value),
     proxyProtocol,
     proxyHost,
-    bridgeConfigured: false,
     runtimeReady,
   };
 }
@@ -78,7 +97,7 @@ function maskedProxy(value: string | null): Omit<ProviderProxySummary, "source" 
 async function readSystemProxyUrl(env: Env): Promise<string> {
   const row = await env.DB.prepare("SELECT value_ciphertext FROM system_settings WHERE key='system_proxy_url'")
     .first<{ value_ciphertext: string | null }>();
-  return row?.value_ciphertext ? await decryptSecret(row.value_ciphertext, env.MASTER_KEY) : "";
+  return row?.value_ciphertext ? await decryptSecret(row.value_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS) : "";
 }
 
 async function readProviderProxyUrl(env: Env, providerId: string): Promise<string> {
@@ -86,7 +105,7 @@ async function readProviderProxyUrl(env: Env, providerId: string): Promise<strin
     .bind(providerId)
     .first<{ enabled: number; proxy_url_ciphertext: string | null }>();
   if (!row || row.enabled !== 1 || !row.proxy_url_ciphertext) return "";
-  return decryptSecret(row.proxy_url_ciphertext, env.MASTER_KEY);
+  return decryptSecret(row.proxy_url_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS);
 }
 
 export async function getProviderProxyConfig(env: Env, providerId: string): Promise<ProviderProxyConfig | null> {
@@ -97,9 +116,7 @@ export async function getProviderProxyConfig(env: Env, providerId: string): Prom
   return {
     providerId,
     enabled: true,
-    bridgeUrl: env.PROXY_BRIDGE_URL?.trim() ?? "",
     proxyUrl,
-    bridgeToken: env.PROXY_BRIDGE_TOKEN ?? "",
     noProxy: [],
     connectTimeoutMs: 20_000,
     requestTimeoutMs: 120_000,
@@ -134,16 +151,19 @@ export async function upsertProviderProxyConfig(
   const now = Math.floor(Date.now() / 1000);
   const proxyUrl = input.proxyUrl.trim();
   const ciphertext = proxyUrl ? await encryptSecret(proxyUrl, env.MASTER_KEY) : null;
+  // bridge_url / bridge_token_ciphertext are dead columns from the removed proxy bridge.
+  // Migration 0004 declares bridge_url NOT NULL and shipped migrations are append-only, so
+  // the write keeps pinning them to empty/NULL rather than dropping the columns.
   await env.DB.prepare(
     `INSERT INTO provider_proxies
       (provider_id,enabled,bridge_url,proxy_url_ciphertext,bridge_token_ciphertext,no_proxy_json,
        connect_timeout_ms,request_timeout_ms,created_at,updated_at)
-     VALUES(?,?,?, ?,NULL,'[]',20000,120000,?,?)
+     VALUES(?,?,'', ?,NULL,'[]',20000,120000,?,?)
      ON CONFLICT(provider_id) DO UPDATE SET
        enabled=excluded.enabled,bridge_url='',proxy_url_ciphertext=excluded.proxy_url_ciphertext,
        bridge_token_ciphertext=NULL,no_proxy_json='[]',connect_timeout_ms=20000,
        request_timeout_ms=120000,updated_at=excluded.updated_at`,
-  ).bind(input.providerId, proxyUrl ? 1 : 0, "", ciphertext, now, now).run();
+  ).bind(input.providerId, proxyUrl ? 1 : 0, ciphertext, now, now).run();
 }
 
 export async function deleteProviderProxyConfig(env: Env, providerId: string): Promise<void> {
@@ -403,8 +423,13 @@ function exhaustedUntil(snapshot: QuotaSnapshot, row: Pick<QuotaSnapshotRow, "fe
     return { exhausted: retryAt > now, reason: "可用余额已耗尽", retryAt };
   }
 
+  // Response rate-limit headers are short rolling counters (typically per minute) captured on every
+  // upstream call. They are display-only: treating `remaining: 0` as quota exhaustion would park the
+  // account for the whole snapshot TTL over a limit that resets within a minute.
+  const windowSource = (window: QuotaWindow): QuotaSnapshot["source"] => window.source ?? snapshot.source;
   const windows = snapshot.windows.filter((window) =>
-    window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined,
+    windowSource(window) !== "headers"
+    && (window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined),
   );
   if (!windows.length) return { exhausted: false };
   const isEmpty = (window: QuotaSnapshot["windows"][number]) =>
@@ -470,24 +495,6 @@ export async function listCredentialAvailabilityForModel(
   return output;
 }
 
-export async function listCredentialRowsForModel(
-  env: Env,
-  providerId: string,
-  upstreamModel: string,
-  endpoint: GatewayEndpoint,
-): Promise<CredentialRow[]> {
-  return (await listCredentialAvailabilityForModel(env, providerId, upstreamModel, endpoint))
-    .filter((entry) => entry.available)
-    .map((entry) => entry.row);
-}
-
-export async function listDiscoveredModelRows(env: Env, providerId?: string): Promise<DiscoveredModelRow[]> {
-  const result = providerId
-    ? await env.DB.prepare("SELECT * FROM discovered_models WHERE provider_id=? ORDER BY model_id,endpoint,credential_id").bind(providerId).all<DiscoveredModelRow>()
-    : await env.DB.prepare("SELECT * FROM discovered_models ORDER BY provider_id,model_id,endpoint,credential_id").all<DiscoveredModelRow>();
-  return result.results;
-}
-
 export async function getCredential(env: Env, credentialId: string): Promise<Credential> {
   if (isOpenCodeAnonymousCredential(credentialId)) return openCodeAnonymousCredential();
   const row = await env.DB.prepare("SELECT * FROM credentials WHERE id = ?")
@@ -496,10 +503,16 @@ export async function getCredential(env: Env, credentialId: string): Promise<Cre
   if (!row || row.enabled !== 1) {
     throw new GatewayError(503, "NO_CREDENTIAL", "No enabled credential is available", "upstream_error");
   }
+  // Both decryptions await the same memoized CryptoKey; running them together
+  // removes one serial await from the hot path.
+  const [secret, refreshToken] = await Promise.all([
+    decryptSecret(row.secret_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS),
+    row.refresh_ciphertext ? decryptSecret(row.refresh_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS) : Promise.resolve(undefined),
+  ]);
   return {
     ...row,
-    secret: await decryptSecret(row.secret_ciphertext, env.MASTER_KEY),
-    refreshToken: row.refresh_ciphertext ? await decryptSecret(row.refresh_ciphertext, env.MASTER_KEY) : undefined,
+    secret,
+    refreshToken,
     metadata: parseJson<Record<string, unknown>>(row.metadata_json, {}),
   };
 }
@@ -547,7 +560,8 @@ export async function createCredential(
       now,
     )
     .run();
-  await env.CONFIG_CACHE.delete(`provider:${input.providerId}`);
+  // No `provider:<id>` KV key is ever written or read (getProvider goes straight to
+  // D1), so the former invalidation here was a pure KV round trip against a dead key.
   return id;
 }
 
@@ -638,54 +652,3 @@ export async function createGatewayKey(
   return { id, key };
 }
 
-export async function insertUsage(env: Env, event: UsageEvent): Promise<void> {
-  let costMicros = 0;
-  if (event.providerId && event.upstreamModel) {
-    const price = await env.DB.prepare(
-      `SELECT input_micros_per_million, output_micros_per_million, cache_micros_per_million
-       FROM model_prices WHERE provider_id = ? AND model = ?`,
-    ).bind(event.providerId, event.upstreamModel).first<{
-      input_micros_per_million: number;
-      output_micros_per_million: number;
-      cache_micros_per_million: number;
-    }>();
-    if (price) {
-      const cachedTokens = Math.min(event.usage.promptTokens, event.usage.cachedTokens);
-      const uncachedInputTokens = Math.max(0, event.usage.promptTokens - cachedTokens);
-      costMicros = Math.max(0, Math.ceil(
-        (uncachedInputTokens * price.input_micros_per_million
-          + cachedTokens * price.cache_micros_per_million
-          + event.usage.completionTokens * price.output_micros_per_million) / 1_000_000,
-      ));
-    }
-  }
-
-  await env.DB.prepare(
-    `INSERT OR REPLACE INTO request_logs
-      (request_id, gateway_key_id, provider_id, credential_id, public_model, upstream_model,
-       endpoint, status_code, prompt_tokens, completion_tokens, cached_tokens, total_tokens, cost_micros, latency_ms,
-       first_token_ms, error_code, error_message, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      event.requestId,
-      event.gatewayKeyId ?? null,
-      event.providerId ?? null,
-      event.credentialId ?? null,
-      event.publicModel ?? null,
-      event.upstreamModel ?? null,
-      event.endpoint ?? null,
-      event.statusCode,
-      event.usage.promptTokens,
-      event.usage.completionTokens,
-      event.usage.cachedTokens,
-      event.usage.totalTokens,
-      costMicros,
-      event.latencyMs,
-      event.firstTokenMs ?? null,
-      event.errorCode ?? null,
-      event.errorMessage?.slice(0, 1000) ?? null,
-      event.createdAt,
-    )
-    .run();
-}

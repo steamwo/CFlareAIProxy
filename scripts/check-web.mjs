@@ -2,6 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { root } from "./lib.mjs";
+import { checkTypeContract } from "./check-types-sync.mjs";
 const required=["web/index.html","web/src/main.ts","web/src/App.vue","web/src/router.ts","web/src/views/ChannelsView.vue","web/src/views/ProvidersView.vue","web/src/views/AuthorizationView.vue","web/src/views/AccountsView.vue","web/src/views/SettingsView.vue","vite.config.ts","src/logging-settings.ts","src/usage-storage.ts","migrations/0007_request_activity_5m.sql"];
 const errors=[];
 for(const file of required) if(!existsSync(join(root,file))) errors.push(`缺少 ${file}`);
@@ -22,7 +23,12 @@ const router=readFileSync(join(root,"web/src/router.ts"),"utf8");
 if(!router.includes('path: "authorization"')||!router.includes("AuthorizationView.vue")) errors.push("独立授权页面未接入路由");
 const accounts=readFileSync(join(root,"web/src/views/AccountsView.vue"),"utf8");
 if(accounts.includes("添加账号 / API Key")||accounts.includes('api<{ data: Provider[] }>("/providers")')) errors.push("账号池仍暴露自定义供应商 API Key 管理入口");
-if(!accounts.includes("近 2 小时健康状态")||!accounts.includes("stat-pill--success")||!accounts.includes("status-blocks")||!accounts.includes("发起授权")) errors.push("CPA 风格账号卡片、近两小时状态条或调用统计未接线");
+if(!accounts.includes("发起授权")) errors.push("账号池缺少发起授权入口");
+if(!accounts.includes("AccountCard")) errors.push("账号池未渲染账号卡片组件");
+// The card markup lives in its own component; assert against the file that owns it so
+// extracting or moving it stays a refactor rather than a check-web failure.
+const accountCard=readFileSync(join(root,"web/src/components/AccountCard.vue"),"utf8");
+if(!accountCard.includes("近 2 小时健康状态")||!accountCard.includes("stat-pill--success")||!accountCard.includes("status-blocks")) errors.push("账号卡片缺少近两小时状态条或调用统计");
 const settings=readFileSync(join(root,"web/src/views/SettingsView.vue"),"utf8");
 if(!settings.includes("requestLoggingEnabled")||!settings.includes("运行日志级别")||!settings.includes("基础调用统计始终开启")||settings.includes("将逐渐变为空")) errors.push("系统设置必须明确日志开关不影响基础调用统计");
 const worker=readFileSync(join(root,"src/index.ts"),"utf8");
@@ -40,5 +46,9 @@ const routes=readFileSync(join(root,"web/src/views/RoutesView.vue"),"utf8");
 if(!routes.includes("managedGroups")||!routes.includes("endpointStates")) errors.push("供应商自动路由未聚合多协议端点");
 const dashboard=readFileSync(join(root,"web/src/views/DashboardView.vue"),"utf8");
 if(!dashboard.includes("heatmapRows")||!dashboard.includes("服务可用性热力图")) errors.push("概览热力图未接线");
+// src/types.ts and web/src/types.ts are independent hand-written views of the same JSON,
+// so a backend field change has no compile-time consequence for the console. Compare field
+// names by declared type name (not source text) against the contract in type-contract.mjs.
+errors.push(...checkTypeContract(root));
 if(errors.length){console.error(errors.map(v=>`✗ ${v}`).join("\n"));process.exit(1)}
 console.log("✓ Vue 3 + Vite + Naive UI 管理台结构检查通过");

@@ -1,3 +1,5 @@
+import { GatewayError } from "./errors";
+import { readResponseText } from "./response-utils";
 import type { UpstreamResponseMode, Usage } from "./types";
 
 const encoder = new TextEncoder();
@@ -91,6 +93,28 @@ function chatChunk(requestId: string, model: string, delta: Record<string, unkno
     model,
     choices: [{ index: 0, delta, finish_reason: finishReason }],
   });
+}
+
+// Mid-stream failures arrive either as an explicit `{"type":"error"}` frame (Anthropic)
+// or as an `error` field inside an otherwise normal payload (Google GenerateContent).
+function streamErrorPayload(event: Record<string, unknown>): { payload: unknown } | undefined {
+  const nested = event.error;
+  if (nested !== undefined && nested !== null) return { payload: nested };
+  if (event.type === "error") return { payload: event };
+  return undefined;
+}
+
+function upstreamErrorMessage(payload: unknown, fallback: string): string {
+  if (typeof payload === "string") return payload || fallback;
+  if (!payload || typeof payload !== "object") return fallback;
+  const record = payload as Record<string, unknown>;
+  const label = typeof record.type === "string" ? record.type
+    : typeof record.status === "string" ? record.status
+      : typeof record.code === "string" ? record.code
+        : typeof record.code === "number" ? String(record.code) : "";
+  const message = typeof record.message === "string" ? record.message : "";
+  if (label && message) return `${label}: ${message}`;
+  return message || label || fallback;
 }
 
 function codexResponseToChat(payload: Record<string, unknown>, model: string, requestId: string): Record<string, unknown> {
@@ -262,27 +286,6 @@ function qoderChatStream(body: ReadableStream<Uint8Array>): ReadableStream<Uint8
   );
 }
 
-async function readTextLimited(body: ReadableStream<Uint8Array> | null, maxBytes = 32 * 1024 * 1024): Promise<string> {
-  if (!body) return "";
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel("response too large");
-      throw new Error(`Buffered upstream response exceeded ${maxBytes} bytes`);
-    }
-    chunks.push(value);
-  }
-  const output = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
-  return decoder.decode(output);
-}
-
 function collectCodexSse(text: string, model: string, requestId: string): Record<string, unknown> {
   let content = "";
   const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
@@ -343,6 +346,11 @@ function collectQoderSse(text: string, model: string, requestId: string): Record
     let envelope: Record<string, unknown>;
     try { envelope = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
     const innerText = typeof envelope.body === "string" ? envelope.body : data;
+    // Mirror qoderChatStream: a non-200 envelope carries an error body, not content.
+    const status = typeof envelope.statusCodeValue === "number" ? envelope.statusCodeValue : 200;
+    if (status !== 200) {
+      throw new GatewayError(502, "UPSTREAM_STREAM_ERROR", `Qoder stream error: ${typeof envelope.body === "string" && envelope.body ? envelope.body : `status ${status}`}`, "upstream_error");
+    }
     let chunk: Record<string, unknown>;
     try { chunk = JSON.parse(innerText) as Record<string, unknown>; } catch { continue; }
     usage = mergeUsage(usage, extractUsage(chunk));
@@ -442,39 +450,43 @@ function anthropicChatStream(body: ReadableStream<Uint8Array>, model: string, re
       }
       let event: Record<string, unknown>;
       try { event = JSON.parse(data) as Record<string, unknown>; } catch { return; }
+      const failure = streamErrorPayload(event);
+      if (failure) {
+        doneSent = true;
+        controller.error(new Error(`Anthropic stream error: ${upstreamErrorMessage(failure.payload, "upstream stream failed without details")}`));
+        return;
+      }
       const type = typeof event.type === "string" ? event.type : "";
       if (type === "message_start" && event.message && typeof event.message === "object") {
         usage = mergeUsage(usage, extractUsage(event.message));
         return;
       }
-      if (type === "content_block_start" && event.content_block && typeof event.content_block === "object") {
+      if (type === "content_block_start") {
         const index = typeof event.index === "number" ? event.index : blockTypes.size;
-        const block = event.content_block as Record<string, unknown>;
-        const blockType = typeof block.type === "string" ? block.type : "";
-        blockTypes.set(index, blockType);
-        if (blockType === "tool_use") {
+        const block = event.content_block && typeof event.content_block === "object"
+          ? event.content_block as Record<string, unknown>
+          : {};
+        blockTypes.set(index, typeof block.type === "string" ? block.type : "");
+        const tool = anthropicToolBlock(event);
+        if (tool) {
           finishReason = "tool_calls";
           const delta: Record<string, unknown> = {
-            tool_calls: [{
-              index,
-              id: typeof block.id === "string" ? block.id : crypto.randomUUID(),
-              type: "function",
-              function: { name: typeof block.name === "string" ? block.name : "unknown", arguments: "" },
-            }],
+            tool_calls: [{ index, id: tool.id, type: "function", function: { name: tool.name, arguments: "" } }],
           };
           if (!roleSent) { delta.role = "assistant"; roleSent = true; }
           controller.enqueue(encoder.encode(`data: ${chatChunk(requestId, model, delta)}\n\n`));
         }
         return;
       }
-      if (type === "content_block_delta" && event.delta && typeof event.delta === "object") {
+      if (type === "content_block_delta") {
         const index = typeof event.index === "number" ? event.index : 0;
-        const deltaEvent = event.delta as Record<string, unknown>;
+        const blockDelta = anthropicBlockDelta(event);
+        if (!blockDelta) return;
         const delta: Record<string, unknown> = {};
-        if (deltaEvent.type === "text_delta" && typeof deltaEvent.text === "string") delta.content = deltaEvent.text;
-        if (deltaEvent.type === "thinking_delta" && typeof deltaEvent.thinking === "string") delta.reasoning_content = deltaEvent.thinking;
-        if (deltaEvent.type === "input_json_delta" && typeof deltaEvent.partial_json === "string") {
-          delta.tool_calls = [{ index, function: { arguments: deltaEvent.partial_json } }];
+        if (blockDelta.text !== undefined) delta.content = blockDelta.text;
+        if (blockDelta.thinking !== undefined) delta.reasoning_content = blockDelta.thinking;
+        if (blockDelta.partialJson !== undefined) {
+          delta.tool_calls = [{ index, function: { arguments: blockDelta.partialJson } }];
         }
         if (!Object.keys(delta).length) return;
         if (!roleSent) { delta.role = "assistant"; roleSent = true; }
@@ -500,6 +512,41 @@ function anthropicChatStream(body: ReadableStream<Uint8Array>, model: string, re
   );
 }
 
+/**
+ * Field extraction shared by the streaming and buffered Anthropic paths.
+ *
+ * The two paths necessarily differ in how they emit — one pushes deltas as they arrive and
+ * tracks `roleSent`/`doneSent`, the other accumulates and returns a single completion — but
+ * the question "what does this event mean" has one answer. Keeping that answer in one place
+ * is what stops the pair from drifting; the mid-stream error handling was previously present
+ * in neither, and adding it twice is exactly how the next gap appears.
+ */
+interface AnthropicBlockDelta {
+  text?: string;
+  thinking?: string;
+  partialJson?: string;
+}
+
+function anthropicBlockDelta(event: Record<string, unknown>): AnthropicBlockDelta | undefined {
+  if (!event.delta || typeof event.delta !== "object") return undefined;
+  const delta = event.delta as Record<string, unknown>;
+  if (delta.type === "text_delta" && typeof delta.text === "string") return { text: delta.text };
+  if (delta.type === "thinking_delta" && typeof delta.thinking === "string") return { thinking: delta.thinking };
+  if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") return { partialJson: delta.partial_json };
+  return undefined;
+}
+
+/** Reads the tool_use block opened by a content_block_start event, if it is one. */
+function anthropicToolBlock(event: Record<string, unknown>): { id: string; name: string } | undefined {
+  if (!event.content_block || typeof event.content_block !== "object") return undefined;
+  const block = event.content_block as Record<string, unknown>;
+  if (block.type !== "tool_use") return undefined;
+  return {
+    id: typeof block.id === "string" ? block.id : crypto.randomUUID(),
+    name: typeof block.name === "string" ? block.name : "unknown",
+  };
+}
+
 function collectAnthropicSse(text: string, model: string, requestId: string): Record<string, unknown> {
   let content = "";
   let reasoning = "";
@@ -512,24 +559,23 @@ function collectAnthropicSse(text: string, model: string, requestId: string): Re
     if (!data || data === "[DONE]") continue;
     let event: Record<string, unknown>;
     try { event = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
-    if (event.type === "message_start" && event.message && typeof event.message === "object") usage = mergeUsage(usage, extractUsage(event.message));
-    if (event.type === "content_block_start" && event.content_block && typeof event.content_block === "object") {
-      const index = typeof event.index === "number" ? event.index : toolCalls.size;
-      const block = event.content_block as Record<string, unknown>;
-      if (block.type === "tool_use") toolCalls.set(index, {
-        id: typeof block.id === "string" ? block.id : crypto.randomUUID(),
-        name: typeof block.name === "string" ? block.name : "unknown",
-        arguments: "",
-      });
+    const failure = streamErrorPayload(event);
+    if (failure) {
+      throw new GatewayError(502, "UPSTREAM_STREAM_ERROR", `Anthropic stream error: ${upstreamErrorMessage(failure.payload, "upstream stream failed without details")}`, "upstream_error");
     }
-    if (event.type === "content_block_delta" && event.delta && typeof event.delta === "object") {
+    if (event.type === "message_start" && event.message && typeof event.message === "object") usage = mergeUsage(usage, extractUsage(event.message));
+    if (event.type === "content_block_start") {
+      const tool = anthropicToolBlock(event);
+      if (tool) toolCalls.set(typeof event.index === "number" ? event.index : toolCalls.size, { ...tool, arguments: "" });
+    }
+    if (event.type === "content_block_delta") {
       const index = typeof event.index === "number" ? event.index : 0;
-      const delta = event.delta as Record<string, unknown>;
-      if (delta.type === "text_delta" && typeof delta.text === "string") content += delta.text;
-      if (delta.type === "thinking_delta" && typeof delta.thinking === "string") reasoning += delta.thinking;
-      if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+      const delta = anthropicBlockDelta(event);
+      if (delta?.text) content += delta.text;
+      if (delta?.thinking) reasoning += delta.thinking;
+      if (delta?.partialJson !== undefined) {
         const current = toolCalls.get(index) ?? { id: crypto.randomUUID(), name: "unknown", arguments: "" };
-        current.arguments += delta.partial_json;
+        current.arguments += delta.partialJson;
         toolCalls.set(index, current);
       }
     }
@@ -632,6 +678,12 @@ function googleChatStream(body: ReadableStream<Uint8Array>, model: string, reque
       }
       let payload: Record<string, unknown>;
       try { payload = JSON.parse(data) as Record<string, unknown>; } catch { return; }
+      const failure = streamErrorPayload(payload);
+      if (failure) {
+        doneSent = true;
+        controller.error(new Error(`Google stream error: ${upstreamErrorMessage(failure.payload, "upstream stream failed without details")}`));
+        return;
+      }
       usage = mergeUsage(usage, googleUsage(payload));
       const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
       const candidate = candidates[0] && typeof candidates[0] === "object" ? candidates[0] as Record<string, unknown> : {};
@@ -688,6 +740,10 @@ function collectGoogleSse(text: string, model: string, requestId: string): Recor
     if (!data || data === "[DONE]") continue;
     let payload: Record<string, unknown>;
     try { payload = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
+    const failure = streamErrorPayload(payload);
+    if (failure) {
+      throw new GatewayError(502, "UPSTREAM_STREAM_ERROR", `Google stream error: ${upstreamErrorMessage(failure.payload, "upstream stream failed without details")}`, "upstream_error");
+    }
     usage = mergeUsage(usage, googleUsage(payload));
     const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
     const candidate = candidates[0] && typeof candidates[0] === "object" ? candidates[0] as Record<string, unknown> : {};
@@ -745,7 +801,7 @@ export async function prepareDownstreamResponse(
     return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers: responseHeaders(upstream.headers, "text/event-stream; charset=utf-8") });
   }
 
-  const text = await readTextLimited(upstream.body);
+  const text = await readResponseText(upstream.body);
   let payload: Record<string, unknown>;
   if (mode === "codex-chat") {
     if (upstream.headers.get("content-type")?.includes("application/json")) {

@@ -9,7 +9,6 @@ export interface ProxySummary {
   proxyHost?: string;
   hasProviderOverride?: boolean;
   hasSystemProxy?: boolean;
-  bridgeConfigured?: boolean;
   runtimeReady?: boolean;
 }
 export interface Channel {

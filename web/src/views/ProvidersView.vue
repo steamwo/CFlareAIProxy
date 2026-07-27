@@ -2,13 +2,15 @@
 import { computed, h, onMounted, reactive, ref, watch } from "vue";
 import {
   NAlert, NButton, NCard, NCheckbox, NDataTable, NDivider, NEmpty, NForm, NFormItem,
-  NInput, NInputNumber, NModal, NPagination, NPopconfirm, NSelect, NSpace, NSpin, NSwitch, NTag, useMessage,
+  NInput, NInputNumber, NModal, NPagination, NSelect, NSpace, NSpin, NSwitch, NTag,
 } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import { Plus, RefreshCw } from "@lucide/vue";
+import ConfirmDeleteButton from "../components/ConfirmDeleteButton.vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProxyEditor from "../components/ProxyEditor.vue";
 import { api, jsonBody } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import type { Provider } from "../types";
 
 interface ModelSelection {
@@ -30,7 +32,7 @@ interface FormState {
 }
 
 const rows = ref<Provider[]>([]);
-const loading = ref(false);
+const { loading, run } = useApiRequest();
 const saving = ref(false);
 const testing = ref(false);
 const modal = ref(false);
@@ -40,7 +42,6 @@ const selected = ref<Provider | null>(null);
 const discoveredModels = ref<string[]>([]);
 const modelPage = ref(1);
 const modelPageSize = ref(10);
-const message = useMessage();
 const tablePagination = { pageSize: 10, pageSizes: [10, 20, 50], showSizePicker: true, showQuickJumper: true };
 const modelPageCount = computed(() => Math.max(1, Math.ceil(discoveredModels.value.length / modelPageSize.value)));
 const pagedDiscoveredModels = computed(() => discoveredModels.value.slice((modelPage.value - 1) * modelPageSize.value, modelPage.value * modelPageSize.value));
@@ -61,10 +62,7 @@ const pools = [
   { label: "最少并发", value: "least_inflight" },
 ];
 async function load() {
-  loading.value = true;
-  try { rows.value = (await api<{ data: Provider[] }>("/providers")).data; }
-  catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
-  finally { loading.value = false; }
+  await run(async () => { rows.value = (await api<{ data: Provider[] }>("/providers")).data; });
 }
 function resetSecret() { form.apiKey = ""; form.apiKeyLabel = ""; }
 function openCreate() {
@@ -97,8 +95,7 @@ function toggleModel(model: string, enabled: boolean) {
   if (!enabled && index >= 0) form.modelSelections.splice(index, 1);
 }
 async function testAndFetchModels() {
-  testing.value = true;
-  try {
+  await run(async () => {
     const result = await api<{ models: string[]; latencyMs: number }>("/providers/test", {
       method: "POST",
       body: jsonBody({ providerId: editing.value?.id, baseUrl: form.baseUrl, apiKey: form.apiKey, apiMode: form.apiMode }),
@@ -110,13 +107,15 @@ async function testAndFetchModels() {
     form.modelSelections = firstDiscovery
       ? result.models.map((model) => ({ upstreamModel: model, publicModel: model }))
       : result.models.flatMap((model) => { const existing = previous.get(model); return existing ? [existing] : []; });
-    message.success(`API Key 可用，获取到 ${result.models.length} 个模型（${result.latencyMs} ms）`);
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
-  finally { testing.value = false; }
+    return result;
+  }, {
+    loading: testing,
+    success: (result) => `API Key 可用，获取到 ${result.models.length} 个模型（${result.latencyMs} ms）`,
+  });
 }
 async function save() {
-  saving.value = true;
-  try {
+  const wasEditing = Boolean(editing.value);
+  const saved = await run(async () => {
     const body = {
       ...form,
       routingWeight: Math.max(1, form.routingWeight || 1),
@@ -126,21 +125,23 @@ async function save() {
         endpoints: item.endpoints,
       })),
     };
-    const result = editing.value
+    return editing.value
       ? await api<{ credentialId?: string | null }>(`/providers/${editing.value.id}`, { method: "PATCH", body: jsonBody(body) })
       : await api<{ credentialId?: string | null }>("/providers", { method: "POST", body: jsonBody(body) });
-    message.success(result.credentialId
-      ? (editing.value ? "供应商已更新，新 API Key 已加入账号池" : "供应商、API Key 和模型映射已创建")
-      : (editing.value ? "供应商和模型映射已更新" : "供应商已创建"));
-    modal.value = false;
-    resetSecret();
-    await load();
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
-  finally { saving.value = false; }
+  }, {
+    loading: saving,
+    success: (result) => result.credentialId
+      ? (wasEditing ? "供应商已更新，新 API Key 已加入账号池" : "供应商、API Key 和模型映射已创建")
+      : (wasEditing ? "供应商和模型映射已更新" : "供应商已创建"),
+  });
+  if (saved === undefined) return;
+  modal.value = false;
+  resetSecret();
+  await load();
 }
 async function remove(id: string) {
-  try { await api(`/providers/${id}`, { method: "DELETE" }); message.success("供应商已删除"); await load(); }
-  catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  const removed = await run(() => api(`/providers/${id}`, { method: "DELETE" }), { loading: null, success: "供应商已删除" });
+  if (removed !== undefined) await load();
 }
 function proxy(row: Provider) { selected.value = row; proxyOpen.value = true; }
 const columns: DataTableColumns<Provider> = [
@@ -153,7 +154,7 @@ const columns: DataTableColumns<Provider> = [
   { title: "操作", key: "actions", render: (row) => h(NSpace, null, { default: () => [
     h(NButton, { size: "small", onClick: () => openEdit(row) }, { default: () => "配置" }),
     h(NButton, { size: "small", onClick: () => proxy(row) }, { default: () => "代理" }),
-    h(NPopconfirm, { onPositiveClick: () => remove(row.id) }, { trigger: () => h(NButton, { size: "small", type: "error", secondary: true }, { default: () => "删除" }), default: () => "同时会删除该供应商的账号和路由，确定继续？" }),
+    h(ConfirmDeleteButton, { content: "同时会删除该供应商的账号和路由，确定继续？", ariaLabel: `删除供应商 ${row.name}`, onConfirm: () => { void remove(row.id); } }),
   ] }) },
 ];
 onMounted(load);

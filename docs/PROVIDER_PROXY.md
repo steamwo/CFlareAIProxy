@@ -212,13 +212,8 @@ OpenCode Zen 的官方请求和镜像故障转移都通过该账号的最终代�
 | Codex 仍返回 403 | 出口信誉、Token、账号策略或首次 token exchange 路径。 |
 | 模型发现能用但推理失败 | 账号级代理、请求超时、上游特定端点或协议差异。 |
 
-## Proxy Bridge
+## Proxy Bridge（已移除）
 
-`proxy-bridge/` 和以下变量仅为旧部署兼容保留：
+早期版本需要一个外部 `proxy-bridge/` 服务来转发上游请求，通过 `PROXY_BRIDGE_URL` 和 `PROXY_BRIDGE_TOKEN` 配置。
 
-```text
-PROXY_BRIDGE_URL
-PROXY_BRIDGE_TOKEN
-```
-
-新部署不需要安装、启动或暴露 Proxy Bridge。除非正在维护旧环境，否则不要新增这两个变量。
+Worker 获得原生 TCP 能力后该方案已无必要，相关目录、脚本、环境变量和代码均已删除。设置这两个变量不再有任何效果；如果旧部署仍配置了它们，可以安全移除。

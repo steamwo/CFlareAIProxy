@@ -1,4 +1,5 @@
-import { getCredential, getProvider, updateCredentialTokens } from "./db";
+import { getCredential, getProvider, loadCachedProvider, updateCredentialTokens } from "./db";
+import type { ProviderCache } from "./db";
 import { providerAuthHeaders } from "./providers/headers";
 import { isOpenCodeAnonymousCredential } from "./providers/opencode-anonymous";
 import type { Credential, Env, ProviderConfig, QuotaSnapshot, QuotaSnapshotRow, QuotaWindow } from "./types";
@@ -427,6 +428,12 @@ async function ensureCodexQuotaCredential(
   };
 }
 
+// Windows inherit the snapshot's provenance so that availability checks can tell a durable
+// API/configured quota apart from a transient response-header rate-limit counter.
+function taggedWindows(snapshot: QuotaSnapshot): QuotaWindow[] {
+  return snapshot.windows.map((window) => window.source ? window : { ...window, source: snapshot.source });
+}
+
 async function saveSnapshot(
   env: Env,
   credentialId: string,
@@ -434,9 +441,9 @@ async function saveSnapshot(
   snapshot: QuotaSnapshot,
   error?: string,
 ): Promise<QuotaSnapshot> {
-  const previousRow = await env.DB.prepare("SELECT quota_json,status FROM quota_snapshots WHERE credential_id=?")
+  const previousRow = await env.DB.prepare("SELECT quota_json,status,error_message FROM quota_snapshots WHERE credential_id=?")
     .bind(credentialId)
-    .first<{ quota_json: string; status: QuotaSnapshot["status"] }>();
+    .first<{ quota_json: string; status: QuotaSnapshot["status"]; error_message: string | null }>();
   const previous = previousRow
     ? parseJson<QuotaSnapshot>(previousRow.quota_json, {
       provider: providerId,
@@ -445,23 +452,30 @@ async function saveSnapshot(
       source: "configured",
     })
     : undefined;
-  let stored = snapshot;
+  let stored: QuotaSnapshot = { ...snapshot, windows: taggedWindows(snapshot) };
   if (previous && snapshot.source === "headers") {
-    const windows = new Map(previous.windows.map((window) => [window.key, window]));
-    for (const window of snapshot.windows) windows.set(window.key, window);
+    // A quota-API error is authoritative; a display-only header capture must neither mask it nor
+    // spend a write refreshing its timestamps.
+    if (previous.status === "error") return { ...previous, windows: taggedWindows(previous) };
+    const windows = new Map(taggedWindows(previous).map((window) => [window.key, window]));
+    for (const window of stored.windows) windows.set(window.key, window);
+    const merged = [...windows.values()];
+    // Keep the real provenance of a snapshot that still carries API/configured windows.
+    const headersOnly = merged.every((window) => window.source === "headers") && !previous.plan && !previous.credits;
     stored = {
       ...previous,
-      ...snapshot,
       plan: snapshot.plan ?? previous.plan,
       credits: snapshot.credits ?? previous.credits,
-      windows: [...windows.values()],
+      status: "ok",
+      windows: merged,
+      source: headersOnly ? "headers" : previous.source,
       raw: previous.raw,
     };
   } else if (previous && snapshot.status !== "ok" && (previous.windows.length || previous.credits || previous.plan)) {
-    stored = { ...previous, status: snapshot.status, source: snapshot.source };
+    stored = { ...previous, windows: taggedWindows(previous), status: snapshot.status, source: snapshot.source };
   }
   const now = Math.floor(Date.now() / 1000);
-  const ttl = snapshot.status === "ok" ? 300 : 60;
+  const ttl = stored.status === "ok" ? 300 : 60;
   await env.DB.prepare(
     `INSERT INTO quota_snapshots(credential_id,provider_id,status,quota_json,error_message,fetched_at,expires_at)
      VALUES(?,?,?,?,?,?,?) ON CONFLICT(credential_id) DO UPDATE SET
@@ -470,7 +484,7 @@ async function saveSnapshot(
   ).bind(
     credentialId,
     providerId,
-    snapshot.status,
+    stored.status,
     JSON.stringify(stored),
     error?.slice(0, 1000) ?? null,
     now,
@@ -479,9 +493,13 @@ async function saveSnapshot(
   return stored;
 }
 
-export async function refreshCredentialQuota(env: Env, credentialId: string): Promise<QuotaRefreshResult> {
+export async function refreshCredentialQuota(
+  env: Env,
+  credentialId: string,
+  providerCache?: ProviderCache,
+): Promise<QuotaRefreshResult> {
   let credential = await getCredential(env, credentialId);
-  const provider = await getProvider(env, credential.provider_id);
+  const provider = await loadCachedProvider(env, credential.provider_id, providerCache);
   const url = quotaUrl(provider, credential);
   if (!url) {
     const snapshot: QuotaSnapshot = {
@@ -537,14 +555,39 @@ export async function refreshCredentialQuota(env: Env, credentialId: string): Pr
   }
 }
 
-export async function refreshAllQuotas(env: Env): Promise<QuotaRefreshResult[]> {
+/**
+ * Accounts refreshed per invocation.
+ *
+ * Each account costs a credential read, two decrypts, a provider lookup, an upstream fetch
+ * and a snapshot write. A Worker has a hard subrequest ceiling and a wall-clock budget, so
+ * an unbounded sweep is a deployment that works until someone adds the account that breaks
+ * it. Anything past the limit is left for the next pass — hourly cron for the scheduled
+ * sweep, or the operator pressing refresh again.
+ */
+export const QUOTA_REFRESH_BATCH_LIMIT = 40;
+
+/**
+ * Refreshes quotas for the least recently checked accounts first.
+ *
+ * Ordering by snapshot age rather than by provider means repeated runs rotate through the
+ * whole pool instead of re-refreshing the same head of the list, so a deployment with more
+ * accounts than the batch limit still converges.
+ */
+export async function refreshAllQuotas(env: Env, limit = QUOTA_REFRESH_BATCH_LIMIT): Promise<QuotaRefreshResult[]> {
   const result = await env.DB.prepare(
-    "SELECT id FROM credentials WHERE enabled=1 ORDER BY provider_id,priority,created_at",
-  ).all<{ id: string }>();
+    `SELECT c.id FROM credentials c
+     LEFT JOIN quota_snapshots q ON q.credential_id = c.id
+     WHERE c.enabled=1
+     ORDER BY COALESCE(q.fetched_at, 0) ASC, c.provider_id, c.priority, c.created_at
+     LIMIT ?`,
+  ).bind(limit).all<{ id: string }>();
   const output: QuotaRefreshResult[] = [];
+  // Scoped to this sweep: accounts of one channel share a single provider read, and the
+  // cache is discarded when the sweep ends so nothing goes stale between runs.
+  const providerCache: ProviderCache = new Map();
   for (let index = 0; index < result.results.length; index += 4) {
     output.push(...await Promise.all(
-      result.results.slice(index, index + 4).map((row) => refreshCredentialQuota(env, row.id)),
+      result.results.slice(index, index + 4).map((row) => refreshCredentialQuota(env, row.id, providerCache)),
     ));
   }
   return output;
@@ -581,6 +624,39 @@ function headerNumber(headers: Headers, names: string[]): number | undefined {
   return undefined;
 }
 
+// Header capture runs on every upstream response and its data is display-only, so it is throttled
+// to bound D1 writes: at most one write per credential per interval, plus an immediate write when a
+// window crosses into or out of "empty" (the only header transition worth showing right away).
+const HEADER_CAPTURE_MIN_INTERVAL_SECONDS = 120;
+const HEADER_CAPTURE_CACHE_LIMIT = 500;
+const headerCaptureCache = new Map<string, { signature: string; writtenAt: number }>();
+
+function headerWindowState(window: QuotaWindow): string {
+  const { limit, remaining } = window;
+  if (remaining === undefined) return `${window.key}=${limit ?? ""}`;
+  return `${window.key}=${limit ?? ""}:${remaining <= 0 ? "empty" : "ok"}`;
+}
+
+function headerCaptureSignature(windows: QuotaWindow[]): string {
+  return windows.map(headerWindowState).join("|");
+}
+
+function shouldPersistHeaderCapture(credentialId: string, signature: string, now: number): boolean {
+  const cached = headerCaptureCache.get(credentialId);
+  if (cached && cached.signature === signature && now - cached.writtenAt < HEADER_CAPTURE_MIN_INTERVAL_SECONDS) return false;
+  if (!cached && headerCaptureCache.size >= HEADER_CAPTURE_CACHE_LIMIT) {
+    const oldest = headerCaptureCache.keys().next();
+    if (!oldest.done) headerCaptureCache.delete(oldest.value);
+  }
+  headerCaptureCache.set(credentialId, { signature, writtenAt: now });
+  return true;
+}
+
+// Test helper: the throttle cache lives for the isolate's lifetime.
+export function resetQuotaHeaderThrottle(): void {
+  headerCaptureCache.clear();
+}
+
 export async function captureQuotaHeaders(
   env: Env,
   credentialId: string,
@@ -611,10 +687,12 @@ export async function captureQuotaHeaders(
   });
   if (requestWindow) windows.push(requestWindow);
   if (tokenWindow) windows.push(tokenWindow);
+  if (!windows.length) return;
+  if (!shouldPersistHeaderCapture(credentialId, headerCaptureSignature(windows), Math.floor(Date.now() / 1000))) return;
   await saveSnapshot(env, credentialId, providerId, {
     provider: providerId,
     status: "ok",
-    windows,
+    windows: windows.map((window) => ({ ...window, source: "headers" })),
     source: "headers",
   });
 }

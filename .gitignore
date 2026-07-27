@@ -13,3 +13,4 @@ coverage/
 .cflare/
 dist/
 .tmp-*/
+*.tsbuildinfo

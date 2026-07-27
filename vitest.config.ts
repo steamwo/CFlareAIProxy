@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "cloudflare:sockets": fileURLToPath(new URL("./test/mocks/cloudflare-sockets.ts", import.meta.url)),
+      "cloudflare:workers": fileURLToPath(new URL("./test/mocks/cloudflare-workers.ts", import.meta.url)),
     },
   },
   test: { environment: "node" },

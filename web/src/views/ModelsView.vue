@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { NButton, NCard, NCollapse, NCollapseItem, NEmpty, NInput, NSpace, NTag, useMessage } from "naive-ui";
+import { NButton, NCard, NCollapse, NCollapseItem, NEmpty, NInput, NSpace, NTag } from "naive-ui";
 import { RefreshCw, Search, Server, Waypoints } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProviderIcon from "../components/ProviderIcon.vue";
 import { api } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import type { Channel, DiscoveredModel, Provider } from "../types";
 
 type SourceKind = "channel" | "provider" | "unknown";
@@ -26,16 +27,14 @@ interface SourceGroup {
 
 const discovered = ref<DiscoveredModel[]>([]);
 const sourceMap = ref<Map<string, SourceMeta>>(new Map());
-const loading = ref(false);
 const query = ref("");
 const expandedSources = ref<string[]>([]);
-const message = useMessage();
+const { loading, run } = useApiRequest();
 const endpointOrder = new Map([["responses", 0], ["chat", 1], ["completions", 2]]);
 const endpointLabels: Record<string, string> = { responses: "Responses", chat: "Chat", completions: "Completions" };
 
 async function load() {
-  loading.value = true;
-  try {
+  await run(async () => {
     const [modelResult, channelResult, providerResult] = await Promise.all([
       api<{ data: DiscoveredModel[] }>("/models"),
       api<{ data: Channel[] }>("/channels"),
@@ -46,24 +45,17 @@ async function load() {
     for (const item of channelResult.data) nextSourceMap.set(item.id, { label: item.name, kind: "channel" });
     for (const item of providerResult.data) nextSourceMap.set(item.id, { label: item.name, kind: "provider" });
     sourceMap.value = nextSourceMap;
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  } finally {
-    loading.value = false;
-  }
+  });
 }
 
 async function refresh() {
-  loading.value = true;
-  try {
-    await api("/models/refresh", { method: "POST" });
-    message.success("所有来源的模型目录已刷新");
-    await load();
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error));
-  } finally {
-    loading.value = false;
-  }
+  // load() drives the shared loading ref, so the refresh call keeps it held until the
+  // reload finishes instead of flickering back to idle between the two requests.
+  const refreshed = await run(
+    () => api("/models/refresh", { method: "POST" }),
+    { success: "所有来源的模型目录已刷新" },
+  );
+  if (refreshed !== undefined) await load();
 }
 
 const groupedDiscovered = computed<DiscoveredModelGroup[]>(() => {
@@ -131,6 +123,21 @@ const sourceGroups = computed<SourceGroup[]>(() => {
     .sort((left, right) => left.sourceLabel.localeCompare(right.sourceLabel));
 });
 
+/**
+ * A large upstream catalogue can hold hundreds of models for a single source. The collapse
+ * already keeps them off the initial render, but an expanded source used to mount every row
+ * at once; cap it and let the user opt into the rest per source.
+ */
+const MODEL_PREVIEW_LIMIT = 30;
+const fullyShown = ref<string[]>([]);
+// An active search means the user already narrowed the set on purpose, so show every match.
+const visibleModels = (group: SourceGroup): DiscoveredModelGroup[] => query.value.trim() || fullyShown.value.includes(group.providerId)
+  ? group.models
+  : group.models.slice(0, MODEL_PREVIEW_LIMIT);
+function showAll(providerId: string) {
+  if (!fullyShown.value.includes(providerId)) fullyShown.value = [...fullyShown.value, providerId];
+}
+
 const sourceTypeLabel = (kind: SourceKind): string => kind === "channel" ? "内置渠道" : kind === "provider" ? "OpenAI 供应商" : "来源";
 const formatDate = (value: number): string => new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
 
@@ -173,7 +180,7 @@ onMounted(load);
       </template>
 
       <div class="model-lines">
-        <div v-for="model in group.models" :key="model.model_id" class="model-line">
+        <div v-for="model in visibleModels(group)" :key="model.model_id" class="model-line">
           <div class="model-copy">
             <strong class="mono">{{ model.model_id }}</strong>
             <span v-if="model.display_name && model.display_name !== model.model_id" class="muted">{{ model.display_name }}</span>
@@ -190,6 +197,11 @@ onMounted(load);
             <n-tag size="small" :type="model.enabled === 1 ? 'success' : 'default'">{{ model.enabled === 1 ? '可用' : '停用' }}</n-tag>
             <span class="muted">{{ formatDate(model.discovered_at) }}</span>
           </div>
+        </div>
+        <div v-if="group.models.length > visibleModels(group).length" class="model-more">
+          <n-button size="small" quaternary @click="showAll(group.providerId)">
+            显示全部 {{ group.models.length }} 个模型
+          </n-button>
         </div>
       </div>
     </n-collapse-item>
@@ -216,6 +228,7 @@ onMounted(load);
 .source-summary { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:14px; font-size:11px; }
 .source-summary>span { display:flex; align-items:center; gap:5px; white-space:nowrap; }
 .model-lines { overflow:hidden; }
+.model-more { display:flex; justify-content:center; padding:10px 0 2px; }
 .model-line { display:grid; grid-template-columns:minmax(220px,1.15fr) minmax(260px,1fr) auto; align-items:center; gap:20px; min-height:66px; padding:12px 18px; }
 .model-line + .model-line { border-top:1px solid var(--n-border-color); }
 .model-line:hover { background:color-mix(in srgb,var(--n-color-embedded) 58%,transparent); }

@@ -1,22 +1,24 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from "vue";
-import { NButton, NCard, NDataTable, NDescriptions, NDescriptionsItem, NDrawer, NDrawerContent, NInput, NSelect, NTag, useMessage } from "naive-ui";
+import { NButton, NCard, NDataTable, NDescriptions, NDescriptionsItem, NDrawer, NDrawerContent, NInput, NSelect, NTag } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import { RefreshCw, Search } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import { api } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import { formatTokens } from "../utils/format";
 import type { RequestLog } from "../types";
 
 const rows = ref<RequestLog[]>([]);
-const loading = ref(false);
 const query = ref("");
 const status = ref("all");
 const drawer = ref(false);
 const selected = ref<RequestLog | null>(null);
-const message = useMessage();
+const { loading, run } = useApiRequest();
 const tablePagination = { pageSize: 20, pageSizes: [20, 50, 100], showSizePicker: true, showQuickJumper: true };
-async function load() { loading.value = true; try { rows.value = (await api<{ data: RequestLog[] }>("/logs?limit=500")).data; } catch (error) { message.error(error instanceof Error ? error.message : String(error)); } finally { loading.value = false; } }
+async function load() {
+  await run(async () => { rows.value = (await api<{ data: RequestLog[] }>("/logs?limit=500")).data; });
+}
 const filtered = computed(() => rows.value.filter((row) => {
   const statusMatch = status.value === "all" || (status.value === "ok" ? row.status_code < 400 : row.status_code >= 400);
   const q = query.value.toLowerCase();

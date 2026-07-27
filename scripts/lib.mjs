@@ -5,6 +5,14 @@ import { dirname, join, resolve } from "node:path";
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * Deployed Cloudflare Worker name. This is a fixed contract with the
+ * Dashboard/Git integration target and is deliberately different from the
+ * `cflare-api*` package/D1/Queue identifiers. Single source of truth for every
+ * script that asserts it (check-config.mjs, doctor.mjs).
+ */
+export const EXPECTED_WORKER_NAME = "cfap";
+
 function missingWranglerError() {
   return new Error(
     "未找到本地 Wrangler。请先在项目目录运行 pnpm install（或 npm install）。",

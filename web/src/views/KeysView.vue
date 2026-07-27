@@ -1,33 +1,32 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref } from "vue";
-import { NAlert, NButton, NCard, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSpace, NSwitch, NTag, useMessage } from "naive-ui";
+import { NAlert, NButton, NCard, NDataTable, NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpace, NSwitch, NTag } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import { Copy, Plus, RefreshCw } from "@lucide/vue";
+import ConfirmDeleteButton from "../components/ConfirmDeleteButton.vue";
 import PageHeader from "../components/PageHeader.vue";
 import { api, jsonBody } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import { formatTokens } from "../utils/format";
 import { normalizeAllowedModelSelection, publicModelOptions } from "../utils/model-selection";
 import type { GatewayKey, PublicModel } from "../types";
 
 const rows = ref<GatewayKey[]>([]);
 const models = ref<PublicModel[]>([]);
-const loading = ref(false);
 const modal = ref(false);
 const secretModal = ref(false);
 const createdKey = ref("");
 const editing = ref<GatewayKey | null>(null);
-const message = useMessage();
+const { loading, run } = useApiRequest();
 const tablePagination = { pageSize: 10, pageSizes: [10, 20, 50], showSizePicker: true, showQuickJumper: true };
 const form = reactive({ name: "", rpm: 60, maxConcurrency: 8, monthlyTokenLimit: 0, allowedModels: [] as string[], enabled: true });
 const modelOptions = computed(() => publicModelOptions(models.value));
 async function load() {
-  loading.value = true;
-  try {
+  await run(async () => {
     const [keyResult, modelResult] = await Promise.all([api<{ data: GatewayKey[] }>("/keys"), api<{ public: PublicModel[] }>("/models")]);
     rows.value = keyResult.data;
     models.value = modelResult.public;
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
-  finally { loading.value = false; }
+  });
 }
 function create() { editing.value = null; Object.assign(form, { name: "", rpm: 60, maxConcurrency: 8, monthlyTokenLimit: 0, allowedModels: [], enabled: true }); modal.value = true; }
 function edit(row: GatewayKey) {
@@ -42,7 +41,8 @@ function edit(row: GatewayKey) {
   modal.value = true;
 }
 async function save() {
-  try {
+  const wasEditing = Boolean(editing.value);
+  const saved = await run(async () => {
     const payload = { ...form, allowedModels: normalizeAllowedModelSelection(form.allowedModels, models.value) };
     if (editing.value) await api(`/keys/${editing.value.id}`, { method: "PATCH", body: jsonBody(payload) });
     else {
@@ -50,20 +50,34 @@ async function save() {
       createdKey.value = result.key;
       secretModal.value = true;
     }
-    message.success(editing.value ? "密钥设置已更新" : "密钥已创建");
-    modal.value = false;
-    await load();
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+    return true;
+  }, { loading: null, success: wasEditing ? "密钥设置已更新" : "密钥已创建" });
+  if (!saved) return;
+  modal.value = false;
+  await load();
 }
-async function remove(id: string) { try { await api(`/keys/${id}`, { method: "DELETE" }); message.success("网关密钥已删除"); await load(); } catch (error) { message.error(error instanceof Error ? error.message : String(error)); } }
-async function copy() { await navigator.clipboard.writeText(createdKey.value); message.success("已复制"); }
+async function remove(id: string) {
+  const removed = await run(() => api(`/keys/${id}`, { method: "DELETE" }), { loading: null, success: "网关密钥已删除" });
+  if (removed !== undefined) await load();
+}
+async function setEnabled(row: GatewayKey, enabled: boolean) {
+  const updated = await run(() => api(`/keys/${row.id}`, { method: "PATCH", body: jsonBody({ enabled }) }), { loading: null });
+  if (updated !== undefined) await load();
+}
+// clipboard.writeText rejects outside a secure context or without permission, so the
+// failure needs the same reporting path as every other action.
+async function copy() {
+  await run(() => navigator.clipboard.writeText(createdKey.value), { loading: null, success: "已复制" });
+}
 const columns: DataTableColumns<GatewayKey> = [
   { title: "名称", key: "name", render: (row) => h("div", [h("strong", row.name), h("div", { class: "mono muted", style: "font-size:12px" }, `${row.key_prefix}…`)]) },
   { title: "限制", key: "limits", render: (row) => `${row.rpm} RPM · ${row.max_concurrency} 并发` },
   { title: "月 Token", key: "monthly_token_limit", render: (row) => row.monthly_token_limit ? formatTokens(row.monthly_token_limit) : "不限" },
   { title: "模型范围", key: "allowed_models_json", render: (row) => { const allowed = JSON.parse(row.allowed_models_json || "[]"); return h(NTag, { size: "small" }, { default: () => allowed.length ? `${allowed.length} 个模型` : "全部模型" }); } },
-  { title: "启用", key: "enabled", render: (row) => h(NSwitch, { value: row.enabled === 1, onUpdateValue: (value: boolean) => api(`/keys/${row.id}`, { method: "PATCH", body: jsonBody({ enabled: value }) }).then(load) }) },
-  { title: "操作", key: "actions", render: (row) => h(NSpace, null, { default: () => [h(NButton, { size: "small", onClick: () => edit(row) }, { default: () => "编辑" }), h(NPopconfirm, { onPositiveClick: () => remove(row.id) }, { trigger: () => h(NButton, { size: "small", type: "error", secondary: true }, { default: () => "删除" }), default: () => "删除后客户端将立即无法使用。" })] }) },
+  // The previous `.then(load)` had no rejection handler: a failed toggle produced an
+  // unhandled rejection and left the switch silently out of sync with the server.
+  { title: "启用", key: "enabled", render: (row) => h(NSwitch, { value: row.enabled === 1, onUpdateValue: (value: boolean) => { void setEnabled(row, value); } }) },
+  { title: "操作", key: "actions", render: (row) => h(NSpace, null, { default: () => [h(NButton, { size: "small", onClick: () => edit(row) }, { default: () => "编辑" }), h(ConfirmDeleteButton, { content: "删除后客户端将立即无法使用。", ariaLabel: `删除网关密钥 ${row.name}`, onConfirm: () => { void remove(row.id); } })] }) },
 ];
 onMounted(load);
 </script>

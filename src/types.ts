@@ -29,6 +29,8 @@ export interface Env {
   USAGE_QUEUE: UsageQueueBinding;
   ASSETS: Fetcher;
   MASTER_KEY: string;
+  /** Retired MASTER_KEY kept during a rotation so existing ciphertext stays readable. */
+  MASTER_KEY_PREVIOUS?: string;
   ADMIN_TOKEN: string;
   ADMIN_USERNAME?: string;
   ADMIN_PASSWORD?: string;
@@ -40,8 +42,6 @@ export interface Env {
   CREDENTIAL_COOLDOWN_MS?: string;
   OPENCODE_MIRRORS_URL?: string;
   PUBLIC_BASE_URL?: string;
-  PROXY_BRIDGE_URL?: string;
-  PROXY_BRIDGE_TOKEN?: string;
 }
 
 export interface ProviderRow {
@@ -62,8 +62,10 @@ export interface ProviderRow {
 export interface ProviderProxyRow {
   provider_id: string;
   enabled: number;
+  /** Dead column from the removed proxy bridge; kept because migrations are append-only. */
   bridge_url: string;
   proxy_url_ciphertext: string | null;
+  /** Dead column from the removed proxy bridge; always written as NULL. */
   bridge_token_ciphertext: string | null;
   no_proxy_json: string;
   connect_timeout_ms: number;
@@ -75,9 +77,7 @@ export interface ProviderProxyRow {
 export interface ProviderProxyConfig {
   providerId: string;
   enabled: boolean;
-  bridgeUrl: string;
   proxyUrl: string;
-  bridgeToken: string;
   noProxy: string[];
   connectTimeoutMs: number;
   requestTimeoutMs: number;
@@ -91,7 +91,6 @@ export interface ProviderProxySummary {
   proxyHost?: string;
   hasProviderOverride: boolean;
   hasSystemProxy: boolean;
-  bridgeConfigured: boolean;
   runtimeReady: boolean;
 }
 
@@ -99,7 +98,6 @@ export interface SystemProxySummary {
   enabled: boolean;
   proxyProtocol?: ProxyProtocol;
   proxyHost?: string;
-  bridgeConfigured: boolean;
   runtimeReady: boolean;
 }
 
@@ -168,6 +166,10 @@ export interface QuotaWindow {
   remainingPercent?: number;
   resetAt?: number;
   windowSeconds?: number;
+  // Per-window provenance. A snapshot can mix windows fetched from a quota API with windows
+  // captured from response rate-limit headers, so availability decisions must look here
+  // instead of at the snapshot-level source.
+  source?: "api" | "configured" | "headers";
 }
 
 export interface QuotaSnapshot {
@@ -259,6 +261,12 @@ export interface UsageEvent {
 
 export interface UsageAggregateEvent {
   kind: "aggregate";
+  /**
+   * Unique id of the flush that produced this delta. Stable across Durable Object
+   * retries so the D1 consumer can drop redelivered messages instead of double counting.
+   * Optional only for messages produced before this field existed.
+   */
+  flushId?: string;
   bucket: number;
   sourceId: string;
   gatewayKeyId: string;
