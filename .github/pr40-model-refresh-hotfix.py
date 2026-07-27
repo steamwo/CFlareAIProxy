@@ -2,6 +2,7 @@ from pathlib import Path
 
 path = Path('.github/pr40-model-refresh-fix.py')
 text = path.read_text(encoding='utf-8')
+
 old = '''replace_once(
     "src/models.ts",
     '{ purpose: "models", timeoutMs })',
@@ -21,4 +22,24 @@ write("src/models.ts", models_text.replace(old_fetch_options, '{ purpose: "model
 '''
 if text.count(old) != 1:
     raise RuntimeError(f'expected one fetch replacement block, found {text.count(old)}')
-path.write_text(text.replace(old, new), encoding='utf-8')
+text = text.replace(old, new)
+
+old = '''replace_once(
+    "src/upstream-fetch.ts",
+    '  const config = await getProviderProxyConfig(env, provider.id);',
+    '  const config = options.proxyConfig === undefined ? await getProviderProxyConfig(env, provider.id) : options.proxyConfig;',
+)
+'''
+new = '''replace_once(
+    "src/upstream-fetch.ts",
+    '''  const timeoutMs = Math.max(1000, options.timeoutMs ?? 120_000);
+  const config = await getProviderProxyConfig(env, provider.id);''',
+    '''  const timeoutMs = Math.max(1000, options.timeoutMs ?? 120_000);
+  const config = options.proxyConfig === undefined ? await getProviderProxyConfig(env, provider.id) : options.proxyConfig;''',
+)
+'''
+if text.count(old) != 1:
+    raise RuntimeError(f'expected one upstream proxy replacement block, found {text.count(old)}')
+text = text.replace(old, new)
+
+path.write_text(text, encoding='utf-8')
