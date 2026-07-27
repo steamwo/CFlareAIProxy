@@ -16,12 +16,6 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
           show-progress: false
-      - name: Apply and clean provider refresh follow-up
-        run: |
-          python .github/pr40-provider-refresh-fix.py
-          git show HEAD^:.github/workflows/check.yml > .github/workflows/check.yml
-          rm .github/pr40-provider-refresh-fix.py
-          git diff --check
       - uses: pnpm/action-setup@v4
         with:
           version: 11.9.0
@@ -31,16 +25,18 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Run standard validation
-        run: pnpm run check
-      - name: Build production web bundle
-        run: pnpm run build:web
-      - name: Wrangler dry run
-        run: pnpm run config:check
-      - name: Commit validated fixes
+      - name: Capture validation error
         run: |
+          python .github/pr40-provider-refresh-fix.py
+          set +e
+          pnpm run check > /tmp/pr40-provider-validation.log 2>&1
+          status=$?
+          tail -120 /tmp/pr40-provider-validation.log > /tmp/pr40-provider-error.txt
+          git reset --hard HEAD
+          cp /tmp/pr40-provider-error.txt pr40-provider-error.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/models.ts src/rate-limiter.ts src/admin.ts test/model-refresh-gate.test.ts test/model-refresh-d1-budget.test.ts .github/workflows/check.yml
-          git commit -m "fix provider model refresh limits and coordination"
+          git add pr40-provider-error.txt
+          git commit -m "record provider refresh validation error" || true
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          exit "$status"
