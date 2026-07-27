@@ -17,5 +17,6 @@ jobs:
           show-progress: false
       - name: Diagnose model refresh patch
         run: |
+          python .github/pr40-model-refresh-hotfix.py
           set -o pipefail
           python .github/pr40-model-refresh-fix.py 2>&1 | tail -1
