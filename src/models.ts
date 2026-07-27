@@ -8,7 +8,7 @@ import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
 import { isOpenCodeAnonymousModel, openCodeAnonymousCredential } from "./providers/opencode-anonymous";
 import { discoveryCredentialScopes } from "./qoder-model-routing";
 import type { Credential, DiscoveredModelRow, Env, GatewayEndpoint, ProviderConfig, ProviderProxyConfig } from "./types";
-import { normalizeBaseUrl } from "./utils";
+import { base64Decode, base64UrlDecode, base64UrlEncode, normalizeBaseUrl } from "./utils";
 import { providerFetch } from "./upstream-fetch";
 
 interface ModelCandidate {
@@ -42,46 +42,135 @@ export interface ProviderModelRefreshPage {
 }
 
 interface ProviderModelRefreshCursor {
-  version: 1;
+  version: 2;
   providerId: string;
   attemptedBefore: number;
-  total: number;
-  completed: number;
 }
 
-function encodeProviderModelRefreshCursor(cursor: ProviderModelRefreshCursor): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(cursor));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+const providerRefreshCursorEncoder = new TextEncoder();
+const providerRefreshCursorDecoder = new TextDecoder();
+const providerRefreshCursorKeyCache = new Map<string, Promise<CryptoKey>>();
+const PROVIDER_REFRESH_CURSOR_KEY_CACHE_LIMIT = 4;
+const PROVIDER_REFRESH_CURSOR_CONTEXT = providerRefreshCursorEncoder.encode(
+  "CFlareAIProxy/provider-model-refresh-cursor/v2",
+);
+
+function invalidProviderModelRefreshCursor(): GatewayError {
+  return new GatewayError(400, "MODEL_REFRESH_CURSOR_INVALID", "Invalid provider model refresh cursor");
 }
 
-function decodeProviderModelRefreshCursor(
+async function providerRefreshCursorKey(
+  base64Key: string | undefined,
+  slot: "MASTER_KEY" | "MASTER_KEY_PREVIOUS",
+): Promise<CryptoKey> {
+  const normalized = typeof base64Key === "string" ? base64Key.trim() : "";
+  if (!normalized) {
+    throw new GatewayError(
+      503,
+      "MASTER_KEY_MISSING",
+      "MASTER_KEY is not configured. Set it to a base64-encoded 32-byte Worker secret and redeploy.",
+      "configuration_error",
+    );
+  }
+  const cached = providerRefreshCursorKeyCache.get(normalized);
+  if (cached) return cached;
+
+  const pending = (async () => {
+    let raw: Uint8Array<ArrayBuffer>;
+    try {
+      raw = base64Decode(normalized);
+    } catch {
+      throw new GatewayError(
+        503,
+        slot === "MASTER_KEY" ? "INVALID_MASTER_KEY" : "INVALID_MASTER_KEY_PREVIOUS",
+        `${slot} is invalid. It must be a base64-encoded 32-byte key.`,
+        "configuration_error",
+      );
+    }
+    if (raw.byteLength !== 32) {
+      throw new GatewayError(
+        503,
+        slot === "MASTER_KEY" ? "INVALID_MASTER_KEY" : "INVALID_MASTER_KEY_PREVIOUS",
+        `${slot} is invalid. It must be a base64-encoded 32-byte key.`,
+        "configuration_error",
+      );
+    }
+    const material = new Uint8Array(raw.byteLength + PROVIDER_REFRESH_CURSOR_CONTEXT.byteLength);
+    material.set(raw);
+    material.set(PROVIDER_REFRESH_CURSOR_CONTEXT, raw.byteLength);
+    const derived = await crypto.subtle.digest("SHA-256", material);
+    return crypto.subtle.importKey(
+      "raw",
+      derived,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign", "verify"],
+    );
+  })();
+  pending.catch(() => {
+    if (providerRefreshCursorKeyCache.get(normalized) === pending) {
+      providerRefreshCursorKeyCache.delete(normalized);
+    }
+  });
+  if (providerRefreshCursorKeyCache.size >= PROVIDER_REFRESH_CURSOR_KEY_CACHE_LIMIT) {
+    providerRefreshCursorKeyCache.clear();
+  }
+  providerRefreshCursorKeyCache.set(normalized, pending);
+  return pending;
+}
+
+async function encodeProviderModelRefreshCursor(
+  env: Env,
+  cursor: ProviderModelRefreshCursor,
+): Promise<string> {
+  const payload = base64UrlEncode(providerRefreshCursorEncoder.encode(JSON.stringify(cursor)));
+  const key = await providerRefreshCursorKey(env.MASTER_KEY, "MASTER_KEY");
+  const signature = await crypto.subtle.sign("HMAC", key, providerRefreshCursorEncoder.encode(payload));
+  return `${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
+async function verifyProviderModelRefreshCursorSignature(
+  env: Env,
+  payload: string,
+  signature: Uint8Array<ArrayBuffer>,
+): Promise<boolean> {
+  const encoded = providerRefreshCursorEncoder.encode(payload);
+  const current = await providerRefreshCursorKey(env.MASTER_KEY, "MASTER_KEY");
+  if (await crypto.subtle.verify("HMAC", current, signature, encoded)) return true;
+  const previous = typeof env.MASTER_KEY_PREVIOUS === "string" ? env.MASTER_KEY_PREVIOUS.trim() : "";
+  if (!previous) return false;
+  const previousKey = await providerRefreshCursorKey(previous, "MASTER_KEY_PREVIOUS");
+  return crypto.subtle.verify("HMAC", previousKey, signature, encoded);
+}
+
+async function decodeProviderModelRefreshCursor(
+  env: Env,
   providerId: string,
   cursor?: string,
-): ProviderModelRefreshCursor | undefined {
+): Promise<ProviderModelRefreshCursor | undefined> {
   if (!cursor) return undefined;
   try {
-    if (cursor.length > 1024) throw new Error("cursor is too long");
-    const normalized = cursor.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Partial<ProviderModelRefreshCursor>;
+    if (cursor.length > 2048) throw new Error("cursor is too long");
+    const parts = cursor.split(".");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error("invalid cursor envelope");
+    const [payload, signatureValue] = parts;
+    const signature = base64UrlDecode(signatureValue);
+    if (!await verifyProviderModelRefreshCursorSignature(env, payload, signature)) {
+      throw new Error("cursor signature mismatch");
+    }
+    const parsed = JSON.parse(
+      providerRefreshCursorDecoder.decode(base64UrlDecode(payload)),
+    ) as Partial<ProviderModelRefreshCursor>;
     if (
-      parsed.version !== 1
+      parsed.version !== 2
       || parsed.providerId !== providerId
       || !Number.isInteger(parsed.attemptedBefore)
       || Number(parsed.attemptedBefore) <= 0
-      || !Number.isInteger(parsed.total)
-      || Number(parsed.total) < 0
-      || !Number.isInteger(parsed.completed)
-      || Number(parsed.completed) < 0
-      || Number(parsed.completed) > Number(parsed.total)
     ) throw new Error("invalid cursor payload");
     return parsed as ProviderModelRefreshCursor;
-  } catch {
-    throw new GatewayError(400, "MODEL_REFRESH_CURSOR_INVALID", "Invalid provider model refresh cursor");
+  } catch (error) {
+    if (error instanceof GatewayError && error.status === 503) throw error;
+    throw invalidProviderModelRefreshCursor();
   }
 }
 
@@ -472,33 +561,18 @@ export async function runProviderModelRefreshPage(
   cursor?: string,
 ): Promise<ProviderModelRefreshPage> {
   const boundedLimit = Math.max(1, Math.min(MODEL_REFRESH_BATCH_LIMIT, Math.floor(limit) || MODEL_REFRESH_BATCH_LIMIT));
-  const existingCycle = decodeProviderModelRefreshCursor(providerId, cursor);
+  const existingCycle = await decodeProviderModelRefreshCursor(env, providerId, cursor);
   const attemptedBefore = existingCycle?.attemptedBefore ?? Math.floor(Date.now() / 1000);
   const provider = await getProvider(env, providerId);
   const page = await env.DB.prepare(
-    `SELECT c.id,
-       (SELECT COUNT(*)
-        FROM credentials total
-        LEFT JOIN credential_refresh_attempts total_a ON total_a.credential_id=total.id
-        WHERE total.provider_id=? AND total.enabled=1
-          AND COALESCE(total_a.model_attempted_at, 0) < ?) AS eligible
+    `SELECT c.id
      FROM credentials c
      LEFT JOIN credential_refresh_attempts a ON a.credential_id=c.id
      WHERE c.provider_id=? AND c.enabled=1
        AND COALESCE(a.model_attempted_at, 0) < ?
      ORDER BY COALESCE(a.model_attempted_at, 0) ASC, c.priority, c.created_at
      LIMIT ?`,
-  ).bind(providerId, attemptedBefore, providerId, attemptedBefore, boundedLimit)
-    .all<{ id: string; eligible: number }>();
-  const eligibleBefore = Number(page.results[0]?.eligible ?? 0);
-  let total = existingCycle?.total ?? eligibleBefore;
-  let completedBefore = existingCycle?.completed ?? 0;
-  const expectedRemaining = Math.max(0, total - completedBefore);
-  if (eligibleBefore > expectedRemaining) {
-    total += eligibleBefore - expectedRemaining;
-  } else if (eligibleBefore < expectedRemaining) {
-    completedBefore += expectedRemaining - eligibleBefore;
-  }
+  ).bind(providerId, attemptedBefore, boundedLimit).all<{ id: string }>();
 
   const results: ModelRefreshResult[] = [];
   const providerCache: ProviderCache = new Map([[providerId, Promise.resolve(provider)]]);
@@ -515,24 +589,33 @@ export async function runProviderModelRefreshPage(
   }
   if (results.some((item) => item.count > 0)) await invalidateModelCache(env);
 
-  const processed = page.results.length;
-  const remaining = Math.max(0, eligibleBefore - processed);
-  const completed = Math.min(total, completedBefore + processed);
+  // Dynamic-cycle semantics: new enabled credentials join the active cycle, while credentials
+  // completed by another coordinated sweep or disabled during the cycle stop counting as pending.
+  // Recompute both values from current D1 state instead of trying to infer two independent changes
+  // from one net delta carried in the cursor.
+  const progress = await env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+       COALESCE(SUM(CASE WHEN COALESCE(a.model_attempted_at, 0) < ? THEN 1 ELSE 0 END), 0) AS remaining
+     FROM credentials c
+     LEFT JOIN credential_refresh_attempts a ON a.credential_id=c.id
+     WHERE c.provider_id=? AND c.enabled=1`,
+  ).bind(attemptedBefore, providerId).first<{ total: number; remaining: number }>();
+  const total = Math.max(0, Number(progress?.total ?? 0));
+  const remaining = Math.max(0, Math.min(total, Number(progress?.remaining ?? 0)));
+  const processedInCycle = total - remaining;
   const complete = remaining === 0;
   return {
     providerId,
     results,
-    processed,
-    processedInCycle: completed,
+    processed: page.results.length,
+    processedInCycle,
     total,
     remaining,
     complete,
-    nextCursor: complete ? undefined : encodeProviderModelRefreshCursor({
-      version: 1,
+    nextCursor: complete ? undefined : await encodeProviderModelRefreshCursor(env, {
+      version: 2,
       providerId,
       attemptedBefore,
-      total,
-      completed,
     }),
   };
 }
@@ -543,7 +626,7 @@ export async function refreshProviderModels(
   limit = MODEL_REFRESH_BATCH_LIMIT,
   cursor?: string,
 ): Promise<ProviderModelRefreshPage> {
-  decodeProviderModelRefreshCursor(providerId, cursor);
+  await decodeProviderModelRefreshCursor(env, providerId, cursor);
   const namespace = env.RATE_LIMITER;
   if (!namespace) return runProviderModelRefreshPage(env, providerId, limit, cursor);
   const stub = namespace.get(namespace.idFromName(MODEL_REFRESH_DO_NAME));

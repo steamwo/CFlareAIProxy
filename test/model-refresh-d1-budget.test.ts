@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { encryptSecret } from "../src/crypto";
+import { base64UrlDecode, base64UrlEncode } from "../src/utils";
 import { MODEL_REFRESH_BATCH_LIMIT, runModelRefreshSweep, runProviderModelRefreshPage } from "../src/models";
 import type { CredentialRow, Env, ProviderRow } from "../src/types";
 
@@ -26,35 +27,47 @@ function providerRow(id: string, index = 0): ProviderRow {
   };
 }
 
+interface EnvControls {
+  addCredential: (id: string, providerId: string) => void;
+  markAttempted: (ids: string[]) => void;
+}
+
 async function createEnv(input: {
   ids: string[];
   providerFor: (id: string, index: number) => string;
-}): Promise<{ env: Env; budget: Budget; resetBudget: () => void }> {
+}): Promise<{ env: Env; budget: Budget; resetBudget: () => void; controls: EnvControls }> {
   const masterKey = Buffer.alloc(32, 7).toString("base64");
   const ciphertext = await encryptSecret("token", masterKey);
-  const credentials = new Map<string, CredentialRow>(input.ids.map((id, index) => [id, {
-    id,
-    provider_id: input.providerFor(id, index),
-    label: id,
-    auth_type: "api_key",
-    secret_ciphertext: ciphertext,
-    refresh_ciphertext: null,
-    expires_at: null,
-    enabled: 1,
-    priority: 0,
-    weight: 1,
-    max_concurrency: 1,
-    metadata_json: "{}",
-    last_error: null,
-    last_used_at: null,
-    created_at: index,
-    updated_at: index,
-  }]));
+  const ids = [...input.ids];
+  const credentials = new Map<string, CredentialRow>();
   const providers = new Map<string, ProviderRow>();
-  for (const [index, id] of input.ids.entries()) {
-    const providerId = input.providerFor(id, index);
+
+  const addCredential = (id: string, providerId: string): void => {
+    const index = credentials.size;
+    ids.push(id);
+    credentials.set(id, {
+      id,
+      provider_id: providerId,
+      label: id,
+      auth_type: "api_key",
+      secret_ciphertext: ciphertext,
+      refresh_ciphertext: null,
+      expires_at: null,
+      enabled: 1,
+      priority: 0,
+      weight: 1,
+      max_concurrency: 1,
+      metadata_json: "{}",
+      last_error: null,
+      last_used_at: null,
+      created_at: index,
+      updated_at: index,
+    });
     if (!providers.has(providerId)) providers.set(providerId, providerRow(providerId, index));
-  }
+  };
+  ids.splice(0);
+  for (const [index, id] of input.ids.entries()) addCredential(id, input.providerFor(id, index));
+
   const attempted = new Set<string>();
   const budget: Budget = { d1: 0, subrequests: 0, cacheDeletes: 0 };
   const resetBudget = (): void => {
@@ -73,22 +86,34 @@ async function createEnv(input: {
     bind: (...args: unknown[]) => statement(sql, args),
     async all() {
       spendD1();
-      if (sql.includes("SELECT c.id FROM credentials c")) {
-        return { results: input.ids.map((id) => ({ id })), success: true, meta: {} } as never;
-      }
-      if (sql.includes("AS eligible")) {
-        const eligible = input.ids.filter((id) => !attempted.has(id));
+      if (sql.includes("AND COALESCE(a.model_attempted_at, 0) < ?")) {
+        const providerId = String(binds[0]);
         const limit = Number(binds.at(-1) ?? MODEL_REFRESH_BATCH_LIMIT);
-        return {
-          results: eligible.slice(0, limit).map((id) => ({ id, eligible: eligible.length })),
-          success: true,
-          meta: {},
-        } as never;
+        const eligible = ids.filter((id) => {
+          const credential = credentials.get(id);
+          return credential?.provider_id === providerId && credential.enabled === 1 && !attempted.has(id);
+        });
+        return { results: eligible.slice(0, limit).map((id) => ({ id })), success: true, meta: {} } as never;
+      }
+      if (sql.includes("SELECT c.id FROM credentials c")) {
+        const limit = Number(binds[0] ?? MODEL_REFRESH_BATCH_LIMIT);
+        return { results: ids.slice(0, limit).map((id) => ({ id })), success: true, meta: {} } as never;
       }
       return { results: [], success: true, meta: {} } as never;
     },
     async first() {
       spendD1();
+      if (sql.includes("COUNT(*) AS total") && sql.includes("AS remaining")) {
+        const providerId = String(binds[1]);
+        const enabled = ids.filter((id) => {
+          const credential = credentials.get(id);
+          return credential?.provider_id === providerId && credential.enabled === 1;
+        });
+        return {
+          total: enabled.length,
+          remaining: enabled.filter((id) => !attempted.has(id)).length,
+        } as never;
+      }
       if (sql.includes("SELECT enabled FROM providers WHERE id='opencode'")) return { enabled: 0 } as never;
       if (sql.includes("SELECT * FROM credentials WHERE id = ?")) return credentials.get(String(binds[0])) as never;
       if (sql.includes("SELECT * FROM providers WHERE id = ? AND enabled = 1")) return providers.get(String(binds[0])) as never;
@@ -136,7 +161,17 @@ async function createEnv(input: {
       },
     } as unknown as KVNamespace,
   } as Env;
-  return { env, budget, resetBudget };
+  return {
+    env,
+    budget,
+    resetBudget,
+    controls: {
+      addCredential,
+      markAttempted: (credentialIds) => {
+        for (const id of credentialIds) attempted.add(id);
+      },
+    },
+  };
 }
 
 describe("model refresh budgets", () => {
@@ -194,4 +229,54 @@ describe("model refresh budgets", () => {
     expect(pages.at(-1)?.nextCursor).toBeUndefined();
     expect(new Set(pages.flatMap((page) => page.results.map((result) => result.credentialId)))).toEqual(new Set(ids));
   });
+  it("recomputes dynamic progress when additions and external completions overlap", async () => {
+    const ids = Array.from({ length: 16 }, (_, index) => `c${index + 1}`);
+    const { env, controls, resetBudget } = await createEnv({ ids, providerFor: () => "p1" });
+    const first = await runProviderModelRefreshPage(env, "p1");
+    expect(first.processedInCycle).toBe(5);
+    expect(first.remaining).toBe(11);
+
+    controls.markAttempted(["c6", "c7"]);
+    controls.addCredential("c17", "p1");
+    controls.addCredential("c18", "p1");
+    controls.addCredential("c19", "p1");
+    resetBudget();
+
+    const second = await runProviderModelRefreshPage(
+      env,
+      "p1",
+      MODEL_REFRESH_BATCH_LIMIT,
+      first.nextCursor,
+    );
+    expect(second.processed).toBe(5);
+    expect(second.total).toBe(19);
+    expect(second.processedInCycle).toBe(12);
+    expect(second.remaining).toBe(7);
+  });
+
+  it("rejects a structurally valid cursor whose signed cutoff was modified", async () => {
+    const ids = Array.from({ length: 6 }, (_, index) => `c${index + 1}`);
+    const { env } = await createEnv({ ids, providerFor: () => "p1" });
+    const first = await runProviderModelRefreshPage(env, "p1");
+    const [payload, signature] = String(first.nextCursor).split(".");
+    if (!payload || !signature) throw new Error("cursor envelope missing");
+    const parsed = JSON.parse(new TextDecoder().decode(base64UrlDecode(payload))) as {
+      attemptedBefore: number;
+    };
+    const modifiedPayload = base64UrlEncode(new TextEncoder().encode(JSON.stringify({
+      ...parsed,
+      attemptedBefore: parsed.attemptedBefore + 3600,
+    })));
+
+    await expect(runProviderModelRefreshPage(
+      env,
+      "p1",
+      MODEL_REFRESH_BATCH_LIMIT,
+      `${modifiedPayload}.${signature}`,
+    )).rejects.toMatchObject({
+      status: 400,
+      code: "MODEL_REFRESH_CURSOR_INVALID",
+    });
+  });
+
 });
