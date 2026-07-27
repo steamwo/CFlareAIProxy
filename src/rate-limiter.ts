@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { runModelRefreshSweep, runProviderModelRefreshPage } from "./models";
 import type { Env, RateLease, UsageAggregateEvent, UsageEvent } from "./types";
 
 interface AcquirePayload {
@@ -48,6 +49,29 @@ export interface LoginThrottleCheck {
   trackedScopes: string[];
 }
 
+export interface AlertClaimResult {
+  claimed: boolean;
+  claimedAt: number;
+}
+
+/** Serialises all catalogue sweeps and coalesces duplicate work by scope. */
+export class ModelRefreshGate {
+  private readonly active = new Map<string, Promise<unknown>>();
+  private tail: Promise<void> = Promise.resolve();
+
+  run<T>(key: string, task: () => Promise<T>): Promise<T> {
+    const existing = this.active.get(key);
+    if (existing) return existing as Promise<T>;
+    const execution = this.tail.then(() => task(), () => task());
+    this.active.set(key, execution);
+    this.tail = execution.then(() => undefined, () => undefined);
+    void execution.finally(() => {
+      if (this.active.get(key) === execution) this.active.delete(key);
+    }).catch(() => undefined);
+    return execution;
+  }
+}
+
 const ACTIVITY_BUCKET_SECONDS = 5 * 60;
 const QUEUE_BATCH_SIZE = 100;
 const LEASE_TTL_MS = 15 * 60_000;
@@ -60,6 +84,7 @@ const LEASE_TOMBSTONE_TTL_MS = 60 * 60_000;
  * escalation that earned it.
  */
 const LOGIN_WINDOW_MS = 15 * 60_000;
+const ALERT_CLAIM_RETENTION_MS = 24 * 60 * 60_000;
 
 interface LoginPolicy {
   /** Failures tolerated inside the window before the scope locks. */
@@ -90,6 +115,7 @@ function loginScopeList(value: unknown): string[] {
 export class RateLimiter extends DurableObject<Env> {
   private alarmAt: number | null = null;
   private readonly environment: Env;
+  private readonly modelRefreshGate = new ModelRefreshGate();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -141,6 +167,10 @@ export class RateLimiter extends DurableObject<Env> {
           last_failure_at INTEGER NOT NULL DEFAULT 0,
           locked_until INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS alert_claims (
+          scope TEXT PRIMARY KEY,
+          claimed_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS pending_flush (
           flush_id TEXT PRIMARY KEY,
           bucket INTEGER NOT NULL,
@@ -191,6 +221,34 @@ export class RateLimiter extends DurableObject<Env> {
       const payload = await request.json() as { scopes?: unknown };
       this.resetLogin(loginScopeList(payload.scopes));
       return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/models/refresh") {
+      const payload = await request.json() as { limit?: unknown };
+      const limit = typeof payload.limit === "number" && Number.isFinite(payload.limit)
+        ? Math.max(1, Math.floor(payload.limit))
+        : undefined;
+      return Response.json(await this.modelRefreshGate.run("all", () => runModelRefreshSweep(this.environment, limit)));
+    }
+    if (request.method === "POST" && url.pathname.startsWith("/models/refresh/provider/")) {
+      const providerId = decodeURIComponent(url.pathname.slice("/models/refresh/provider/".length));
+      if (!providerId) return new Response("Provider is required", { status: 400 });
+      const payload = await request.json() as { limit?: unknown; cursor?: unknown };
+      const limit = typeof payload.limit === "number" && Number.isFinite(payload.limit)
+        ? Math.max(1, Math.floor(payload.limit))
+        : undefined;
+      const cursor = typeof payload.cursor === "string" && payload.cursor ? payload.cursor : undefined;
+      return Response.json(await this.modelRefreshGate.run(
+        `provider:${providerId}:${cursor ?? "start"}`,
+        () => runProviderModelRefreshPage(this.environment, providerId, limit, cursor),
+      ));
+    }
+    if (request.method === "POST" && url.pathname === "/alerts/claim") {
+      const payload = await request.json() as { scope?: unknown; windowMs?: unknown; now?: unknown };
+      const scope = typeof payload.scope === "string" ? payload.scope : "";
+      const windowMs = typeof payload.windowMs === "number" && Number.isFinite(payload.windowMs)
+        ? Math.max(0, payload.windowMs) : 0;
+      const now = typeof payload.now === "number" && Number.isFinite(payload.now) ? payload.now : Date.now();
+      return Response.json(this.claimAlert(scope, windowMs, now));
     }
     return new Response("Not found", { status: 404 });
   }
@@ -507,6 +565,24 @@ export class RateLimiter extends DurableObject<Env> {
     if (!scopes.length) return;
     const placeholders = scopes.map(() => "?").join(",");
     this.ctx.storage.sql.exec(`DELETE FROM login_attempts WHERE scope IN (${placeholders})`, ...scopes);
+  }
+
+  private claimAlert(scope: string, windowMs: number, now: number): AlertClaimResult {
+    if (!scope) return { claimed: false, claimedAt: now };
+    const previous = this.ctx.storage.sql
+      .exec<{ claimed_at: number }>("SELECT claimed_at FROM alert_claims WHERE scope=?", scope)
+      .toArray()[0];
+    if (previous && now - previous.claimed_at < windowMs) {
+      return { claimed: false, claimedAt: previous.claimed_at };
+    }
+    this.ctx.storage.sql.exec(
+      `INSERT INTO alert_claims(scope,claimed_at) VALUES(?,?)
+       ON CONFLICT(scope) DO UPDATE SET claimed_at=excluded.claimed_at`,
+      scope,
+      now,
+    );
+    this.ctx.storage.sql.exec("DELETE FROM alert_claims WHERE claimed_at<=?", now - ALERT_CLAIM_RETENTION_MS);
+    return { claimed: true, claimedAt: now };
   }
 
   private async recordActivity(event: UsageEvent): Promise<void> {

@@ -12,6 +12,7 @@ interface OAuthSessionRow {
   flow: string;
   secret_ciphertext: string;
   payload_json: string;
+  last_polled_at: number | null;
   expires_at: number;
   created_at: number;
 }
@@ -343,16 +344,16 @@ async function finalizeCredential(
 const POLL_MIN_INTERVAL_SECONDS = 2;
 
 /**
- * Records when a poll actually reached the provider.
- *
- * Written only after an upstream call, never on a throttled one: a throttled poll must not
- * cost a D1 write, otherwise a hot loop simply trades an upstream request for a database
- * write, which is the more expensive of the two.
+ * Atomically claims the right to forward one poll upstream. The conditional UPDATE is the
+ * synchronization point: concurrent requests may read the same session, but only one can
+ * advance last_polled_at inside a window.
  */
-async function markPolled(env: Env, row: OAuthSessionRow, payload: Record<string, unknown>, at: number): Promise<void> {
-  await env.DB.prepare("UPDATE oauth_sessions SET payload_json=? WHERE id=?")
-    .bind(JSON.stringify({ ...payload, lastPolledAt: at }), row.id)
-    .run();
+async function claimPollSlot(env: Env, row: OAuthSessionRow, at: number): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE oauth_sessions SET last_polled_at=?
+     WHERE id=? AND (last_polled_at IS NULL OR last_polled_at<=?)`,
+  ).bind(at, row.id, at - POLL_MIN_INTERVAL_SECONDS).run();
+  return Number(result.meta.changes ?? 0) > 0;
 }
 
 export async function pollOAuth(env: Env, providerId: string, sessionId: string): Promise<OAuthPollResult> {
@@ -361,15 +362,13 @@ export async function pollOAuth(env: Env, providerId: string, sessionId: string)
   if (session.row.provider_id !== providerId) throw new GatewayError(400, "OAUTH_PROVIDER_MISMATCH", "OAuth session belongs to another provider");
 
   const now = nowSeconds();
-  const lastPolledAt = numberValue(session.payload, "lastPolledAt");
-  if (lastPolledAt !== undefined && now - lastPolledAt < POLL_MIN_INTERVAL_SECONDS) {
+  if (!(await claimPollSlot(env, session.row, now))) {
     // Deliberately shaped like any other pending result: a caller that is polling too fast
     // learns only that authorization has not completed, which is also what it would have
     // learned from the upstream. Surfacing "you are rate limited" would tell an abuser
     // exactly how to pace itself.
     return { status: "pending", retryAfterSeconds: POLL_MIN_INTERVAL_SECONDS };
   }
-  await markPolled(env, session.row, session.payload, now);
 
   if (session.row.flow === "device_code") {
     const tokenUrl = stringValue(provider.auth, "token_url");

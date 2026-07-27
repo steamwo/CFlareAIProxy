@@ -313,6 +313,22 @@ describe("backup import", () => {
     }
   });
 
+  it("packs a large restore into a bounded atomic batch", async () => {
+    const fixture = fullFixture();
+    const template = fixture.model_routes?.[0] ?? {};
+    fixture.model_routes = Array.from({ length: 8_000 }, (_, index) => ({ ...template, id: `route-${index}` }));
+    const document = await exportDocument(fixture);
+    const fake = createFakeDb({});
+
+    const { status } = await importDocument(document, fake);
+
+    expect(status).toBe(200);
+    expect(fake.batches).toHaveLength(1);
+    expect(fake.batches[0]?.length).toBeGreaterThan(BACKUP_TABLE_NAMES.length);
+    expect(fake.batches[0]?.length).toBeLessThanOrEqual(50);
+    expect(fake.batches[0]?.every((entry) => entry.args.length === 1 && entry.sql.includes("json_each(?)"))).toBe(true);
+  });
+
   it("overwrites existing rows on primary key rather than skipping them", async () => {
     const document = await exportDocument(fullFixture());
     const fake = createFakeDb({});
@@ -337,10 +353,10 @@ describe("backup import", () => {
     await importDocument(document, fake);
 
     const credential = (fake.batches[0] ?? []).find((entry) => entry.sql.includes("INTO \"credentials\""));
-    expect(credential?.args).toContain(CIPHERTEXT);
-    expect(credential?.args).toContain(REFRESH_CIPHERTEXT);
+    expect(JSON.stringify(credential?.args)).toContain(CIPHERTEXT);
+    expect(JSON.stringify(credential?.args)).toContain(REFRESH_CIPHERTEXT);
     const key = (fake.batches[0] ?? []).find((entry) => entry.sql.includes("INTO \"gateway_keys\""));
-    expect(key?.args).toContain(KEY_HASH);
+    expect(JSON.stringify(key?.args)).toContain(KEY_HASH);
   });
 
   it("writes nothing when the batch fails", async () => {
