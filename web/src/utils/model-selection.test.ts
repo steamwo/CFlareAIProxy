@@ -22,10 +22,10 @@ describe("gateway-key model selection", () => {
     expect(normalizeAllowedModelSelection(["qoder/unknown"], models)).toEqual(["qoder/unknown"]);
   });
 
-  it("uses public ids as values and readable labels", () => {
+  it("uses public ids as values and a consistent display-name/provider label", () => {
     expect(publicModelOptions(models)).toEqual([
-      { label: "Claude Sonnet", value: "Claude Sonnet" },
-      { label: "GPT-5 · codex/gpt-5", value: "codex/gpt-5" },
+      { label: "Claude Sonnet · qoder", value: "Claude Sonnet" },
+      { label: "GPT-5 · codex", value: "codex/gpt-5" },
     ]);
   });
 });
