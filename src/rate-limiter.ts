@@ -232,13 +232,14 @@ export class RateLimiter extends DurableObject<Env> {
     if (request.method === "POST" && url.pathname.startsWith("/models/refresh/provider/")) {
       const providerId = decodeURIComponent(url.pathname.slice("/models/refresh/provider/".length));
       if (!providerId) return new Response("Provider is required", { status: 400 });
-      const payload = await request.json() as { limit?: unknown };
+      const payload = await request.json() as { limit?: unknown; cursor?: unknown };
       const limit = typeof payload.limit === "number" && Number.isFinite(payload.limit)
         ? Math.max(1, Math.floor(payload.limit))
         : undefined;
+      const cursor = typeof payload.cursor === "string" && payload.cursor ? payload.cursor : undefined;
       return Response.json(await this.modelRefreshGate.run(
-        `provider:${providerId}`,
-        () => runProviderModelRefreshPage(this.environment, providerId, limit),
+        `provider:${providerId}:${cursor ?? "start"}`,
+        () => runProviderModelRefreshPage(this.environment, providerId, limit, cursor),
       ));
     }
     if (request.method === "POST" && url.pathname === "/alerts/claim") {

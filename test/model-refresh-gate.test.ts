@@ -28,7 +28,15 @@ describe("model refresh coordination", () => {
     const idFromName = vi.fn(() => ({}) as DurableObjectId);
     const fetch = vi.fn(async (url: string) => url.endsWith("/models/refresh")
       ? Response.json([])
-      : Response.json({ providerId: "p1", results: [], processed: 0, total: 0, remaining: 0 }));
+      : Response.json({
+          providerId: "p1",
+          results: [],
+          processed: 0,
+          processedInCycle: 0,
+          total: 0,
+          remaining: 0,
+          complete: true,
+        }));
     const env = {
       RATE_LIMITER: {
         idFromName,

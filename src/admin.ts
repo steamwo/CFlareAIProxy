@@ -1058,14 +1058,16 @@ export function createAdminApp() {
   });
   app.post("/api/models/refresh", async (c) => c.json({ data: await refreshAllModels(c.env) }));
   app.post("/api/models/refresh/provider/:id", async (c) => {
-    const page = await refreshProviderModels(c.env, c.req.param("id"));
+    const page = await refreshProviderModels(c.env, c.req.param("id"), undefined, c.req.query("cursor") || undefined);
     return c.json({
       data: page.results,
       providerId: page.providerId,
       processed: page.processed,
+      processedInCycle: page.processedInCycle,
       total: page.total,
       remaining: page.remaining,
-      complete: page.remaining === 0,
+      complete: page.complete,
+      nextCursor: page.nextCursor ?? null,
     });
   });
   app.post("/api/models/refresh/credential/:id", async (c) => c.json(await refreshCredentialModels(c.env, c.req.param("id"))));

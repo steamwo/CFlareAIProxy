@@ -30,9 +30,59 @@ export interface ModelRefreshResult {
 export interface ProviderModelRefreshPage {
   providerId: string;
   results: ModelRefreshResult[];
+  /** Credentials attempted by this request. */
   processed: number;
+  /** Credentials covered since this cycle started, including work completed by another sweep. */
+  processedInCycle: number;
   total: number;
   remaining: number;
+  complete: boolean;
+  /** Opaque continuation token. Omitted once every credential in the cycle has been attempted. */
+  nextCursor?: string;
+}
+
+interface ProviderModelRefreshCursor {
+  version: 1;
+  providerId: string;
+  attemptedBefore: number;
+  total: number;
+  completed: number;
+}
+
+function encodeProviderModelRefreshCursor(cursor: ProviderModelRefreshCursor): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(cursor));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeProviderModelRefreshCursor(
+  providerId: string,
+  cursor?: string,
+): ProviderModelRefreshCursor | undefined {
+  if (!cursor) return undefined;
+  try {
+    if (cursor.length > 1024) throw new Error("cursor is too long");
+    const normalized = cursor.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Partial<ProviderModelRefreshCursor>;
+    if (
+      parsed.version !== 1
+      || parsed.providerId !== providerId
+      || !Number.isInteger(parsed.attemptedBefore)
+      || Number(parsed.attemptedBefore) <= 0
+      || !Number.isInteger(parsed.total)
+      || Number(parsed.total) < 0
+      || !Number.isInteger(parsed.completed)
+      || Number(parsed.completed) < 0
+      || Number(parsed.completed) > Number(parsed.total)
+    ) throw new Error("invalid cursor payload");
+    return parsed as ProviderModelRefreshCursor;
+  } catch {
+    throw new GatewayError(400, "MODEL_REFRESH_CURSOR_INVALID", "Invalid provider model refresh cursor");
+  }
 }
 
 type ProviderProxyCache = Map<string, Promise<ProviderProxyConfig | null>>;
@@ -419,22 +469,41 @@ export async function runProviderModelRefreshPage(
   env: Env,
   providerId: string,
   limit = MODEL_REFRESH_BATCH_LIMIT,
+  cursor?: string,
 ): Promise<ProviderModelRefreshPage> {
   const boundedLimit = Math.max(1, Math.min(MODEL_REFRESH_BATCH_LIMIT, Math.floor(limit) || MODEL_REFRESH_BATCH_LIMIT));
+  const existingCycle = decodeProviderModelRefreshCursor(providerId, cursor);
+  const attemptedBefore = existingCycle?.attemptedBefore ?? Math.floor(Date.now() / 1000);
   const provider = await getProvider(env, providerId);
   const page = await env.DB.prepare(
     `SELECT c.id,
-       (SELECT COUNT(*) FROM credentials total WHERE total.provider_id=? AND total.enabled=1) AS total
+       (SELECT COUNT(*)
+        FROM credentials total
+        LEFT JOIN credential_refresh_attempts total_a ON total_a.credential_id=total.id
+        WHERE total.provider_id=? AND total.enabled=1
+          AND COALESCE(total_a.model_attempted_at, 0) < ?) AS eligible
      FROM credentials c
      LEFT JOIN credential_refresh_attempts a ON a.credential_id=c.id
      WHERE c.provider_id=? AND c.enabled=1
+       AND COALESCE(a.model_attempted_at, 0) < ?
      ORDER BY COALESCE(a.model_attempted_at, 0) ASC, c.priority, c.created_at
      LIMIT ?`,
-  ).bind(providerId, providerId, boundedLimit).all<{ id: string; total: number }>();
+  ).bind(providerId, attemptedBefore, providerId, attemptedBefore, boundedLimit)
+    .all<{ id: string; eligible: number }>();
+  const eligibleBefore = Number(page.results[0]?.eligible ?? 0);
+  let total = existingCycle?.total ?? eligibleBefore;
+  let completedBefore = existingCycle?.completed ?? 0;
+  const expectedRemaining = Math.max(0, total - completedBefore);
+  if (eligibleBefore > expectedRemaining) {
+    total += eligibleBefore - expectedRemaining;
+  } else if (eligibleBefore < expectedRemaining) {
+    completedBefore += expectedRemaining - eligibleBefore;
+  }
+
   const results: ModelRefreshResult[] = [];
   const providerCache: ProviderCache = new Map([[providerId, Promise.resolve(provider)]]);
   const proxyCache: ProviderProxyCache = new Map();
-  if (providerId === "opencode") {
+  if (providerId === "opencode" && !existingCycle) {
     results.push(await refreshOpenCodeAnonymousModels(env, providerCache, proxyCache, false));
   }
   for (let index = 0; index < page.results.length; index += MODEL_REFRESH_CONCURRENCY) {
@@ -445,13 +514,26 @@ export async function runProviderModelRefreshPage(
     ));
   }
   if (results.some((item) => item.count > 0)) await invalidateModelCache(env);
-  const total = Number(page.results[0]?.total ?? 0);
+
+  const processed = page.results.length;
+  const remaining = Math.max(0, eligibleBefore - processed);
+  const completed = Math.min(total, completedBefore + processed);
+  const complete = remaining === 0;
   return {
     providerId,
     results,
-    processed: page.results.length,
+    processed,
+    processedInCycle: completed,
     total,
-    remaining: Math.max(0, total - page.results.length),
+    remaining,
+    complete,
+    nextCursor: complete ? undefined : encodeProviderModelRefreshCursor({
+      version: 1,
+      providerId,
+      attemptedBefore,
+      total,
+      completed,
+    }),
   };
 }
 
@@ -459,14 +541,16 @@ export async function refreshProviderModels(
   env: Env,
   providerId: string,
   limit = MODEL_REFRESH_BATCH_LIMIT,
+  cursor?: string,
 ): Promise<ProviderModelRefreshPage> {
+  decodeProviderModelRefreshCursor(providerId, cursor);
   const namespace = env.RATE_LIMITER;
-  if (!namespace) return runProviderModelRefreshPage(env, providerId, limit);
+  if (!namespace) return runProviderModelRefreshPage(env, providerId, limit, cursor);
   const stub = namespace.get(namespace.idFromName(MODEL_REFRESH_DO_NAME));
   const response = await stub.fetch(`https://do.internal/models/refresh/provider/${encodeURIComponent(providerId)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ limit }),
+    body: JSON.stringify({ limit, cursor }),
   });
   if (!response.ok) throw new Error(`provider model refresh coordinator returned ${response.status}`);
   return await response.json() as ProviderModelRefreshPage;

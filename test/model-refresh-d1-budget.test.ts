@@ -29,9 +29,7 @@ function providerRow(id: string, index = 0): ProviderRow {
 async function createEnv(input: {
   ids: string[];
   providerFor: (id: string, index: number) => string;
-  globalSelection?: boolean;
-  total?: number;
-}): Promise<{ env: Env; budget: Budget }> {
+}): Promise<{ env: Env; budget: Budget; resetBudget: () => void }> {
   const masterKey = Buffer.alloc(32, 7).toString("base64");
   const ciphertext = await encryptSecret("token", masterKey);
   const credentials = new Map<string, CredentialRow>(input.ids.map((id, index) => [id, {
@@ -57,7 +55,13 @@ async function createEnv(input: {
     const providerId = input.providerFor(id, index);
     if (!providers.has(providerId)) providers.set(providerId, providerRow(providerId, index));
   }
+  const attempted = new Set<string>();
   const budget: Budget = { d1: 0, subrequests: 0, cacheDeletes: 0 };
+  const resetBudget = (): void => {
+    budget.d1 = 0;
+    budget.subrequests = 0;
+    budget.cacheDeletes = 0;
+  };
   const spendD1 = (count = 1): void => {
     budget.d1 += count;
     budget.subrequests += count;
@@ -72,10 +76,11 @@ async function createEnv(input: {
       if (sql.includes("SELECT c.id FROM credentials c")) {
         return { results: input.ids.map((id) => ({ id })), success: true, meta: {} } as never;
       }
-      if (sql.includes("(SELECT COUNT(*) FROM credentials total")) {
-        const limit = Number(binds[2] ?? MODEL_REFRESH_BATCH_LIMIT);
+      if (sql.includes("AS eligible")) {
+        const eligible = input.ids.filter((id) => !attempted.has(id));
+        const limit = Number(binds.at(-1) ?? MODEL_REFRESH_BATCH_LIMIT);
         return {
-          results: input.ids.slice(0, limit).map((id) => ({ id, total: input.total ?? input.ids.length })),
+          results: eligible.slice(0, limit).map((id) => ({ id, eligible: eligible.length })),
           success: true,
           meta: {},
         } as never;
@@ -93,6 +98,9 @@ async function createEnv(input: {
     },
     async run() {
       spendD1();
+      if (sql.includes("INSERT INTO credential_refresh_attempts")) {
+        for (const id of JSON.parse(String(binds[1] ?? "[]")) as string[]) attempted.add(id);
+      }
       return { success: true, meta: { changes: 1 } } as never;
     },
     async raw() {
@@ -128,7 +136,7 @@ async function createEnv(input: {
       },
     } as unknown as KVNamespace,
   } as Env;
-  return { env, budget };
+  return { env, budget, resetBudget };
 }
 
 describe("model refresh budgets", () => {
@@ -139,7 +147,6 @@ describe("model refresh budgets", () => {
     const { env, budget } = await createEnv({
       ids,
       providerFor: (_id, index) => `p${index + 1}`,
-      globalSelection: true,
     });
     const results = await runModelRefreshSweep(env);
     expect(results).toHaveLength(MODEL_REFRESH_BATCH_LIMIT);
@@ -151,14 +158,40 @@ describe("model refresh budgets", () => {
 
   it("limits a provider refresh to one coordinated safe page", async () => {
     const ids = Array.from({ length: 16 }, (_, index) => `c${index + 1}`);
-    const { env, budget } = await createEnv({ ids, providerFor: () => "p1", total: ids.length });
+    const { env, budget } = await createEnv({ ids, providerFor: () => "p1" });
     const page = await runProviderModelRefreshPage(env, "p1");
     expect(page.processed).toBe(MODEL_REFRESH_BATCH_LIMIT);
+    expect(page.processedInCycle).toBe(MODEL_REFRESH_BATCH_LIMIT);
     expect(page.total).toBe(16);
     expect(page.remaining).toBe(16 - MODEL_REFRESH_BATCH_LIMIT);
+    expect(page.complete).toBe(false);
+    expect(page.nextCursor).toEqual(expect.any(String));
     expect(page.results).toHaveLength(MODEL_REFRESH_BATCH_LIMIT);
     expect(budget.d1).toBeLessThanOrEqual(50);
     expect(budget.subrequests).toBeLessThanOrEqual(50);
     expect(budget.cacheDeletes).toBe(3);
+  });
+
+  it("finishes one 16-account provider cycle across four cursor pages", async () => {
+    const ids = Array.from({ length: 16 }, (_, index) => `c${index + 1}`);
+    const { env, budget, resetBudget } = await createEnv({ ids, providerFor: () => "p1" });
+    const pages = [];
+    let cursor: string | undefined;
+    do {
+      resetBudget();
+      const page = await runProviderModelRefreshPage(env, "p1", MODEL_REFRESH_BATCH_LIMIT, cursor);
+      pages.push(page);
+      expect(budget.d1).toBeLessThanOrEqual(50);
+      expect(budget.subrequests).toBeLessThanOrEqual(50);
+      cursor = page.nextCursor;
+    } while (!pages.at(-1)?.complete);
+
+    expect(pages.map((page) => page.processed)).toEqual([5, 5, 5, 1]);
+    expect(pages.map((page) => page.processedInCycle)).toEqual([5, 10, 15, 16]);
+    expect(pages.map((page) => page.remaining)).toEqual([11, 6, 1, 0]);
+    expect(pages.map((page) => page.total)).toEqual([16, 16, 16, 16]);
+    expect(pages.map((page) => page.complete)).toEqual([false, false, false, true]);
+    expect(pages.at(-1)?.nextCursor).toBeUndefined();
+    expect(new Set(pages.flatMap((page) => page.results.map((result) => result.credentialId)))).toEqual(new Set(ids));
   });
 });
