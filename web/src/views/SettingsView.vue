@@ -3,7 +3,7 @@ import { onMounted, ref } from "vue";
 import {
   NAlert, NButton, NCard, NDivider, NFormItem, NSelect, NSpace, NSwitch, NTag,
 } from "naive-ui";
-import { Network, RefreshCw, Route, Save, ScrollText } from "@lucide/vue";
+import { Database, Download, Network, RefreshCw, Route, Save, ScrollText, Upload } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProxyEditor from "../components/ProxyEditor.vue";
 import { api, jsonBody } from "../api";
@@ -15,10 +15,23 @@ interface LoggingSettings {
   requestLoggingEnabled: boolean;
   level: LogLevel;
 }
+interface BackupDocument {
+  format: string;
+  version: number;
+  exportedAt: number;
+  tables: Record<string, unknown[]>;
+}
+interface BackupImportResult {
+  ok: boolean;
+  imported: Record<string, number>;
+}
 
 const proxy = ref<ProxySummary | null>(null);
 const logging = ref<LoggingSettings>({ requestLoggingEnabled: true, level: "error" });
 const savingLogging = ref(false);
+const exportingBackup = ref(false);
+const importingBackup = ref(false);
+const backupInput = ref<HTMLInputElement | null>(null);
 const modal = ref(false);
 const { loading, run } = useApiRequest();
 const levelOptions = [
@@ -49,11 +62,58 @@ async function saveLogging() {
   }, { loading: savingLogging, success: "日志设置已保存" });
 }
 
+async function exportBackup() {
+  await run(async () => {
+    const backup = await api<BackupDocument>("/backup/export");
+    const blob = new Blob([`${JSON.stringify(backup, null, 2)}\n`], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `cflare-api-backup-${backup.exportedAt}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, { loading: exportingBackup, success: "配置备份已导出" });
+}
+
+function chooseBackupFile() {
+  backupInput.value?.click();
+}
+
+async function importBackup(event: Event) {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  if (!window.confirm(`确认导入 ${file.name}？同主键配置将被备份内容覆盖，其他现有配置会保留。`)) return;
+
+  const result = await run(async () => {
+    let backup: unknown;
+    try {
+      backup = JSON.parse(await file.text());
+    } catch {
+      throw new Error("备份文件不是有效的 JSON");
+    }
+    if (!backup || typeof backup !== "object" || Array.isArray(backup)) {
+      throw new Error("备份文件必须是 JSON 对象");
+    }
+    return api<BackupImportResult>("/backup/import", {
+      method: "POST",
+      body: jsonBody(backup),
+    });
+  }, {
+    loading: importingBackup,
+    success: (value) => `配置备份已导入，共 ${Object.values(value.imported).reduce((sum, count) => sum + count, 0)} 条`,
+  });
+  if (result) await load();
+}
+
 onMounted(load);
 </script>
 
 <template>
-  <page-header title="系统设置" description="集中管理运行日志与系统默认网络策略。">
+  <page-header title="系统设置" description="集中管理运行日志、系统默认网络策略与配置备份。">
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新</n-button>
   </page-header>
 
@@ -132,6 +192,41 @@ onMounted(load);
         当前 Worker 无法原生处理该代理协议。系统不会静默回退直连，请改用受支持的协议。
       </n-alert>
     </section>
+
+    <n-divider />
+
+    <section class="settings-section">
+      <div class="section-heading">
+        <span class="section-icon"><database :size="18" /></span>
+        <div>
+          <h2>配置备份与恢复</h2>
+          <p>导出供应商、认证凭据、模型路由、网关密钥、价格和代理等配置。</p>
+        </div>
+        <n-tag type="warning" round>密文备份</n-tag>
+      </div>
+
+      <n-alert type="warning" :bordered="false" class="section-alert">
+        凭据和代理地址以密文导出，网关 Key 以哈希导出。恢复后必须继续使用原 MASTER_KEY（或在轮换期配置为 MASTER_KEY_PREVIOUS）；Worker Secrets、请求日志、模型发现结果和额度快照不包含在备份中。
+      </n-alert>
+
+      <div class="setting-list">
+        <div class="setting-row setting-row--control">
+          <div class="setting-copy">
+            <strong>JSON 配置备份</strong>
+            <span>导入采用事务式 upsert：同主键记录会更新，备份中未出现的现有记录不会删除。</span>
+          </div>
+          <n-space align="center" justify="end" class="setting-control">
+            <n-button :loading="exportingBackup" @click="exportBackup">
+              <template #icon><download /></template>导出备份
+            </n-button>
+            <n-button type="warning" secondary :loading="importingBackup" @click="chooseBackupFile">
+              <template #icon><upload /></template>导入备份
+            </n-button>
+          </n-space>
+        </div>
+      </div>
+      <input ref="backupInput" class="backup-file-input" type="file" accept=".json,application/json" @change="importBackup">
+    </section>
   </n-card>
 
   <proxy-editor v-model:show="modal" :summary="proxy || undefined" title="系统默认代理" @changed="load" />
@@ -156,6 +251,7 @@ onMounted(load);
 .setting-control { width: min(420px, 40vw); margin: 0; }
 .section-actions { display: flex; justify-content: flex-end; margin-left: 50px; }
 .section-alert--bottom { margin-top: 0; }
+.backup-file-input { display: none; }
 @media (max-width: 720px) {
   .settings-shell :deep(.n-card__content) { padding: 18px; }
   .section-heading { grid-template-columns: 36px minmax(0, 1fr); }
