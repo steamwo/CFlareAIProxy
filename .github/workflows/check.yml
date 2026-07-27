@@ -20,8 +20,19 @@ jobs:
       - name: Apply PR 37 review fixes
         if: ${{ hashFiles('.github/pr37-fix.py') != '' }}
         run: |
-          python .github/pr37-fix.py
-          rm -f .github/pr37-fix.py .github/workflows/apply-pr37-review-fixes.yml
+          set +e
+          python .github/pr37-fix.py > pr37-fix.log 2>&1
+          status=$?
+          cat pr37-fix.log
+          if [ "$status" -ne 0 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add pr37-fix.log
+            git commit -m "record PR 37 fix script failure"
+            git push origin HEAD:${{ github.event.pull_request.head.ref }}
+            exit "$status"
+          fi
+          rm -f pr37-fix.log .github/pr37-fix.py .github/workflows/apply-pr37-review-fixes.yml
           git show "${{ github.event.pull_request.base.sha }}:.github/workflows/check.yml" > .github/workflows/check.yml
       - uses: pnpm/action-setup@v4
         with:
