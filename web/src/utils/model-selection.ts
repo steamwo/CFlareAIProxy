@@ -21,12 +21,20 @@ export function normalizeAllowedModelSelection(values: readonly string[], models
   return output;
 }
 
+function publicModelSource(model: PublicModel): string {
+  const provider = model.x_cflare_provider?.trim();
+  if (provider) return provider;
+
+  const separator = model.id.indexOf("/");
+  if (separator > 0) return model.id.slice(0, separator);
+
+  const owner = model.owned_by?.trim();
+  return owner && owner !== "cflare-route" ? owner : "路由";
+}
+
 export function publicModelOptions(models: readonly PublicModel[]): SelectOption[] {
-  return models.map((model) => {
-    const displayName = model.display_name?.trim();
-    return {
-      label: displayName && displayName !== model.id ? `${displayName} · ${model.id}` : model.id,
-      value: model.id,
-    };
-  });
+  return models.map((model) => ({
+    label: `${model.display_name?.trim() || model.id} · ${publicModelSource(model)}`,
+    value: model.id,
+  }));
 }
