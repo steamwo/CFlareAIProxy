@@ -16,4 +16,6 @@ jobs:
           fetch-depth: 1
           show-progress: false
       - name: Apply PR 37 review fixes
-        run: python .github/pr37-fix.py
+        run: |
+          set -o pipefail
+          python .github/pr37-fix.py 2>&1 | tail -1
