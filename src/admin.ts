@@ -390,6 +390,10 @@ const BACKUP_CONFLICT_POLICY = "overwrite-by-primary-key";
 const BACKUP_MAX_TABLE_ROWS = 20_000;
 const BACKUP_MAX_TOTAL_ROWS = 50_000;
 const BACKUP_MAX_IMPORT_BYTES = 32 * 1024 * 1024;
+/** Keep each JSON binding below D1's 2 MB string/BLOB limit with safety margin. */
+const BACKUP_JSON_CHUNK_BYTES = 1_500_000;
+/** Workers Free permits 50 D1 queries per invocation; one batch must fit that floor. */
+const BACKUP_MAX_BATCH_STATEMENTS = 50;
 
 type BackupValue = string | number | null;
 type BackupColumnType = "text" | "int" | "textOrNull" | "intOrNull";
@@ -497,6 +501,7 @@ const BACKUP_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   quota_snapshots: "配额快照，可向上游重新拉取",
   oauth_sessions: "登录流程的临时会话，1 小时内过期",
   usage_flush_dedupe: "用量写入去重标记，属于运行时状态",
+  credential_refresh_attempts: "批量刷新公平调度游标，可由后续任务重新生成",
 };
 
 interface BackupDocument {
@@ -617,13 +622,45 @@ function parseBackupTable(table: BackupTable, raw: unknown): Record<string, Back
 
 function backupUpsertSql(table: BackupTable): string {
   const columns = table.columns.map((column) => quoteIdentifier(column.name));
+  const selectors = table.columns.map((column) => `json_extract(value, '$.${column.name}')`);
   const assignments = table.columns
     .filter((column) => !table.primaryKey.includes(column.name))
     .map((column) => `${quoteIdentifier(column.name)}=excluded.${quoteIdentifier(column.name)}`);
   const conflict = table.primaryKey.map(quoteIdentifier).join(",");
+  // One bound JSON array can carry many rows, keeping the transaction below D1's query-count
+  // limit. WHERE 1 disambiguates SQLite's ON CONFLICT from a SELECT join clause.
   return `INSERT INTO ${quoteIdentifier(table.name)}(${columns.join(",")}) `
-    + `VALUES(${columns.map(() => "?").join(",")}) `
+    + `SELECT ${selectors.join(",")} FROM json_each(?) WHERE 1 `
     + `ON CONFLICT(${conflict}) DO UPDATE SET ${assignments.join(",")}`;
+}
+
+function backupJsonChunks(
+  table: BackupTable,
+  rows: Record<string, BackupValue>[],
+  maxBytes = BACKUP_JSON_CHUNK_BYTES,
+): string[] {
+  if (!rows.length) return [];
+  const encoder = new TextEncoder();
+  const chunks: string[] = [];
+  let encodedRows: string[] = [];
+  let bytes = 2; // []
+  for (let index = 0; index < rows.length; index += 1) {
+    const encoded = JSON.stringify(rows[index]);
+    const rowBytes = encoder.encode(encoded).byteLength;
+    if (rowBytes + 2 > maxBytes) {
+      throw invalidBackup(`${table.name}[${index}] 单行超过 D1 单个绑定值限制`);
+    }
+    const extra = rowBytes + (encodedRows.length ? 1 : 0);
+    if (encodedRows.length && bytes + extra > maxBytes) {
+      chunks.push(`[${encodedRows.join(",")}]`);
+      encodedRows = [];
+      bytes = 2;
+    }
+    encodedRows.push(encoded);
+    bytes += rowBytes + (encodedRows.length > 1 ? 1 : 0);
+  }
+  if (encodedRows.length) chunks.push(`[${encodedRows.join(",")}]`);
+  return chunks;
 }
 
 async function importBackup(env: Env, body: Record<string, unknown>): Promise<Record<string, number>> {
@@ -648,10 +685,13 @@ async function importBackup(env: Env, body: Record<string, unknown>): Promise<Re
     total += rows.length;
     if (total > BACKUP_MAX_TOTAL_ROWS) throw invalidBackup(`备份总行数超过 ${BACKUP_MAX_TOTAL_ROWS}，无法在单个事务内恢复`);
     const sql = backupUpsertSql(table);
-    for (const row of rows) statements.push(env.DB.prepare(sql).bind(...table.columns.map((column) => row[column.name] ?? null)));
+    for (const chunk of backupJsonChunks(table, rows)) statements.push(env.DB.prepare(sql).bind(chunk));
   }
 
   if (!statements.length) throw invalidBackup("备份文件不包含任何配置行");
+  if (statements.length > BACKUP_MAX_BATCH_STATEMENTS) {
+    throw invalidBackup(`备份需要 ${statements.length} 条数据库语句，超过单次原子恢复上限 ${BACKUP_MAX_BATCH_STATEMENTS}`);
+  }
   // One batch is one implicit transaction: a foreign-key violation or a constraint failure
   // anywhere rolls the entire restore back, so the gateway never runs on half a config.
   await env.DB.batch(statements);

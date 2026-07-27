@@ -250,7 +250,11 @@ export class SocketReader {
     let scanned = 0;
     while (true) {
       const index = this.buffer.indexOf(marker, scanned);
-      if (index >= 0) return this.buffer.take(index + marker.byteLength);
+      if (index >= 0) {
+        const end = index + marker.byteLength;
+        if (end > maxBytes) throw this.dialect.headersTooLarge();
+        return this.buffer.take(end);
+      }
       // Only the trailing marker.length-1 bytes can still start a match that
       // completes once the next chunk arrives, so never rescan before that.
       scanned = Math.max(0, this.buffer.length - marker.byteLength + 1);

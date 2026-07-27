@@ -18,6 +18,7 @@ interface Capture {
 
 function createDb(capture: Capture, credentialIds: string[]) {
   return {
+    batch: vi.fn(async (statements: D1PreparedStatement[]) => statements.map(() => ({ success: true, meta: {} }))),
     prepare: vi.fn((sql: string) => ({
       bind: (...args: unknown[]) => {
         capture.sql.push(sql);
@@ -71,11 +72,12 @@ describe("model refresh batching", () => {
     expect(capture.binds[0]?.[0]).toBe(MODEL_REFRESH_BATCH_LIMIT);
   });
 
-  it("takes the least recently discovered catalogues first", async () => {
+  it("takes the least recently attempted catalogues first", async () => {
     const capture: Capture = { sql: [], binds: [] };
     const env = { DB: createDb(capture, []) } as never;
     await refreshAllModels(env);
-    expect(capture.sql[0]).toMatch(/ORDER BY\s+COALESCE\(d\.discovered_at, 0\) ASC/);
+    expect(capture.sql[0]).toContain("LEFT JOIN credential_refresh_attempts");
+    expect(capture.sql[0]).toMatch(/ORDER BY\s+COALESCE\(a\.model_attempted_at, 0\) ASC/);
   });
 });
 

@@ -267,19 +267,28 @@ export async function refreshProviderModels(env: Env, providerId: string): Promi
  */
 export const MODEL_REFRESH_BATCH_LIMIT = 40;
 
+async function markModelRefreshAttempts(env: Env, credentialIds: string[]): Promise<void> {
+  if (!credentialIds.length) return;
+  const attemptedAt = Math.floor(Date.now() / 1000);
+  await env.DB.batch(credentialIds.map((credentialId) => env.DB.prepare(
+    `INSERT INTO credential_refresh_attempts(credential_id,model_attempted_at) VALUES(?,?)
+     ON CONFLICT(credential_id) DO UPDATE SET model_attempted_at=excluded.model_attempted_at`,
+  ).bind(credentialId, attemptedAt)));
+}
+
 /**
- * Refreshes the least recently discovered catalogues first, so successive runs rotate
- * through a pool larger than one batch instead of repeatedly redoing the same head.
+ * Refreshes the least recently attempted catalogues first, so even accounts whose upstream
+ * keeps failing move behind the rest of the pool on the next invocation.
  */
 export async function refreshAllModels(env: Env, limit = MODEL_REFRESH_BATCH_LIMIT): Promise<ModelRefreshResult[]> {
   const result = await env.DB.prepare(
     `SELECT c.id FROM credentials c
-     LEFT JOIN (SELECT credential_id, MAX(discovered_at) AS discovered_at FROM discovered_models GROUP BY credential_id) d
-       ON d.credential_id = c.id
+     LEFT JOIN credential_refresh_attempts a ON a.credential_id = c.id
      WHERE c.enabled=1
-     ORDER BY COALESCE(d.discovered_at, 0) ASC, c.provider_id, c.priority, c.created_at
+     ORDER BY COALESCE(a.model_attempted_at, 0) ASC, c.provider_id, c.priority, c.created_at
      LIMIT ?`,
   ).bind(limit).all<{ id: string }>();
+  await markModelRefreshAttempts(env, result.results.map((row) => row.id));
   const output: ModelRefreshResult[] = [];
   const openCode = await env.DB.prepare("SELECT enabled FROM providers WHERE id='opencode'").first<{ enabled: number }>();
   if (openCode?.enabled === 1) output.push(await refreshOpenCodeAnonymousModels(env));

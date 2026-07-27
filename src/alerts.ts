@@ -83,14 +83,11 @@ const SETTINGS_CACHE_TTL_MS = 30_000;
  * broken re-opens its breaker at most once per 15 minutes in steady state. A shorter window
  * would emit several notifications per backoff cycle for a single ongoing incident — exactly
  * the flooding that makes operators mute the channel — while a longer one would swallow the
- * "still down" reminder that tells an operator the incident has not self-healed. It also
- * keeps the KV dedupe key far below the ~1 write/second per-key limit.
+ * "still down" reminder that tells an operator the incident has not self-healed.
  */
 export const DEFAULT_DEDUPE_WINDOW_MINUTES = 15;
 const MIN_DEDUPE_WINDOW_MINUTES = 1;
 const MAX_DEDUPE_WINDOW_MINUTES = 24 * 60;
-/** KV rejects an expirationTtl below 60 seconds, so a 1-minute window is the floor. */
-const MIN_KV_TTL_SECONDS = 60;
 const WEBHOOK_TIMEOUT_MS = 10_000;
 const MAX_DETAIL_CHARS = 1000;
 const MAX_TARGET_CHARS = 120;
@@ -102,11 +99,7 @@ interface ResolvedAlertSettings extends AlertSettingsSummary {
 
 let settingsCache: { value: ResolvedAlertSettings; expiresAt: number } | undefined;
 
-/**
- * Suppression timestamps observed by this isolate. KV is eventually consistent, so a burst of
- * failures inside one isolate could each read a stale "not sent yet" and all fire. Recording
- * the send synchronously here collapses that burst; KV still covers the cross-isolate case.
- */
+/** Isolate-local fast path; the Durable Object below is the cross-isolate authority. */
 const dedupeMemo = new Map<string, number>();
 
 /** Test seam: drops the settings cache and the isolate-local dedupe memo. */
@@ -255,29 +248,60 @@ function memoSet(key: string, sentAt: number): void {
  * bound outbound traffic, and a webhook that is itself failing must not be retried once per
  * upstream failure. Delivery problems surface in the runtime log instead.
  */
-async function claimDedupeSlot(env: Env, type: AlertType, target: string, windowMs: number, now: number): Promise<boolean> {
+const ALERT_DEDUPE_DO_NAME = "alert-dedupe";
+
+export async function claimAlertDedupeSlot(
+  env: Env,
+  type: AlertType,
+  target: string,
+  windowMs: number,
+  now: number,
+): Promise<boolean> {
   const key = dedupeKey(type, target);
   const memoized = dedupeMemo.get(key);
   if (memoized !== undefined && now - memoized < windowMs) return false;
 
-  const raw = await env.CONFIG_CACHE.get(key, "text").catch(() => null);
+  const namespace = env.RATE_LIMITER;
+  if (namespace) {
+    try {
+      const stub = namespace.get(namespace.idFromName(ALERT_DEDUPE_DO_NAME));
+      const response = await stub.fetch("https://do.internal/alerts/claim", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: key, windowMs, now }),
+      });
+      if (!response.ok) throw new Error(`alert dedupe returned ${response.status}`);
+      const result = await response.json() as { claimed?: unknown; claimedAt?: unknown };
+      const claimedAt = typeof result.claimedAt === "number" ? result.claimedAt : now;
+      memoSet(key, claimedAt);
+      return result.claimed === true;
+    } catch (error) {
+      // A missing or temporarily unavailable DO must not make alert delivery fail. Fall back
+      // to the previous KV mechanism: it is only best-effort across isolates, but still
+      // suppresses most duplicates while the strongly consistent authority is unavailable.
+      console.error(JSON.stringify({
+        event: "alert_dedupe_claim_failed",
+        type,
+        target,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
+  }
+
+  const cache = env.CONFIG_CACHE;
+  const raw = cache ? await cache.get(key, "text").catch(() => null) : null;
   const stored = parseJson<{ sentAt?: unknown }>(raw, {});
-  // Compare against the current window rather than trusting the KV TTL, so shrinking the
-  // window in the console takes effect immediately instead of after the old TTL expires.
   if (typeof stored.sentAt === "number" && now - stored.sentAt < windowMs) {
     memoSet(key, stored.sentAt);
     return false;
   }
 
   memoSet(key, now);
-  // Persist the claim so other isolates suppress the same alert. Without this the memo is
-  // the only record, and a fleet of N isolates would each deliver the first occurrence.
-  // The TTL is a floor (KV enforces a 60s minimum) and is only a garbage-collection hint —
-  // suppression is decided by comparing sentAt against the current window above, so
-  // shortening the window in the console takes effect immediately.
-  const ttlSeconds = Math.max(60, Math.ceil(windowMs / 1000));
-  await env.CONFIG_CACHE.put(key, JSON.stringify({ sentAt: now }), { expirationTtl: ttlSeconds })
-    .catch(() => undefined);
+  if (cache) {
+    const ttlSeconds = Math.max(60, Math.ceil(windowMs / 1000));
+    await cache.put(key, JSON.stringify({ sentAt: now }), { expirationTtl: ttlSeconds })
+      .catch(() => undefined);
+  }
   return true;
 }
 
@@ -329,7 +353,7 @@ export async function sendAlert(
 
     const now = Date.now();
     if (!options.bypassDedupe) {
-      const claimed = await claimDedupeSlot(env, input.type, input.target, settings.dedupeWindowMinutes * 60_000, now);
+      const claimed = await claimAlertDedupeSlot(env, input.type, input.target, settings.dedupeWindowMinutes * 60_000, now);
       if (!claimed) return { delivered: false, skipped: "deduplicated" };
     }
 

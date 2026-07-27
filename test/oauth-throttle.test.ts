@@ -25,7 +25,8 @@ interface Harness {
 
 async function createHarness(lastPolledAt?: number): Promise<Harness> {
   const secret = await encrypt(JSON.stringify({ deviceCode: "device-1", deviceId: "id-1" }));
-  const payload = lastPolledAt === undefined ? {} : { lastPolledAt };
+  const payload = {};
+  let storedLastPolledAt: number | null = lastPolledAt ?? null;
   const writes: string[] = [];
 
   const rowFor = (sql: string): Record<string, unknown> | null => {
@@ -41,7 +42,7 @@ async function createHarness(lastPolledAt?: number): Promise<Harness> {
     if (sql.includes("FROM oauth_sessions")) {
       return {
         id: "session-1", provider_id: "kimi", state: "state-1", flow: "device_code",
-        secret_ciphertext: secret, payload_json: JSON.stringify(payload),
+        secret_ciphertext: secret, payload_json: JSON.stringify(payload), last_polled_at: storedLastPolledAt,
         expires_at: Math.floor(Date.now() / 1000) + 600, created_at: 0,
       };
     }
@@ -50,9 +51,21 @@ async function createHarness(lastPolledAt?: number): Promise<Harness> {
 
   // Both `prepare().first()` and `prepare().bind().first()` are used across the code under
   // test, so the stub answers either shape.
-  const statement = (sql: string) => ({
-    bind: () => statement(sql),
-    run: async () => { writes.push(sql); return { meta: { changes: 1 } }; },
+  const statement = (sql: string, args: unknown[] = []) => ({
+    bind: (...next: unknown[]) => statement(sql, next),
+    run: async () => {
+      if (sql.includes("UPDATE oauth_sessions SET last_polled_at")) {
+        const [at, _id, cutoff] = args as [number, string, number];
+        const claimed = storedLastPolledAt === null || storedLastPolledAt <= cutoff;
+        if (claimed) {
+          storedLastPolledAt = at;
+          writes.push(sql);
+        }
+        return { meta: { changes: claimed ? 1 : 0 } };
+      }
+      writes.push(sql);
+      return { meta: { changes: 1 } };
+    },
     first: async () => rowFor(sql),
     all: async () => ({ results: [] }),
   });
@@ -104,6 +117,16 @@ describe("oauth poll throttling", () => {
     await pollOAuth(harness.env, "kimi", "session-1");
     expect(harness.fetchMock).toHaveBeenCalledTimes(1);
     expect(harness.writes.some((sql) => sql.includes("UPDATE oauth_sessions"))).toBe(true);
+  });
+
+  it("allows only one concurrent poll to reach the provider", async () => {
+    const harness = await createHarness();
+    const results = await Promise.all([
+      pollOAuth(harness.env, "kimi", "session-1"),
+      pollOAuth(harness.env, "kimi", "session-1"),
+    ]);
+    expect(results.every((result) => result.status === "pending")).toBe(true);
+    expect(harness.fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a throttled answer indistinguishable from an ordinary pending one", async () => {
