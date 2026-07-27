@@ -16,6 +16,29 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
           show-progress: false
+      - name: Apply and clean provider refresh follow-up
+        run: |
+          python .github/pr40-provider-refresh-fix.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("test/refresh-batching.test.ts")
+          text = path.read_text(encoding="utf-8")
+          old = "expect(MODEL_REFRESH_BATCH_LIMIT).toBe(6);"
+          if text.count(old) != 1:
+              raise RuntimeError("unexpected model refresh batch assertion")
+          path.write_text(text.replace(old, "expect(MODEL_REFRESH_BATCH_LIMIT).toBe(5);"), encoding="utf-8")
+
+          path = Path("test/model-refresh-gate.test.ts")
+          text = path.read_text(encoding="utf-8")
+          old = "    expect(firstTask).toHaveBeenCalledTimes(1);\n    expect(secondTask).not.toHaveBeenCalled();"
+          new = "    await Promise.resolve();\n    expect(firstTask).toHaveBeenCalledTimes(1);\n    expect(secondTask).not.toHaveBeenCalled();"
+          if text.count(old) != 1:
+              raise RuntimeError("unexpected model refresh gate assertion")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+          git show 5f300d78471adb18a71bc37966141193ebaffe77:.github/workflows/check.yml > .github/workflows/check.yml
+          rm .github/pr40-provider-refresh-fix.py pr40-provider-error.txt
+          git diff --check
       - uses: pnpm/action-setup@v4
         with:
           version: 11.9.0
@@ -25,18 +48,16 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Capture validation error
+      - name: Run standard validation
+        run: pnpm run check
+      - name: Build production web bundle
+        run: pnpm run build:web
+      - name: Wrangler dry run
+        run: pnpm run config:check
+      - name: Commit validated fixes
         run: |
-          python .github/pr40-provider-refresh-fix.py
-          set +e
-          pnpm run check > /tmp/pr40-provider-validation.log 2>&1
-          status=$?
-          tail -120 /tmp/pr40-provider-validation.log > /tmp/pr40-provider-error.txt
-          git reset --hard HEAD
-          cp /tmp/pr40-provider-error.txt pr40-provider-error.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pr40-provider-error.txt
-          git commit -m "record provider refresh validation error" || true
+          git add src/models.ts src/rate-limiter.ts src/admin.ts test/model-refresh-gate.test.ts test/model-refresh-d1-budget.test.ts test/refresh-batching.test.ts .github/workflows/check.yml .github/pr40-provider-refresh-fix.py pr40-provider-error.txt
+          git commit -m "fix provider model refresh limits and coordination"
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
-          exit "$status"
