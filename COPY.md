@@ -5,7 +5,7 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: cade44b9cdee6b9328ea2648fd119129fdf11e2d -->
+<!-- upstream-ref: c9417c8ae9b16fabc0386ca35d36f13bf8b1d678 -->
 <!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
 <!-- last-reviewed: 2026-07-28 -->
 
@@ -15,20 +15,17 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `cade44b9cdee6b9328ea2648fd119129fdf11e2d` |
+| 已审阅上游提交 | `c9417c8ae9b16fabc0386ca35d36f13bf8b1d678` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
 | 审阅日期 | 2026-07-28 |
 
-本轮审阅范围为 `8423cce2..cade44b9`，共 16 个提交：
+本轮审阅范围为 `cade44b9..c9417c8a`，共 15 个提交：
 
-- `a97b1ae6`（合并提交 `02f15e3c`）调整通用会话亲和信号优先级：优先原生客户端 header，再依次考虑 `prompt_cache_key`、Responses conversation ID、旧 body ID、execution/derived identity 和消息 hash；Home 路径另增加 TTL/容量受限的 alias group。
-- `c1f16b70` 拒绝会话标识中的边缘控制字符，`c702c9ac` 修复仍存活 Home alias group 的保留语义。
-- `181242b1` 为 Codex Chat Completions → Responses 的 tool output 增加 `input_image`/`image_url` 结构内容、递归图片检测和混合文字图片处理。
-- `3d5ec862` 与 `7b233fa3` 为 Codex client model catalog 增加 `minimal` reasoning level 及测试。
-- 上述变化均属于范围内实质行为，但会影响 Durable Object 会话亲和键、租户隔离、账号切换连续性、公开 HTTP/Responses 转换边界和动态模型能力；当前环境无法可靠执行本地类型检查与测试，因此未直接移植，已创建 Issue #42，且明确仅限 HTTP/SSE。
-- `27b46606` 仅改变 Gemini/Antigravity 缺失 completion token 时显式输出零值，属于仅 Gemini 专用变化，按范围排除。
-- request lifecycle plugin、gitstore、本地 Home dispatcher、Claude、Gemini model registry、Claude cloaking 和纯文档变化均按范围或 Workers 架构差异排除。
+- `5dcca50f` 新增 `weighted-round-robin` 账号调度策略，统一 OAuth/file credential 与 API-key credential 的整数权重解析和严格校验，并使用 smooth weighted round-robin 状态实现按权重比例选择。
+- 上游同时规定默认权重为 1、最大值 1,000,000，且非正权重在加权策略下排除；相关测试覆盖配置、管理 API、selector/scheduler、账号集合变化及生命周期。
+- CFlareAIProxy 已由 Durable Object 管理账号权重、并发、租约和会话亲和，但上游新算法依赖 Go 进程内 current-weight 状态。其状态隔离、sticky session 推进、cooldown 恢复、账号热更新与 DO 重启语义需要先明确，未直接移植，已创建 Issue #47。
+- `c9417c8a` 的客户端请求元数据传播仅影响本地 Gin/Redis queue 日志链路；Home membership、pluginhost、filestore/store、Claude signature 以及 Antigravity/Gemini/Grok 专用变化按范围或 Workers 架构差异排除。
 
 本轮没有安全可验证的运行代码或测试更新；`local-implementation-ref` 保持不变。
 
@@ -71,7 +68,7 @@
 | Codex reasoning replay/signature cache | 未对齐 | 尚未实现跨请求 reasoning/signature 重放缓存 | 评估 Workers KV/DO 实现 |
 | Codex Responses WebSocket | 未对齐 | Workers 网关当前仅实现 HTTP/SSE | 未单独批准前不自动移植 |
 | Codex Alpha Search / 特殊路由插件 | 未对齐 | 尚未实现插件式模型选择 | 有真实使用需求后再跟进 |
-| 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | 跟进 credential concurrency、会话信号优先级和选择算法变化，保持无关 provider 更新不扰动既有租约；Issue #42 |
+| 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | 跟进 credential concurrency、会话信号优先级和选择算法变化，保持无关 provider 更新不扰动既有租约；平滑加权轮询与 weight 校验见 Issue #47 |
 | 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断 | 继续细化按错误类型的 cooldown；不移植 PostgreSQL store |
 | Token/OAuth 刷新锁 | 大体对齐 | 使用 Durable Object 防止同账号并发刷新 | 跟进新的 OAuth 字段和刷新失败语义 |
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理 |
@@ -156,6 +153,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-28 | `cade44b9..c9417c8a` | 文档更新；Issue #47 | 15 个提交中 `5dcca50f` 的 smooth weighted round-robin、credential weight 统一解析与严格校验属于账号选择范围内实质变化；因 Workers 侧由 Durable Object 管理权重、租约、并发与会话亲和，上游 Go 进程内 current-weight 状态不能直接移植，需先明确状态隔离、sticky 推进、cooldown 恢复、热更新和 DO 重启语义。客户端元数据、Home、pluginhost、store、Claude 和仅 Antigravity/Gemini/Grok 变化排除。 |
 | 2026-07-28 | `8423cce2..cade44b9` | 文档更新；Issue #42 | 16 个提交中，会话亲和原生信号优先级、控制字符校验、Home alias 保留、Codex tool output 图片及 `minimal` reasoning 为范围内实质变化；因涉及 Durable Object 亲和键、租户隔离、公开 HTTP/Responses 转换边界且无法可靠执行本地测试，未直接移植，创建仅限 HTTP/SSE 的跟进。Gemini/Antigravity usage 零值、request lifecycle plugin、gitstore、Claude、Gemini registry 和文档变化排除。 |
 | 2026-07-27 | `42a00a2a..8423cce2` | 文档更新；Issue #38 | 18 个提交中 `6491ce39` 与 `58ede93e` 为 Codex HTTP/SSE custom tool 请求/响应转换的实质变化，涉及名称冲突、长名称映射、逐调用流状态、交错事件与重复抑制；因无法在本轮可靠执行本地类型检查和测试，未直接移植，创建仅限 HTTP/SSE 的跟进。PostgreSQL cooldown、Go SDK/filestore 属架构不适用；reasoning replay 仍需 KV/DO 设计；Claude、Gemini、xAI/Grok 和文档变化排除。 |
 | 2026-07-26 | `27fc3169..42a00a2a` | 文档更新；Issue #35 | 8 个提交中 `f6c32ec3` 含 Codex HTTP/Responses 派生会话 UUID 与 prompt cache/session header 回退语义，属于相关变化；因租户隔离、账号切换稳定性和隐私回退无法在本轮可靠验证，未直接移植，建立仅限 HTTP/SSE 的设计与测试跟进。其 WebSocket 测试以及 Claude、Home/Redis、pluginhost、Gemini/Antigravity、xAI 变化均排除。 |
