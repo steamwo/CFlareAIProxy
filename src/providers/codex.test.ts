@@ -42,6 +42,18 @@ describe("Codex Chat Completions tool output conversion", () => {
     ]);
   });
 
+  it("recursively parses nested stringified image content", () => {
+    expect(toolOutput({
+      content: JSON.stringify([
+        { type: "input_text", text: "Nested screenshot" },
+        { type: "input_image", image_url: "data:image/png;base64,BB==" },
+      ]),
+    })).toEqual([
+      { type: "input_text", text: "Nested screenshot" },
+      { type: "input_image", image_url: "data:image/png;base64,BB==" },
+    ]);
+  });
+
   it("keeps plain and text-only string outputs backward compatible", () => {
     expect(toolOutput("plain output")).toBe("plain output");
     const textOnly = JSON.stringify([{ type: "input_text", text: "still text" }]);
