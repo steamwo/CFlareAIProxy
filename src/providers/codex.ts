@@ -12,6 +12,90 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function toolOutputImagePart(value: unknown): Record<string, unknown> | undefined {
+  const item = record(value);
+  const type = item.type;
+  if (type === "input_image") {
+    const imageUrl = stringValue(item.image_url);
+    const fileId = stringValue(item.file_id);
+    if (!imageUrl && !fileId) return undefined;
+    return {
+      type: "input_image",
+      ...(imageUrl ? { image_url: imageUrl } : {}),
+      ...(fileId ? { file_id: fileId } : {}),
+      ...(stringValue(item.detail) ? { detail: item.detail } : {}),
+    };
+  }
+  if (type !== "image_url") return undefined;
+  const image = typeof item.image_url === "string" ? { url: item.image_url } : record(item.image_url);
+  const imageUrl = stringValue(image.url);
+  const fileId = stringValue(image.file_id);
+  if (!imageUrl && !fileId) return undefined;
+  return {
+    type: "input_image",
+    ...(imageUrl ? { image_url: imageUrl } : {}),
+    ...(fileId ? { file_id: fileId } : {}),
+    ...(stringValue(image.detail) ? { detail: image.detail } : {}),
+  };
+}
+
+function hasToolOutputImagePart(value: unknown): boolean {
+  if (typeof value === "string") {
+    try {
+      return hasToolOutputImagePart(JSON.parse(value) as unknown);
+    } catch {
+      return false;
+    }
+  }
+  if (Array.isArray(value)) return value.some((part) => hasToolOutputImagePart(part));
+  const item = record(value);
+  if (toolOutputImagePart(item)) return true;
+  return item.content !== undefined && hasToolOutputImagePart(item.content);
+}
+
+function toolOutputFallbackPart(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") return { type: "input_text", text: value };
+  const item = record(value);
+  if (typeof item.text === "string") return { type: "input_text", text: item.text };
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? String(value);
+  } catch {
+    text = String(value);
+  }
+  return { type: "input_text", text };
+}
+
+function toolOutputContentPart(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) return value.flatMap((part) => toolOutputContentPart(part));
+  const item = record(value);
+  const image = toolOutputImagePart(item);
+  if (image) return [image];
+  if ((item.type === "text" || item.type === "input_text" || item.type === "output_text") && typeof item.text === "string") {
+    return [{ type: "input_text", text: item.text }];
+  }
+  if (item.content !== undefined && hasToolOutputImagePart(item.content)) return toolOutputContentPart(item.content);
+  return [toolOutputFallbackPart(value)];
+}
+
+function toolOutputContent(content: unknown): string | Array<Record<string, unknown>> {
+  if (typeof content === "string") {
+    try {
+      const structured = JSON.parse(content) as unknown;
+      if (hasToolOutputImagePart(structured)) return toolOutputContentPart(structured);
+    } catch {
+      // Plain tool output stays a string for backward compatibility.
+    }
+    return content;
+  }
+  if (!hasToolOutputImagePart(content)) return contentToText(content);
+  return toolOutputContentPart(content);
+}
+
 function chatToolsToResponses(value: unknown): unknown[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.map((raw) => {
@@ -55,7 +139,11 @@ export function chatToResponses(body: Record<string, unknown>, model: string): R
       continue;
     }
     if (role === "tool") {
-      input.push({ type: "function_call_output", call_id: typeof entry.tool_call_id === "string" ? entry.tool_call_id : typeof entry.call_id === "string" ? entry.call_id : "unknown", output: contentToText(entry.content) });
+      input.push({
+        type: "function_call_output",
+        call_id: typeof entry.tool_call_id === "string" ? entry.tool_call_id : typeof entry.call_id === "string" ? entry.call_id : "unknown",
+        output: toolOutputContent(entry.content),
+      });
       continue;
     }
     input.push({ role, content: [{ type: role === "assistant" ? "output_text" : "input_text", text: contentToText(entry.content) }] });
