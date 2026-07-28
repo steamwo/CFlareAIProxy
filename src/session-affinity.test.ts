@@ -24,9 +24,11 @@ describe("session affinity signals", () => {
     })).toEqual({ source: "prompt-cache", value: "prompt-session" });
   });
 
-  it("extracts Claude Code metadata sessions", () => {
+  it("extracts Claude Code metadata sessions from long metadata containers", () => {
     expect(extractSessionAffinitySignal(request(), {
-      metadata: { user_id: JSON.stringify({ session_id: "claude-metadata-session" }) },
+      metadata: {
+        user_id: JSON.stringify({ padding: "x".repeat(512), session_id: "claude-metadata-session" }),
+      },
     })).toEqual({ source: "claude", value: "claude-metadata-session" });
   });
 
@@ -47,6 +49,18 @@ describe("session affinity signals", () => {
       "tenant-a",
       "codex",
     )).toBe("codex:tenant-a:existing-session");
+  });
+
+  it("binds prompt_cache_key and conversation.id as aliases", async () => {
+    const combined = await buildSessionAffinityKey(request(), {
+      prompt_cache_key: "prompt-session",
+      conversation: { id: "conversation-session" },
+    }, "tenant-a", "codex");
+    const conversationOnly = await buildSessionAffinityKey(request(), {
+      conversation: { id: "conversation-session" },
+    }, "tenant-a", "codex");
+    expect(Array.isArray(combined)).toBe(true);
+    expect(combined).toContain(conversationOnly);
   });
 
   it("derives a stable fallback from the initial message root", async () => {
