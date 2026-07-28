@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getBuiltinChannel } from "../builtin-channels";
+import { CODEX_CLIENT_VERSION, getBuiltinChannel } from "../builtin-channels";
 import type { Credential, ProviderConfig } from "../types";
 import { providerAuthHeaders } from "./headers";
 
@@ -56,12 +56,13 @@ function credential(metadata: Record<string, unknown>): Credential {
 }
 
 describe("Codex compatibility", () => {
-  it("matches CLIProxyAPI authorization parameters", () => {
+  it("matches CLIProxyAPI authorization and model-discovery parameters", () => {
     const channel = getBuiltinChannel("codex");
     expect(channel?.auth.scopes).toEqual(["openid", "email", "profile", "offline_access"]);
     expect(channel?.auth.authorize_param_prompt).toBe("login");
     expect(channel?.auth.authorize_param_id_token_add_organizations).toBe("true");
     expect(channel?.auth.authorize_param_codex_cli_simplified_flow).toBe("true");
+    expect(channel?.endpoints.models).toBe(`/models?client_version=${CODEX_CLIENT_VERSION}`);
   });
 
   it("sends the Codex CLI user agent and account ID from the ID token", () => {
@@ -73,7 +74,7 @@ describe("Codex compatibility", () => {
 
     expect(headers.get("authorization")).toBe("Bearer access-token");
     expect(headers.get("content-type")).toBe("application/json");
-    expect(headers.get("user-agent")).toBe("codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal");
+    expect(headers.get("user-agent")).toBe(`codex_cli_rs/${CODEX_CLIENT_VERSION} (Debian 13.0.0; x86_64) WindowsTerminal`);
     expect(headers.get("chatgpt-account-id")).toBe("account-123");
   });
 });
