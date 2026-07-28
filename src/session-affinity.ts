@@ -4,6 +4,7 @@ const CONTROL_CHARACTER = /\p{Cc}/u;
 interface SessionSignal {
   source: string;
   value: string;
+  legacy?: boolean;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -17,9 +18,9 @@ function normalizeExplicitId(value: unknown): string | undefined {
   return normalized;
 }
 
-function headerSignal(headers: Headers, name: string, source: string): SessionSignal | undefined {
+function headerSignal(headers: Headers, name: string, source: string, legacy = false): SessionSignal | undefined {
   const value = normalizeExplicitId(headers.get(name));
-  return value ? { source, value } : undefined;
+  return value ? { source, value, ...(legacy ? { legacy: true } : {}) } : undefined;
 }
 
 function claudeMetadataSessionId(body: Record<string, unknown>): string | undefined {
@@ -107,8 +108,8 @@ export function extractSessionAffinitySignal(request: Request, body: Record<stri
     })(),
     headerSignal(headers, "session-id", "codex"),
     headerSignal(headers, "session_id", "codex"),
-    headerSignal(headers, "x-session-id", "session-header"),
-    headerSignal(headers, "x-conversation-id", "conversation-header"),
+    headerSignal(headers, "x-session-id", "session-header", true),
+    headerSignal(headers, "x-conversation-id", "conversation-header", true),
     headerSignal(headers, "x-session-affinity", "opencode"),
     headerSignal(headers, "x-client-request-id", "client-request"),
   ].find((entry): entry is SessionSignal => entry !== undefined);
@@ -132,10 +133,10 @@ export function extractSessionAffinitySignal(request: Request, body: Record<stri
   if (legacyConversation) return { source: "conversation", value: legacyConversation };
 
   const previousResponse = normalizeExplicitId(body.previous_response_id);
-  if (previousResponse) return { source: "previous-response", value: previousResponse };
+  if (previousResponse) return { source: "previous-response", value: previousResponse, legacy: true };
 
   const user = normalizeExplicitId(body.user);
-  if (user) return { source: "user", value: user };
+  if (user) return { source: "user", value: user, legacy: true };
 
   const seed = messageHashSeed(body);
   return seed ? { source: "message-root", value: seed } : undefined;
@@ -154,6 +155,7 @@ export async function buildSessionAffinityKey(
 ): Promise<string | undefined> {
   const signal = extractSessionAffinitySignal(request, body);
   if (!signal) return undefined;
+  if (signal.legacy) return `${providerId}:${gatewayKeyId}:${signal.value}`;
   const opaque = await sha256(`${signal.source}\0${signal.value}`);
   return `v2:${providerId}:${gatewayKeyId}:${opaque}`;
 }
