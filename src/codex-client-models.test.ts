@@ -11,7 +11,7 @@ describe("Codex client model catalog", () => {
       x_cflare_endpoints: ["responses"],
       x_cflare_capabilities: {
         inputModalities: ["text", "image", "audio"],
-        reasoningLevels: ["invalid", "low", "medium", "high"],
+        reasoningLevels: ["invalid", "minimal", "low", "medium", "high"],
         serviceTiers: ["priority"],
         contextWindow: 128000,
         visibility: "list",
@@ -39,6 +39,7 @@ describe("Codex client model catalog", () => {
       supports_search_tool: true,
       default_reasoning_level: "medium",
       supported_reasoning_levels: [
+        { effort: "minimal", description: "Fastest responses with minimal reasoning" },
         { effort: "low", description: "Fast responses with lighter reasoning" },
         { effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" },
         { effort: "high", description: "Greater reasoning depth for complex problems" },
