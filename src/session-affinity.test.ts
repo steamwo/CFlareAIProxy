@@ -39,6 +39,15 @@ describe("session affinity signals", () => {
     })).toEqual({ source: "conversation", value: "conversation-fallback" });
   });
 
+  it("preserves existing affinity keys for legacy signals", async () => {
+    expect(await buildSessionAffinityKey(
+      request({ "x-session-id": "existing-session" }),
+      {},
+      "tenant-a",
+      "codex",
+    )).toBe("codex:tenant-a:existing-session");
+  });
+
   it("derives a stable fallback from the initial message root", async () => {
     const body = {
       instructions: "Be precise.",
