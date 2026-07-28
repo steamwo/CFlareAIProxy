@@ -71,6 +71,15 @@ function toolOutputFallbackPart(value: unknown): Record<string, unknown> {
 }
 
 function toolOutputContentPart(value: unknown): Record<string, unknown>[] {
+  if (typeof value === "string") {
+    try {
+      const structured = JSON.parse(value) as unknown;
+      if (hasToolOutputImagePart(structured)) return toolOutputContentPart(structured);
+    } catch {
+      // A nested plain string remains a text part.
+    }
+    return [toolOutputFallbackPart(value)];
+  }
   if (Array.isArray(value)) return value.flatMap((part) => toolOutputContentPart(part));
   const item = record(value);
   const image = toolOutputImagePart(item);
