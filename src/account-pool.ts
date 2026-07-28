@@ -14,8 +14,13 @@ interface AcquirePayload {
   providerId: string;
   strategy: PoolStrategy;
   candidates: PoolCandidate[];
-  sessionKey?: string;
+  sessionKey?: string | string[];
   leaseTtlMs?: number;
+}
+
+function sessionKeys(value: string | string[] | undefined): string[] {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return [...new Set(values.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()))].slice(0, 8);
 }
 
 export class AccountPool extends DurableObject<Env> {
@@ -131,20 +136,20 @@ export class AccountPool extends DurableObject<Env> {
         .map((row) => [row.credential_id, row] as const),
     );
 
-    if (payload.sessionKey) {
+    const affinityKeys = sessionKeys(payload.sessionKey);
+    for (const sessionKey of affinityKeys) {
       const affinity = this.ctx.storage.sql
         .exec<{ credential_id: string }>(
           "SELECT credential_id FROM affinities WHERE session_key = ? AND expires_at > ?",
-          payload.sessionKey,
+          sessionKey,
           now,
         )
         .toArray()[0];
-      if (affinity) {
-        const candidate = candidates.find((entry) => entry.id === affinity.credential_id);
-        const stat = candidate ? stats.get(candidate.id) : undefined;
-        if (candidate && stat && stat.cooldown_until <= now && stat.inflight < candidate.maxConcurrency) {
-          return this.createLease(candidate.id, payload.sessionKey, payload.leaseTtlMs ?? 600_000, now);
-        }
+      if (!affinity) continue;
+      const candidate = candidates.find((entry) => entry.id === affinity.credential_id);
+      const stat = candidate ? stats.get(candidate.id) : undefined;
+      if (candidate && stat && stat.cooldown_until <= now && stat.inflight < candidate.maxConcurrency) {
+        return this.createLease(candidate.id, affinityKeys, payload.leaseTtlMs ?? 600_000, now);
       }
     }
 
@@ -184,7 +189,7 @@ export class AccountPool extends DurableObject<Env> {
       }
     }
 
-    return this.createLease(chosen.id, payload.sessionKey, payload.leaseTtlMs ?? 600_000, now);
+    return this.createLease(chosen.id, affinityKeys, payload.leaseTtlMs ?? 600_000, now);
   }
 
   private nextCursor(providerId: string, modulo: number): number {
@@ -201,7 +206,7 @@ export class AccountPool extends DurableObject<Env> {
     return cursor % Math.max(1, modulo);
   }
 
-  private createLease(credentialId: string, sessionKey: string | undefined, ttlMs: number, now: number): PoolLease {
+  private createLease(credentialId: string, affinityKeys: string[], ttlMs: number, now: number): PoolLease {
     const leaseId = crypto.randomUUID();
     const expiresAt = now + ttlMs;
     this.ctx.storage.sql.exec(
@@ -215,7 +220,7 @@ export class AccountPool extends DurableObject<Env> {
       credentialId,
       expiresAt,
     );
-    if (sessionKey) {
+    for (const sessionKey of affinityKeys) {
       this.ctx.storage.sql.exec(
         `INSERT INTO affinities(session_key, credential_id, expires_at) VALUES (?, ?, ?)
          ON CONFLICT(session_key) DO UPDATE SET credential_id = excluded.credential_id, expires_at = excluded.expires_at`,
