@@ -17,6 +17,7 @@ import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
 import { isOpenCodeAnonymousCredential } from "./providers/opencode-anonymous";
 import { captureQuotaHeaders } from "./quota";
 import { orderHealthyRoutes, recordProviderFailure, recordProviderSuccess } from "./routing-health";
+import { buildSessionAffinityKey } from "./session-affinity";
 import { trackResponse } from "./stream";
 import type { CredentialRow, Env, GatewayEndpoint, LoggingSettings, ModelRouteRow, PoolCandidate, PoolLease, ProviderConfig, RateLease, Usage, UsageEvent } from "./types";
 import { classifyTransportError, classifyUpstreamResponse, gatewayErrorFromClassification } from "./upstream-errors";
@@ -31,14 +32,6 @@ function bearerToken(request: Request): string {
 
 function estimateInputTokens(body: Record<string, unknown>): number {
   return Math.max(1, Math.ceil(JSON.stringify(body).length / 4));
-}
-
-function sessionKey(request: Request, body: Record<string, unknown>, gatewayKeyId: string, providerId: string): string | undefined {
-  const explicit = request.headers.get("x-session-id") ?? request.headers.get("x-conversation-id");
-  const user = typeof body.user === "string" ? body.user : undefined;
-  const previous = typeof body.previous_response_id === "string" ? body.previous_response_id : undefined;
-  const value = explicit ?? previous ?? user;
-  return value ? `${providerId}:${gatewayKeyId}:${value}` : undefined;
 }
 
 async function postDo<T>(stub: DurableObjectStub, path: string, payload: unknown): Promise<T> {
@@ -273,7 +266,9 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             providerId: provider.id,
             strategy: provider.pool_strategy,
             candidates,
-            sessionKey: provider.options.session_affinity === false ? undefined : sessionKey(c.req.raw, routeBody, gatewayKey.id, provider.id),
+            sessionKey: provider.options.session_affinity === false
+              ? undefined
+              : await buildSessionAffinityKey(c.req.raw, routeBody, gatewayKey.id, provider.id),
             leaseTtlMs: 15 * 60_000,
           });
         } catch (error) {

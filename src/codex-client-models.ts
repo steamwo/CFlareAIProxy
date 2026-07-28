@@ -1,7 +1,7 @@
 import type { Env, ProviderKind } from "./types";
 import { parseJson } from "./utils";
 
-const ALLOWED_REASONING_LEVELS = new Set(["none", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const ALLOWED_REASONING_LEVELS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 
 export interface CodexClientCatalogContext {
   multiAgentModels: Set<string>;
@@ -39,6 +39,7 @@ function modelProviders(model: Record<string, unknown>): string[] {
 function reasoningDescription(level: string): string {
   switch (level) {
     case "none": return "No reasoning";
+    case "minimal": return "Fastest responses with minimal reasoning";
     case "low": return "Fast responses with lighter reasoning";
     case "medium": return "Balances speed and reasoning depth for everyday tasks";
     case "high": return "Greater reasoning depth for complex problems";
