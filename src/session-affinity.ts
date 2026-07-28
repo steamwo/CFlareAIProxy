@@ -24,7 +24,9 @@ function headerSignal(headers: Headers, name: string, source: string, legacy = f
 }
 
 function claudeMetadataSessionId(body: Record<string, unknown>): string | undefined {
-  const userId = normalizeExplicitId(record(body.metadata).user_id);
+  const rawUserId = record(body.metadata).user_id;
+  if (typeof rawUserId !== "string") return undefined;
+  const userId = rawUserId.trim();
   if (!userId) return undefined;
   if (userId.startsWith("{")) {
     try {
@@ -98,7 +100,7 @@ function messageHashSeed(body: Record<string, unknown>): string | undefined {
   return JSON.stringify({ instructions, firstUser });
 }
 
-export function extractSessionAffinitySignal(request: Request, body: Record<string, unknown>): SessionSignal | undefined {
+function extractSessionAffinitySignals(request: Request, body: Record<string, unknown>): SessionSignal[] {
   const headers = request.headers;
   const explicit = [
     headerSignal(headers, "x-claude-code-session-id", "claude"),
@@ -113,33 +115,42 @@ export function extractSessionAffinitySignal(request: Request, body: Record<stri
     headerSignal(headers, "x-session-affinity", "opencode"),
     headerSignal(headers, "x-client-request-id", "client-request"),
   ].find((entry): entry is SessionSignal => entry !== undefined);
-  if (explicit) return explicit;
+  if (explicit) return [explicit];
 
   for (const [field, source] of [["session_id", "session"], ["sessionId", "session"]] as const) {
     const value = normalizeExplicitId(body[field]);
-    if (value) return { source, value };
+    if (value) return [{ source, value }];
   }
 
   const promptCacheKey = normalizeExplicitId(body.prompt_cache_key);
-  if (promptCacheKey) return { source: "prompt-cache", value: promptCacheKey };
+  if (promptCacheKey) {
+    const signals: SessionSignal[] = [{ source: "prompt-cache", value: promptCacheKey }];
+    const responsesConversation = conversationId(body);
+    if (responsesConversation) signals.push({ source: "conversation", value: responsesConversation });
+    return signals;
+  }
 
   const responsesConversation = conversationId(body);
-  if (responsesConversation) return { source: "conversation", value: responsesConversation };
+  if (responsesConversation) return [{ source: "conversation", value: responsesConversation }];
 
   const metadataUser = normalizeExplicitId(record(body.metadata).user_id);
-  if (metadataUser) return { source: "metadata-user", value: metadataUser };
+  if (metadataUser) return [{ source: "metadata-user", value: metadataUser }];
 
   const legacyConversation = normalizeExplicitId(body.conversation_id);
-  if (legacyConversation) return { source: "conversation", value: legacyConversation };
+  if (legacyConversation) return [{ source: "conversation", value: legacyConversation }];
 
   const previousResponse = normalizeExplicitId(body.previous_response_id);
-  if (previousResponse) return { source: "previous-response", value: previousResponse, legacy: true };
+  if (previousResponse) return [{ source: "previous-response", value: previousResponse, legacy: true }];
 
   const user = normalizeExplicitId(body.user);
-  if (user) return { source: "user", value: user, legacy: true };
+  if (user) return [{ source: "user", value: user, legacy: true }];
 
   const seed = messageHashSeed(body);
-  return seed ? { source: "message-root", value: seed } : undefined;
+  return seed ? [{ source: "message-root", value: seed }] : [];
+}
+
+export function extractSessionAffinitySignal(request: Request, body: Record<string, unknown>): SessionSignal | undefined {
+  return extractSessionAffinitySignals(request, body)[0];
 }
 
 async function sha256(value: string): Promise<string> {
@@ -147,15 +158,20 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function sessionSignalKey(signal: SessionSignal, gatewayKeyId: string, providerId: string): Promise<string> {
+  if (signal.legacy) return `${providerId}:${gatewayKeyId}:${signal.value}`;
+  const opaque = await sha256(`${signal.source}\0${signal.value}`);
+  return `v2:${providerId}:${gatewayKeyId}:${opaque}`;
+}
+
 export async function buildSessionAffinityKey(
   request: Request,
   body: Record<string, unknown>,
   gatewayKeyId: string,
   providerId: string,
-): Promise<string | undefined> {
-  const signal = extractSessionAffinitySignal(request, body);
-  if (!signal) return undefined;
-  if (signal.legacy) return `${providerId}:${gatewayKeyId}:${signal.value}`;
-  const opaque = await sha256(`${signal.source}\0${signal.value}`);
-  return `v2:${providerId}:${gatewayKeyId}:${opaque}`;
+): Promise<string | string[] | undefined> {
+  const signals = extractSessionAffinitySignals(request, body);
+  if (signals.length === 0) return undefined;
+  const keys = [...new Set(await Promise.all(signals.map((signal) => sessionSignalKey(signal, gatewayKeyId, providerId))))];
+  return keys.length === 1 ? keys[0] : keys;
 }
