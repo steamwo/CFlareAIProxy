@@ -31,7 +31,8 @@ describe("session affinity signals", () => {
   });
 
   it("rejects unsafe explicit identifiers and falls back safely", () => {
-    expect(extractSessionAffinitySignal(request({ "x-session-id": "bad\u0000value" }), {
+    expect(extractSessionAffinitySignal(request(), {
+      session_id: "bad\u0000value",
       prompt_cache_key: "safe-fallback",
     })).toEqual({ source: "prompt-cache", value: "safe-fallback" });
     expect(extractSessionAffinitySignal(request({ "x-session-id": "x".repeat(257) }), {
