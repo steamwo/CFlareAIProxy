@@ -5,7 +5,7 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: 4a2eb54dc6bf943196be4fb515e6a9407a4db143 -->
+<!-- upstream-ref: 2b63d6bcda136af1d3638be8e0038658911fb217 -->
 <!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
 <!-- last-reviewed: 2026-07-30 -->
 
@@ -15,19 +15,18 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `4a2eb54dc6bf943196be4fb515e6a9407a4db143` |
+| 已审阅上游提交 | `2b63d6bcda136af1d3638be8e0038658911fb217` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
 | 审阅日期 | 2026-07-30 |
 
-本轮审阅范围为 `c9417c8a..4a2eb54d`，共 10 个提交：
+本轮审阅范围为 `4a2eb54d..2b63d6bc`，共 3 个提交：
 
-- `f3229143` 为配置型 API-key provider 的模型条目新增精确 thinking/reasoning capability，并将其纳入模型哈希、registry 合成和统一请求 thinking 应用路径；Codex 与 OpenAI-compatible 均受影响。
-- 该变化需要明确配置能力与发现/静态 registry 的优先级、Workers 配置热更新失效语义、公开 alias 回写及不同 provider 的 level 校验，未直接移植，已创建 Issue #49。
-- `74d38e09` 的 `cached_creation_tokens` 仅修改 Claude→OpenAI usage 转换，按 Claude 协议范围排除；`fecebcca` 与 `4a2eb54d` 仅修改 Codex→Claude/Claude 请求转换，同样排除。
-- Home CAS、Claude header、Antigravity/Gemini schema、Gemini model registry 删除及仅 xAI/Gemini/Claude 相关变化均按范围或 Workers 架构差异排除。
+- `2c8e5ba4` 修正 Codex API-key credential 的模型注册：只暴露配置中明确列出的模型，不再自动混入内置 Codex 模型；空配置不注册模型，并保留 configured alias 与 excluded-model 语义。
+- CFlareAIProxy 的 `/v1/models` 与 Codex client catalog 已从启用的 discovered models 和显式 model routes 构建，不存在按 Codex credential 强制注入内置模型的路径，因此该行为已具备，无需修改运行代码或新增重复测试。
+- `8cdd3f1d` 仅为上述修复的合并提交；`2b63d6bc` 仅重构 Gemini schema cleaning options 及对应测试，按仅 Gemini 专用变化排除。
 
-本轮没有安全可验证的运行代码或测试更新；`local-implementation-ref` 保持不变。
+本轮没有运行代码或测试更新；`local-implementation-ref` 保持不变。
 
 ## 2. 对齐程度
 
@@ -62,7 +61,7 @@
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
 | Codex custom tool HTTP/SSE | 部分对齐 | 基础 function tool 已覆盖；尚未验证 custom tool、交错调用、done fallback 与重复抑制 | 跟进 Issue #38，不涉及 WebSocket |
 | Codex tool output 图片 | 部分对齐 | 已支持常规文本 tool output；尚未验证 `input_image`/`image_url` 混合结构和递归内容 | 跟进 Issue #42，仅限 HTTP/SSE |
-| Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，覆盖 reasoning、modalities、context window、visibility、search-tool、service tier、稳定 priority 和 V2 标记 | 核实并补齐 `minimal` reasoning，跟进 Issue #42；配置型模型精确 capability 与热更新跟进 Issue #49 |
+| Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，仅基于启用的 discovered models 和显式 routes，覆盖 reasoning、modalities、context window、visibility、search-tool、service tier、稳定 priority 和 V2 标记 | 保持不自动注入未配置内置模型；核实 `minimal` reasoning，跟进 Issue #42/#49 |
 | Codex Multi-Agent V2 | 大体对齐 | 默认关闭；按 route/provider 开启；仅目标 UA；支持 spawn/agent/namespace、非 Codex 转换及流式/非流式恢复 | 运行完整 CI 与真实 Codex 客户端 smoke；WebSocket 单独设计 |
 | Codex Live / WebRTC / sideband | 未对齐 | 当前仅实现 HTTP/SSE，不提供媒体 relay 或 TCP candidate proxy | 重大安全与生命周期设计，跟进 Issue #17 |
 | Codex reasoning replay/signature cache | 未对齐 | 尚未实现跨请求 reasoning/signature 重放缓存 | 评估 Workers KV/DO 实现 |
@@ -74,7 +73,7 @@
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理 |
 | Provider/System 代理 | 已对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连 | 持续跟进 Workers Socket 限制 |
 | OpenAI-compatible 自定义上游 | 已对齐 | 可配置 base URL、API mode、模型、权重、Key 和代理 | 配置型模型精确 thinking capability、优先级和热更新跟进 Issue #49 |
-| 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名 | 补强不同供应商模型响应解析 |
+| 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名；Codex API-key 不会额外暴露未配置的内置模型 | 补强不同供应商模型响应解析 |
 | 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、visibility、search-tool、priority 和模型名回写 | 跟进上游 registry 新字段、`minimal` reasoning、冲突优先级及配置型 capability（Issue #49） |
 | Usage/Token 规范化 | 部分对齐 | 已记录 prompt/completion/cached/total 和费用 | 优先跟进 canonical breakdown、partial/unclassified/inconsistent 状态 |
 | 请求级日志与费用 | 项目差异 | 使用 D1/Queue 内建 | 不要求结构一致，只保证 Token 语义可靠 |
@@ -153,6 +152,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-30 | `4a2eb54d..2b63d6bc` | 文档更新 | 3 个提交中 `2c8e5ba4` 修正 Codex API-key credential 模型注册，只暴露明确配置模型且空配置不注册模型；CFlareAIProxy 的 `/v1/models` 和 Codex client catalog 已仅从启用的 discovered models 与显式 routes 构建，不存在强制注入内置模型路径，因此行为已具备，无运行代码或测试变更。`8cdd3f1d` 为合并提交，`2b63d6bc` 仅涉及 Gemini schema cleaning，排除。 |
 | 2026-07-30 | `c9417c8a..4a2eb54d` | 文档更新；Issue #49 | 10 个提交中 `f3229143` 为 Codex/OpenAI-compatible 配置型模型新增精确 thinking capability、模型哈希失效与统一 capability-aware 请求应用，属于 provider/model registry 范围内实质变化；因 Workers 侧需明确配置与发现 metadata 优先级、KV/DO 热更新失效、alias 回写和 level 校验，未直接移植。`74d38e09`、`fecebcca`、`4a2eb54d` 均仅涉及 Claude 协议转换；Home CAS、Antigravity/Gemini schema 和 Gemini registry 变化排除。 |
 | 2026-07-28 | `cade44b9..c9417c8a` | 文档更新；Issue #47 | 15 个提交中 `5dcca50f` 的 smooth weighted round-robin、credential weight 统一解析与严格校验属于账号选择范围内实质变化；因 Workers 侧由 Durable Object 管理权重、租约、并发与会话亲和，上游 Go 进程内 current-weight 状态不能直接移植，需先明确状态隔离、sticky 推进、cooldown 恢复、热更新和 DO 重启语义。客户端元数据、Home、pluginhost、store、Claude 和仅 Antigravity/Gemini/Grok 变化排除。 |
 | 2026-07-28 | `8423cce2..cade44b9` | 文档更新；Issue #42 | 16 个提交中，会话亲和原生信号优先级、控制字符校验、Home alias 保留、Codex tool output 图片及 `minimal` reasoning 为范围内实质变化；因涉及 Durable Object 亲和键、租户隔离、公开 HTTP/Responses 转换边界且无法可靠执行本地测试，未直接移植，创建仅限 HTTP/SSE 的跟进。Gemini/Antigravity usage 零值、request lifecycle plugin、gitstore、Claude、Gemini registry 和文档变化排除。 |
