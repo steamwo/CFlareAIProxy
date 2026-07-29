@@ -5,7 +5,7 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: b4d94d58efe6bc581edecad942e3527f4c271a04 -->
+<!-- upstream-ref: 928478e4b91533cec05a763bfac3edad9c3e76cf -->
 <!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
 <!-- last-reviewed: 2026-07-30 -->
 
@@ -15,16 +15,16 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `b4d94d58efe6bc581edecad942e3527f4c271a04` |
+| 已审阅上游提交 | `928478e4b91533cec05a763bfac3edad9c3e76cf` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
 | 审阅日期 | 2026-07-30 |
 
-本轮审阅范围为 `2b63d6bc..b4d94d58`，共 3 个提交：
+本轮审阅范围为 `b4d94d58..928478e4`，共 2 个提交：
 
-- `b4d94d58` 再次调整 Codex API-key credential 的模型注册：匹配配置且未显式列出 `models` 时恢复暴露内置 Codex Pro 模型；显式模型仍替换默认集合，`excluded-models` 继续生效。同时，按配置索引命中的 credential 必须校验 API key/base URL，一旦索引记录陈旧则回退到 credential 匹配，无法匹配时清除旧模型注册。
-- 该变化推翻上一轮 configured-models-only 语义，并影响 `/v1/models`、Codex client catalog、配置轮换后的陈旧模型清理和凭据身份绑定。CFlareAIProxy 当前只从启用的 discovered models 与显式 routes 构建公开目录；是否恢复隐式内置目录，以及如何在 D1 配置、账号、route/provider 和 discovery 快照间可靠匹配 credential，属于公开模型面与租户隔离决策，因此未直接移植，跟进 Issue #52。
-- `1c1d8efd` 仅修正 Antigravity/Gemini 的 `json_object` response schema，按仅 Gemini 专用变化排除；`a2ff6914` 仅为本地 Git store 仓库恢复实现，按 Workers 架构不适用排除。
+- `928478e4` 简化并固化 Codex API-key 模型选择：未显式配置 `models` 时使用内置 Codex Pro 默认目录，显式模型替换默认集合，排除规则随后应用。新增测试明确要求默认集合在注册模型和 `/v1/models` 来源中包含 `gpt-image-1.5` 与 `gpt-image-2`，显式模型模式则不得混入这两个默认图像模型。
+- 该变化继续属于 Issue #52 的公开模型面与 credential 身份绑定决策，并强化了图像模型误宣传风险；已向 Issue #52 补充默认图像模型暴露与目录一致性验收要求，未直接移植。
+- `e8e39526` 为本地 Gin/文件型管理接口补充 credential `weight` 的规范化解析与展示。CFlareAIProxy 的账号权重由 D1 账号数据和管理端字段直接表达，不存在扫描 auth file 后再拼装管理响应的路径，因此不移植该 Go 文件管理实现。
 
 本轮没有运行代码或测试更新；`local-implementation-ref` 保持不变。
 
@@ -61,7 +61,7 @@
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
 | Codex custom tool HTTP/SSE | 部分对齐 | 基础 function tool 已覆盖；尚未验证 custom tool、交错调用、done fallback 与重复抑制 | 跟进 Issue #38，不涉及 WebSocket |
 | Codex tool output 图片 | 部分对齐 | 已支持常规文本 tool output；尚未验证 `input_image`/`image_url` 混合结构和递归内容 | 跟进 Issue #42，仅限 HTTP/SSE |
-| Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，仅基于启用的 discovered models 和显式 routes，覆盖 reasoning、modalities、context window、visibility、search-tool、service tier、稳定 priority 和 V2 标记 | 核实无显式模型时是否暴露内置目录及 stale credential 清理（Issue #52）；核实 `minimal` reasoning，跟进 Issue #42/#49 |
+| Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，仅基于启用的 discovered models 和显式 routes，覆盖 reasoning、modalities、context window、visibility、search-tool、service tier、稳定 priority 和 V2 标记 | 核实无显式模型时是否暴露内置目录、默认图像模型及 stale credential 清理（Issue #52）；核实 `minimal` reasoning，跟进 Issue #42/#49 |
 | Codex Multi-Agent V2 | 大体对齐 | 默认关闭；按 route/provider 开启；仅目标 UA；支持 spawn/agent/namespace、非 Codex 转换及流式/非流式恢复 | 运行完整 CI 与真实 Codex 客户端 smoke；WebSocket 单独设计 |
 | Codex Live / WebRTC / sideband | 未对齐 | 当前仅实现 HTTP/SSE，不提供媒体 relay 或 TCP candidate proxy | 重大安全与生命周期设计，跟进 Issue #17 |
 | Codex reasoning replay/signature cache | 未对齐 | 尚未实现跨请求 reasoning/signature 重放缓存 | 评估 Workers KV/DO 实现 |
@@ -73,11 +73,11 @@
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理 |
 | Provider/System 代理 | 已对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连 | 持续跟进 Workers Socket 限制 |
 | OpenAI-compatible 自定义上游 | 已对齐 | 可配置 base URL、API mode、模型、权重、Key 和代理 | 配置型模型精确 thinking capability、优先级和热更新跟进 Issue #49 |
-| 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名；当前不按 Codex API-key 隐式注入内置模型 | 明确默认目录、credential 匹配与陈旧目录清理策略，跟进 Issue #52；补强不同供应商模型响应解析 |
+| 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名；当前不按 Codex API-key 隐式注入内置模型 | 明确默认目录、默认图像模型、credential 匹配与陈旧目录清理策略，跟进 Issue #52；补强不同供应商模型响应解析 |
 | 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、visibility、search-tool、priority 和模型名回写 | 跟进上游 registry 新字段、`minimal` reasoning、冲突优先级及配置型 capability（Issue #49） |
 | Usage/Token 规范化 | 部分对齐 | 已记录 prompt/completion/cached/total 和费用 | 优先跟进 canonical breakdown、partial/unclassified/inconsistent 状态 |
 | 请求级日志与费用 | 项目差异 | 使用 D1/Queue 内建 | 不要求结构一致，只保证 Token 语义可靠 |
-| 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构 |
+| 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构；账号权重直接来自 D1 账号字段，不移植 auth-file 扫描响应拼装 |
 | Gemini / Interactions | 未对齐 | 当前仅有部分 Google adapter 基础 | 另立范围后实施 |
 | Grok/xAI | 未对齐 | 当前无完整 OAuth executor | 另立范围后实施 |
 | Claude 协议 | 暂不跟进 | 按当前决策暂不实施 Claude 请求/响应兼容 | 不因上游更新自动移植 |
@@ -152,6 +152,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-30 | `b4d94d58..928478e4` | 文档更新；Issue #52 补充 | 2 个提交中 `928478e4` 固化 Codex API-key 未显式配置模型时使用内置默认目录，并新增测试要求默认注册集和 `/v1/models` 来源包含 `gpt-image-1.5`、`gpt-image-2`，显式模型模式不得混入默认图像模型。该行为继续涉及公开模型面、发现失败时的误宣传及 credential 身份绑定，未直接移植，已补充 Issue #52 验收要求。`e8e39526` 仅为 Gin/文件型管理端规范化解析和展示 credential weight；Workers 侧账号权重由 D1 数据直接表达，无对应 auth-file 扫描路径，不移植。 |
 | 2026-07-30 | `2b63d6bc..b4d94d58` | 文档更新；Issue #52 | 3 个提交中 `b4d94d58` 恢复 Codex API-key 未显式配置模型时的内置 Codex Pro 默认目录，并增加配置索引 credential 校验、回退匹配和陈旧模型清理，属于 provider/model registry 范围内实质变化。该提交推翻上一轮 configured-models-only 语义；因 Workers 侧需先决定隐式默认目录、D1 账号与 route/provider/discovery 的凭据身份绑定、配置轮换和陈旧目录失效策略，未直接移植。`1c1d8efd` 为 Antigravity/Gemini 专用 response schema 修复，`a2ff6914` 为本地 Git store 恢复逻辑，均排除。 |
 | 2026-07-30 | `4a2eb54d..2b63d6bc` | 文档更新 | 3 个提交中 `2c8e5ba4` 修正 Codex API-key credential 模型注册，只暴露明确配置模型且空配置不注册模型；CFlareAIProxy 的 `/v1/models` 和 Codex client catalog 已仅从启用的 discovered models 与显式 routes 构建，不存在强制注入内置模型路径，因此行为已具备，无运行代码或测试变更。`8cdd3f1d` 为合并提交，`2b63d6bc` 仅涉及 Gemini schema cleaning，排除。 |
 | 2026-07-30 | `c9417c8a..4a2eb54d` | 文档更新；Issue #49 | 10 个提交中 `f3229143` 为 Codex/OpenAI-compatible 配置型模型新增精确 thinking capability、模型哈希失效与统一 capability-aware 请求应用，属于 provider/model registry 范围内实质变化；因 Workers 侧需明确配置与发现 metadata 优先级、KV/DO 热更新失效、alias 回写和 level 校验，未直接移植。`74d38e09`、`fecebcca`、`4a2eb54d` 均仅涉及 Claude 协议转换；Home CAS、Antigravity/Gemini schema 和 Gemini registry 变化排除。 |
