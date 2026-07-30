@@ -5,9 +5,9 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: a80e8082ef759aa172d23e948fe51578e0b90abf -->
+<!-- upstream-ref: 4a315136730baa8b3a436d12b74e5a702c70be5c -->
 <!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
-<!-- last-reviewed: 2026-07-30 -->
+<!-- last-reviewed: 2026-07-31 -->
 
 ## 1. 当前基线
 
@@ -15,15 +15,16 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `a80e8082ef759aa172d23e948fe51578e0b90abf` |
+| 已审阅上游提交 | `4a315136730baa8b3a436d12b74e5a702c70be5c` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
-| 审阅日期 | 2026-07-30 |
+| 审阅日期 | 2026-07-31 |
 
-本轮审阅范围为 `928478e4..a80e8082`，共 1 个提交：
+本轮审阅范围为 `a80e8082..4a315136`，共 4 个提交：
 
-- `a80e8082` 为 Codex HTTP 请求新增 `disable-codex-cloaking` 配置。默认行为会在应用客户端、配置和自定义 header 后，强制把 `User-Agent` 与 `Originator` 覆盖为固定 Codex 客户端身份；关闭该选项时才保留已有身份 header。提交同时更新固定 Codex UA 版本，并补充 HTTP、配置差异和 WebSocket 相关测试。
-- CFlareAIProxy 当前没有等价的强制身份伪装层。该行为涉及客户端身份、header 优先级、审计可观测性、API-key/OAuth 差异及合规策略，不能作为普通协议兼容修复直接移植；WebSocket 测试继续排除。已创建 Issue #55，限定评估 HTTP/SSE 身份 header 策略和验收测试。
+- `7d00936a` 为 Kimi model registry 增加 `kimi-k3-256k`，并把 `kimi-k3` 的上下文窗口更新为 1,048,576、最大输出 65,536，同时声明 `low/high/max` thinking levels。CFlareAIProxy 不复制上游静态模型目录，公开模型来自启用的 discovered models 与显式 routes；因此不应在未验证上游可用性时硬编码宣传新模型。本轮仅记录能力元数据，后续在发现结果或显式 route 出现该模型时验证 context、image input、thinking level 与公开别名回写。
+- `4db8e120` 及合并提交 `4a315136` 只修改 Home/Redis/Go SDK 的 401 OAuth 恢复、选择重派发、token 指纹和 Home usage 上报路径。CFlareAIProxy 没有 Home 控制面或 Redis queue，OAuth 刷新由 Durable Object 与 D1 管理，不能直接移植该进程内/远端 Home 协议。提交中 WebSocket retention 变化继续排除。
+- `f179a0f4` 是同一 Home 401 刷新修复链的前置提交，未引入适用于 Workers 当前 OAuth 路径的独立行为。
 
 本轮没有运行代码或测试更新；`local-implementation-ref` 保持不变。
 
@@ -51,6 +52,7 @@
 | OpenAI Completions | 大体对齐 | 可路由 generic、Codex、Kimi | 保持兼容，不扩大旧协议特性 |
 | Kimi Chat 上游 | 已对齐 | 专用 adapter，固定走 Chat Completions | 持续对比 `kimi_executor.go` |
 | Kimi 模型名归一化 | 已对齐 | 去除 `[1m]` 后缀 | 跟进上游新增 suffix/alias 规则 |
+| Kimi 模型目录与能力 | 大体对齐 | 公开模型来自 discovered models 与显式 routes，不复制上游静态目录 | 发现或配置 `kimi-k3-256k` 时验证 256K context、image input；验证 `kimi-k3` 1M context、65K output 和 `low/high/max` thinking metadata |
 | Kimi 多轮工具消息修复 | 已对齐 | 删除无效空 assistant、补 `reasoning_content`、修复 `call_id/tool_call_id` | 新增上游测试时同步移植测试语义 |
 | Kimi Responses/Completions 转换 | 大体对齐 | 支持文字、图片、工具定义、tool choice 和终止事件 | 跟进新的 Responses item/event 类型 |
 | Kimi 流式 usage | 大体对齐 | 自动请求 `include_usage` 并归集基础 Token | 接入规范化 Token 质量模型 |
@@ -68,13 +70,13 @@
 | Codex Alpha Search / 特殊路由插件 | 未对齐 | 尚未实现插件式模型选择 | 有真实使用需求后再跟进 |
 | 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | 跟进 credential concurrency、会话信号优先级和选择算法变化，保持无关 provider 更新不扰动既有租约；平滑加权轮询与 weight 校验见 Issue #47 |
 | 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断 | 继续细化按错误类型的 cooldown；不移植 PostgreSQL store |
-| Token/OAuth 刷新锁 | 大体对齐 | 使用 Durable Object 防止同账号并发刷新 | 跟进新的 OAuth 字段和刷新失败语义 |
+| Token/OAuth 刷新锁 | 大体对齐 | 使用 Durable Object 防止同账号并发刷新 | 跟进新的 OAuth 字段和刷新失败语义；Home/Redis 401 恢复协议不适用 |
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理 |
 | Provider/System 代理 | 已对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连 | 持续跟进 Workers Socket 限制 |
 | OpenAI-compatible 自定义上游 | 已对齐 | 可配置 base URL、API mode、模型、权重、Key 和代理 | 配置型模型精确 thinking capability、优先级和热更新跟进 Issue #49 |
 | 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名；当前不按 Codex API-key 隐式注入内置模型 | 明确默认目录、默认图像模型、credential 匹配与陈旧目录清理策略，跟进 Issue #52；补强不同供应商模型响应解析 |
-| 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、visibility、search-tool、priority 和模型名回写 | 跟进上游 registry 新字段、`minimal` reasoning、冲突优先级及配置型 capability（Issue #49） |
-| Usage/Token 规范化 | 部分对齐 | 已记录 prompt/completion/cached/total 和费用 | 优先跟进 canonical breakdown、partial/unclassified/inconsistent 状态 |
+| 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、visibility、search-tool、priority 和模型名回写 | 跟进上游 registry 新字段、Kimi K3/K3-256K 元数据、`minimal` reasoning、冲突优先级及配置型 capability（Issue #49） |
+| Usage/Token 规范化 | 部分对齐 | 已记录 prompt/completion/cached/total 和费用 | 优先跟进 canonical breakdown、partial/unclassified/inconsistent 状态；不移植 Home access-token 指纹上报 |
 | 请求级日志与费用 | 项目差异 | 使用 D1/Queue 内建 | 不要求结构一致，只保证 Token 语义可靠 |
 | 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构；账号权重直接来自 D1 账号字段，不移植 auth-file 扫描响应拼装 |
 | Gemini / Interactions | 未对齐 | 当前仅有部分 Google adapter 基础 | 另立范围后实施 |
@@ -90,8 +92,9 @@
 - `internal/runtime/executor/kimi_executor_test.go`
 - `internal/auth/kimi/**`
 - 与 OpenAI Chat/Responses 转换相关的 `sdk/translator/**`
+- `internal/registry/models/models.json` 中 Kimi 条目
 
-重点关键词：`normalizeKimiToolMessageLinks`、`reasoning_content`、`tool_call_id`、`stream_options`、`include_usage`、Kimi header、device ID、OAuth、模型 suffix。
+重点关键词：`normalizeKimiToolMessageLinks`、`reasoning_content`、`tool_call_id`、`stream_options`、`include_usage`、Kimi header、device ID、OAuth、模型 suffix、`kimi-k3`、`kimi-k3-256k`、context length、thinking levels。
 
 ### Codex
 
@@ -123,6 +126,7 @@
 - 仅适用于本地 Go 进程、Gin、文件系统、PostgreSQL 或 Go SDK 的实现。
 - Claude 协议、Claude OAuth、Claude Token 估算。
 - 与当前供应商无关的 Gemini、Grok/xAI 专用修复。
+- Home/Redis 控制面、Home credential refresh 协议及其 usage/token 指纹上报。
 - WebSocket、WebRTC、媒体 relay、sideband 或 TCP candidate proxy，除非已经单独批准设计。
 - 上游重构但没有行为变化。
 
@@ -151,6 +155,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-31 | `a80e8082..4a315136` | 文档更新 | 4 个提交中 `7d00936a` 为 Kimi registry 增加 `kimi-k3-256k`，并更新 `kimi-k3` 的 1M context、65K output 与 `low/high/max` thinking metadata，属于 Kimi/provider-model registry 范围内实质变化。CFlareAIProxy 的公开目录来自 discovered models 与显式 routes，不复制上游静态目录，因此未硬编码新模型；待发现或配置该模型时验证能力与别名回写。`f179a0f4`、`4db8e120` 及合并提交 `4a315136` 为 Home/Redis/Go SDK 的 401 OAuth 恢复、token 指纹、选择重派发及 WebSocket retention，Workers 当前无对应 Home 协议，未移植。 |
 | 2026-07-30 | `928478e4..a80e8082` | 文档更新；Issue #55 | `a80e8082` 为 Codex HTTP 请求新增可关闭的 cloaking 策略，但默认会在客户端、配置和自定义 header 之后强制覆盖固定 `User-Agent` 与 `Originator`，同时更新固定 UA 版本。该行为属于 Codex HTTP 范围内实质变化，但涉及官方客户端身份伪装、header 优先级、审计可观测性、API-key/OAuth 差异和合规决策，未直接移植；WebSocket 测试继续排除，已创建仅限 HTTP/SSE 的 Issue #55。 |
 | 2026-07-30 | `b4d94d58..928478e4` | 文档更新；Issue #52 补充 | 2 个提交中 `928478e4` 固化 Codex API-key 未显式配置模型时使用内置默认目录，并新增测试要求默认注册集和 `/v1/models` 来源包含 `gpt-image-1.5`、`gpt-image-2`，显式模型模式不得混入默认图像模型。该行为继续涉及公开模型面、发现失败时的误宣传及 credential 身份绑定，未直接移植，已补充 Issue #52 验收要求。`e8e39526` 仅为 Gin/文件型管理端规范化解析和展示 credential weight；Workers 侧账号权重由 D1 数据直接表达，无对应 auth-file 扫描路径，不移植。 |
 | 2026-07-30 | `2b63d6bc..b4d94d58` | 文档更新；Issue #52 | 3 个提交中 `b4d94d58` 恢复 Codex API-key 未显式配置模型时的内置 Codex Pro 默认目录，并增加配置索引 credential 校验、回退匹配和陈旧模型清理，属于 provider/model registry 范围内实质变化。该提交推翻上一轮 configured-models-only 语义；因 Workers 侧需先决定隐式默认目录、D1 账号与 route/provider/discovery 的凭据身份绑定、配置轮换和陈旧目录失效策略，未直接移植。`1c1d8efd` 为 Antigravity/Gemini 专用 response schema 修复，`a2ff6914` 为本地 Git store 恢复逻辑，均排除。 |
