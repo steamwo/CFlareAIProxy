@@ -5,7 +5,7 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: 928478e4b91533cec05a763bfac3edad9c3e76cf -->
+<!-- upstream-ref: a80e8082ef759aa172d23e948fe51578e0b90abf -->
 <!-- local-implementation-ref: 86b7eb4ca1b81c9332e681206dcd78be0cda4f32 -->
 <!-- last-reviewed: 2026-07-30 -->
 
@@ -15,16 +15,15 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `928478e4b91533cec05a763bfac3edad9c3e76cf` |
+| 已审阅上游提交 | `a80e8082ef759aa172d23e948fe51578e0b90abf` |
 | 本地分支 | `dev` |
 | 本地实现基线 | `86b7eb4ca1b81c9332e681206dcd78be0cda4f32` |
 | 审阅日期 | 2026-07-30 |
 
-本轮审阅范围为 `b4d94d58..928478e4`，共 2 个提交：
+本轮审阅范围为 `928478e4..a80e8082`，共 1 个提交：
 
-- `928478e4` 简化并固化 Codex API-key 模型选择：未显式配置 `models` 时使用内置 Codex Pro 默认目录，显式模型替换默认集合，排除规则随后应用。新增测试明确要求默认集合在注册模型和 `/v1/models` 来源中包含 `gpt-image-1.5` 与 `gpt-image-2`，显式模型模式则不得混入这两个默认图像模型。
-- 该变化继续属于 Issue #52 的公开模型面与 credential 身份绑定决策，并强化了图像模型误宣传风险；已向 Issue #52 补充默认图像模型暴露与目录一致性验收要求，未直接移植。
-- `e8e39526` 为本地 Gin/文件型管理接口补充 credential `weight` 的规范化解析与展示。CFlareAIProxy 的账号权重由 D1 账号数据和管理端字段直接表达，不存在扫描 auth file 后再拼装管理响应的路径，因此不移植该 Go 文件管理实现。
+- `a80e8082` 为 Codex HTTP 请求新增 `disable-codex-cloaking` 配置。默认行为会在应用客户端、配置和自定义 header 后，强制把 `User-Agent` 与 `Originator` 覆盖为固定 Codex 客户端身份；关闭该选项时才保留已有身份 header。提交同时更新固定 Codex UA 版本，并补充 HTTP、配置差异和 WebSocket 相关测试。
+- CFlareAIProxy 当前没有等价的强制身份伪装层。该行为涉及客户端身份、header 优先级、审计可观测性、API-key/OAuth 差异及合规策略，不能作为普通协议兼容修复直接移植；WebSocket 测试继续排除。已创建 Issue #55，限定评估 HTTP/SSE 身份 header 策略和验收测试。
 
 本轮没有运行代码或测试更新；`local-implementation-ref` 保持不变。
 
@@ -55,7 +54,7 @@
 | Kimi 多轮工具消息修复 | 已对齐 | 删除无效空 assistant、补 `reasoning_content`、修复 `call_id/tool_call_id` | 新增上游测试时同步移植测试语义 |
 | Kimi Responses/Completions 转换 | 大体对齐 | 支持文字、图片、工具定义、tool choice 和终止事件 | 跟进新的 Responses item/event 类型 |
 | Kimi 流式 usage | 大体对齐 | 自动请求 `include_usage` 并归集基础 Token | 接入规范化 Token 质量模型 |
-| Codex Responses 请求归一化 | 大体对齐 | 清理不兼容字段、转换 tools/tool choice、透传 Codex 会话头 | 评估派生会话 UUID（Issue #35）、custom tool/name conflict（Issue #38）和原生 session signal 优先级（Issue #42） |
+| Codex Responses 请求归一化 | 大体对齐 | 清理不兼容字段、转换 tools/tool choice、透传 Codex 会话头；当前不强制伪装官方 Codex `User-Agent`/`Originator` | 评估派生会话 UUID（Issue #35）、custom tool/name conflict（Issue #38）、原生 session signal 优先级（Issue #42）及 HTTP 身份 header 策略（Issue #55） |
 | Codex `response.failed/error` | 已对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误 | 对比上游新增 code/type 分类 |
 | Codex 中断流检测 | 已对齐 | 未收到 `response.completed/incomplete` 时视为失败，不伪造成功 | 跟进上游中断流恢复策略 |
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
@@ -106,7 +105,7 @@
 - `internal/client/codex/live/**`
 - `internal/config/codex_live.go`
 
-重点关键词：`response.failed`、`response.completed`、`response.output_item.done`、`custom_tool_call`、`response.custom_tool_call_input`、`input_image`、`image_url`、incomplete/disconnected stream、usage limit、capacity、context length、reasoning replay/signature、`minimal` reasoning、`prompt_cache_key`、`Session_id`、conversation identity、`spawn_agent`、`agent_message`、model catalog、WebRTC、sideband、ICE/STUN/TCP candidate。
+重点关键词：`response.failed`、`response.completed`、`response.output_item.done`、`custom_tool_call`、`response.custom_tool_call_input`、`input_image`、`image_url`、incomplete/disconnected stream、usage limit、capacity、context length、reasoning replay/signature、`minimal` reasoning、`prompt_cache_key`、`Session_id`、conversation identity、`spawn_agent`、`agent_message`、model catalog、`User-Agent`、`Originator`、Codex cloaking、WebRTC、sideband、ICE/STUN/TCP candidate。
 
 ### 通用 P1
 
@@ -152,6 +151,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-07-30 | `928478e4..a80e8082` | 文档更新；Issue #55 | `a80e8082` 为 Codex HTTP 请求新增可关闭的 cloaking 策略，但默认会在客户端、配置和自定义 header 之后强制覆盖固定 `User-Agent` 与 `Originator`，同时更新固定 UA 版本。该行为属于 Codex HTTP 范围内实质变化，但涉及官方客户端身份伪装、header 优先级、审计可观测性、API-key/OAuth 差异和合规决策，未直接移植；WebSocket 测试继续排除，已创建仅限 HTTP/SSE 的 Issue #55。 |
 | 2026-07-30 | `b4d94d58..928478e4` | 文档更新；Issue #52 补充 | 2 个提交中 `928478e4` 固化 Codex API-key 未显式配置模型时使用内置默认目录，并新增测试要求默认注册集和 `/v1/models` 来源包含 `gpt-image-1.5`、`gpt-image-2`，显式模型模式不得混入默认图像模型。该行为继续涉及公开模型面、发现失败时的误宣传及 credential 身份绑定，未直接移植，已补充 Issue #52 验收要求。`e8e39526` 仅为 Gin/文件型管理端规范化解析和展示 credential weight；Workers 侧账号权重由 D1 数据直接表达，无对应 auth-file 扫描路径，不移植。 |
 | 2026-07-30 | `2b63d6bc..b4d94d58` | 文档更新；Issue #52 | 3 个提交中 `b4d94d58` 恢复 Codex API-key 未显式配置模型时的内置 Codex Pro 默认目录，并增加配置索引 credential 校验、回退匹配和陈旧模型清理，属于 provider/model registry 范围内实质变化。该提交推翻上一轮 configured-models-only 语义；因 Workers 侧需先决定隐式默认目录、D1 账号与 route/provider/discovery 的凭据身份绑定、配置轮换和陈旧目录失效策略，未直接移植。`1c1d8efd` 为 Antigravity/Gemini 专用 response schema 修复，`a2ff6914` 为本地 Git store 恢复逻辑，均排除。 |
 | 2026-07-30 | `4a2eb54d..2b63d6bc` | 文档更新 | 3 个提交中 `2c8e5ba4` 修正 Codex API-key credential 模型注册，只暴露明确配置模型且空配置不注册模型；CFlareAIProxy 的 `/v1/models` 和 Codex client catalog 已仅从启用的 discovered models 与显式 routes 构建，不存在强制注入内置模型路径，因此行为已具备，无运行代码或测试变更。`8cdd3f1d` 为合并提交，`2b63d6bc` 仅涉及 Gemini schema cleaning，排除。 |
