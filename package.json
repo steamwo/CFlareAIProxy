@@ -77,7 +77,7 @@
         "description": "Administrator login username for /admin. Recommended value: admin"
       },
       "ADMIN_PASSWORD": {
-        "description": "Administrator login password. Use a strong unique password."
+        "description": "Administrator login password for /admin. Use a strong unique password."
       }
     }
   },
