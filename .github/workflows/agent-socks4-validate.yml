@@ -16,13 +16,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/restore-socks4-proxy
-      - name: Align documentation and error vocabulary
+      - name: Finalize implementation and documentation
         shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
 
           replacements = {
+              Path('src/proxy-transport.ts'): {
+                  '  let domainSuffix = new Uint8Array();': '  let domainSuffix: Uint8Array<ArrayBufferLike> = new Uint8Array();',
+              },
               Path('src/credential-fetch.ts'): {
                   'Credential proxy username or password is too long': 'Credential SOCKS username, password, or USERID is too long or invalid',
                   'Credential SOCKS5 proxy failed to connect, code ${code}': 'Credential SOCKS proxy failed to connect, code ${code}',
@@ -70,6 +73,6 @@ jobs:
           git rm .github/workflows/agent-socks4-validate.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md src/credential-fetch.ts src/upstream-fetch.ts
+          git add README.md src/credential-fetch.ts src/proxy-transport.ts src/upstream-fetch.ts
           git commit -m "Finalize native SOCKS4 proxy support"
           git push origin HEAD:agent/restore-socks4-proxy
