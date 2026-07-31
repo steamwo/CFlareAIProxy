@@ -18,7 +18,8 @@ const { loading, run } = useApiRequest();
 const poolOptions = [
   { label: "轮询", value: "round_robin" },
   { label: "填满优先", value: "fill_first" },
-  { label: "按权重", value: "weighted" },
+  { label: "按权重（兼容）", value: "weighted" },
+  { label: "平滑加权", value: "smooth_weighted" },
   { label: "最少并发", value: "least_inflight" },
 ];
 const pageCount = computed(() => Math.max(1, Math.ceil(rows.value.length / pageSize.value)));
