@@ -237,8 +237,8 @@ export function translateCodexChatCustomTools(
   return { body: translated, toolNames: metadata.originalByShort };
 }
 
-export function buildCodexCustomToolRequest(context: ProxyRequestContext): UpstreamBuildResult {
-  const result = buildCodexRequest(context);
+export async function buildCodexCustomToolRequest(context: ProxyRequestContext): Promise<UpstreamBuildResult> {
+  const result = await buildCodexRequest(context);
   if (context.endpoint === "responses" || typeof result.init.body !== "string") return result;
 
   const metadata = toolNameMetadata(context.body.tools);
