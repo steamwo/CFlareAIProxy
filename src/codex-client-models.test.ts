@@ -11,7 +11,7 @@ describe("Codex client model catalog", () => {
       x_cflare_endpoints: ["responses"],
       x_cflare_capabilities: {
         inputModalities: ["text", "image", "audio"],
-        reasoningLevels: ["invalid", "minimal", "low", "medium", "high"],
+        reasoningLevels: ["invalid", "auto", "minimal", "low", "medium", "high"],
         serviceTiers: ["priority"],
         contextWindow: 128000,
         visibility: "list",
@@ -39,12 +39,28 @@ describe("Codex client model catalog", () => {
       supports_search_tool: true,
       default_reasoning_level: "medium",
       supported_reasoning_levels: [
+        { effort: "auto", description: "Automatically select the reasoning depth" },
         { effort: "minimal", description: "Fastest responses with minimal reasoning" },
         { effort: "low", description: "Fast responses with lighter reasoning" },
         { effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" },
         { effort: "high", description: "Greater reasoning depth for complex problems" },
       ],
       service_tiers: [{ id: "priority", name: "priority", description: "priority" }],
+    });
+  });
+
+  it("uses auto as the default when it is the only usable reasoning mode", () => {
+    const models = buildCodexClientModels([{
+      id: "automatic",
+      x_cflare_endpoints: ["responses"],
+      x_cflare_capabilities: { reasoningLevels: ["none", "auto"] },
+    }]);
+    expect(models[0]).toMatchObject({
+      default_reasoning_level: "auto",
+      supported_reasoning_levels: [
+        { effort: "none", description: "No reasoning" },
+        { effort: "auto", description: "Automatically select the reasoning depth" },
+      ],
     });
   });
 

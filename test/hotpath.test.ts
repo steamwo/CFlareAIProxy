@@ -241,7 +241,9 @@ describe("per-request attempt memo", () => {
       await Promise.all([scope.provider(target.provider_id), scope.runtime(target), scope.availability(target)]);
     }
 
-    expect(sql.filter((query) => query.includes("FROM providers"))).toHaveLength(1);
+    // The runtime read joins provider options, but the primary provider configuration is
+    // still loaded exactly once and the total D1 read count remains unchanged.
+    expect(sql.filter((query) => query.includes("SELECT * FROM providers"))).toHaveLength(1);
     expect(sql.filter((query) => query.includes("discovered_models") && !query.includes("FROM credentials"))).toHaveLength(1);
     expect(sql.filter((query) => query.includes("FROM credentials"))).toHaveLength(2);
     // Six serial reads collapse to four, of which each attempt's three overlap.
