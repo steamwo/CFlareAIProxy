@@ -1,5 +1,5 @@
 import { restoreCodexMultiAgentResponse } from "./codex-multi-agent-response";
-import { prepareCodexResponse } from "./codex-response";
+import { prepareCodexCustomToolResponse } from "./codex-custom-response";
 import { prepareKimiResponse } from "./kimi-response";
 import { rewriteResponseModels } from "./response-utils";
 import { prepareDownstreamResponse } from "./stream";
@@ -19,7 +19,7 @@ export interface ProviderResponseContext {
 
 export async function prepareProviderResponse(context: ProviderResponseContext): Promise<Response> {
   let response: Response;
-  if (context.providerKind === "codex") response = await prepareCodexResponse(context);
+  if (context.providerKind === "codex") response = await prepareCodexCustomToolResponse(context);
   else if (context.providerKind === "kimi") response = await prepareKimiResponse(context);
   else {
     response = await prepareDownstreamResponse(context.upstream, context.mode, context.requestedStream, context.model, context.requestId);
