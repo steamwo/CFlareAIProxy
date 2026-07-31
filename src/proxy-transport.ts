@@ -373,7 +373,7 @@ async function socks4Connect(context: TunnelContext, remoteDns: boolean): Promis
   if (host.byteLength === 0 || host.byteLength > 255 || host.includes(0)) throw dialect.hostTooLong();
 
   let address: Uint8Array;
-  let domainSuffix = new Uint8Array();
+  let domainSuffix: Uint8Array<ArrayBufferLike> = new Uint8Array();
   if (remoteDns) {
     address = new Uint8Array([0x00, 0x00, 0x00, 0x01]);
     domainSuffix = concatBytes([host, new Uint8Array([0x00])]);

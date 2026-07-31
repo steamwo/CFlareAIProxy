@@ -28,9 +28,9 @@ const PROVIDER_PROXY_DIALECT: ProxyDialect = {
   authRejected: () => new GatewayError(502, "SOCKS_AUTH_UNSUPPORTED", "SOCKS5 代理没有接受可用的认证方式", "upstream_error"),
   authMethodUnsupported: (method) => new GatewayError(502, "SOCKS_AUTH_UNSUPPORTED", `SOCKS5 返回未知认证方式 ${method}`, "upstream_error"),
   authFailed: () => new GatewayError(502, "SOCKS_AUTH_FAILED", "SOCKS5 用户名或密码验证失败", "upstream_error"),
-  proxyCredentialTooLong: () => new GatewayError(400, "PROXY_CREDENTIAL_TOO_LONG", "SOCKS5 用户名或密码过长"),
+  proxyCredentialTooLong: () => new GatewayError(400, "PROXY_CREDENTIAL_TOO_LONG", "SOCKS 用户名、密码或 USERID 过长或无效"),
   hostTooLong: () => new GatewayError(400, "UPSTREAM_HOST_INVALID", "上游主机名过长"),
-  socksConnectFailed: (code) => new GatewayError(502, "SOCKS_CONNECT_FAILED", `SOCKS5 连接上游失败，代码 ${code}`, "upstream_error"),
+  socksConnectFailed: (code) => new GatewayError(502, "SOCKS_CONNECT_FAILED", `SOCKS 代理连接上游失败，代码 ${code}`, "upstream_error"),
   socksUnknownAddress: () => new GatewayError(502, "SOCKS_PROTOCOL_ERROR", "SOCKS5 返回了未知地址类型", "upstream_error"),
   tlsNegotiationTimeout: (target, timeoutMs) => new GatewayError(504, "PROXY_TLS_TIMEOUT", `与 ${target.hostname}:${target.port || "443"} 的 TLS 协商超时（${timeoutMs} ms）`, "upstream_error"),
   tlsHandshakeFailed: (target, detail) => new GatewayError(
@@ -174,7 +174,7 @@ export async function testProviderProxy(env: Env, provider: ProviderConfig): Pro
 
   const sameExit = directIp ? directIp === exitIp : false;
   const warning = !httpsReady
-    ? "已通过 HTTP 确认代理出口，但 HTTPS 隧道的 TLS 握手失败。该代理目前不能用于模型、OAuth、额度等 HTTPS 上游；请改用不拦截 TLS 的标准 CONNECT/SOCKS5 代理。"
+    ? "已通过 HTTP 确认代理出口，但 HTTPS 隧道的 TLS 握手失败。该代理目前不能用于模型、OAuth、额度等 HTTPS 上游；请改用不拦截 TLS 的标准 CONNECT/SOCKS 代理。"
     : sameExit
       ? "代理出口 IP 与 Worker 直连出口相同，请检查代理是否真的改变了出口。"
       : undefined;
