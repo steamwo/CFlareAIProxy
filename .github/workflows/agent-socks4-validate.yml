@@ -1,0 +1,45 @@
+name: Validate native SOCKS4 support
+
+on:
+  push:
+    branches: [agent/restore-socks4-proxy]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/restore-socks4-proxy
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Check configuration
+        run: node scripts/check-config.mjs
+      - name: Check web assets
+        run: node scripts/check-web.mjs
+      - name: Typecheck worker and web
+        run: pnpm run typecheck
+      - name: Run tests
+        run: pnpm exec vitest run
+      - name: Build production web bundle
+        run: pnpm run build:web
+      - name: Wrangler dry run
+        run: pnpm run config:check
+      - name: Remove temporary workflow
+        run: |
+          git rm .github/workflows/agent-socks4-validate.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Remove temporary SOCKS4 validation workflow"
+          git push origin HEAD:agent/restore-socks4-proxy
