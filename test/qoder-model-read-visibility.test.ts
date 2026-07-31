@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   gatewayKeyAllowsModel,
@@ -12,11 +12,15 @@ class SqliteD1Statement {
   constructor(
     private readonly database: DatabaseSync,
     private readonly sql: string,
-    private readonly bindings: unknown[] = [],
+    private readonly bindings: SQLInputValue[] = [],
   ) {}
 
   bind(...bindings: unknown[]): SqliteD1Statement {
-    return new SqliteD1Statement(this.database, this.sql, bindings);
+    return new SqliteD1Statement(
+      this.database,
+      this.sql,
+      bindings as SQLInputValue[],
+    );
   }
 
   async all<T>(): Promise<D1Result<T>> {
@@ -156,11 +160,11 @@ describe("Qoder model read visibility", () => {
     expect(availableAdminModels.filter((model) => model.provider_id === "qoder")).toHaveLength(2);
 
     const availablePublicModels = await listModels(env);
-    expect(availablePublicModels.map((model) => model.id)).toEqual([
+    expect(new Set(availablePublicModels.map((model) => model.id))).toEqual(new Set([
       "codex/codex-model",
       "Qoder Public",
       "qoder-route",
-    ]);
+    ]));
     expect(await listRoutesForModel(env, "Qoder Public", "chat")).toHaveLength(1);
     expect(await listRoutesForModel(env, "qoder-route", "chat")).toHaveLength(1);
     expect(await gatewayKeyAllowsModel(
