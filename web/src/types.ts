@@ -1,4 +1,4 @@
-export type PoolStrategy = "round_robin" | "fill_first" | "weighted" | "least_inflight";
+export type PoolStrategy = "round_robin" | "fill_first" | "weighted" | "smooth_weighted" | "least_inflight";
 
 export interface ApiEnvelope<T> { data: T }
 export interface Session { authenticated: boolean; username: string; expiresAt: number; service: string }
