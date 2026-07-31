@@ -62,7 +62,9 @@ function normalizePayload(value: unknown, toolNames: Record<string, string>, dep
     delete output.input;
   }
 
-  if (typeof source.name === "string") output.name = originalToolName(source.name, toolNames);
+  if ((source.type === "function_call" || source.type === "custom_tool_call") && typeof source.name === "string") {
+    output.name = originalToolName(source.name, toolNames);
+  }
   return output;
 }
 
@@ -80,11 +82,12 @@ function findState(
   event: Record<string, unknown>,
   item: Record<string, unknown>,
 ): ToolCallStreamState | undefined {
-  for (const key of stateKeys(event, item)) {
+  const keys = stateKeys(event, item);
+  for (const key of keys) {
     const state = tracker.states.get(key);
     if (state) return state;
   }
-  return tracker.current;
+  return keys.length === 0 ? tracker.current : undefined;
 }
 
 function ensureState(
