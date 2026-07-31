@@ -92,6 +92,28 @@ describe("SOCKS4 proxy handshake", () => {
     ]);
   });
 
+  it("reports SOCKS4 rejection replies through the shared SOCKS error path", async () => {
+    enqueueSocket({
+      steps: [
+        { type: "awaitWrite", count: 1 },
+        { type: "data", bytes: new Uint8Array([0x00, 0x5b, 0x00, 0x50, 0, 0, 0, 0]) },
+      ],
+    });
+
+    await expect(providerFetchForCredential(
+      env,
+      provider,
+      credential("socks4://127.0.0.1:1080"),
+      "http://192.0.2.10/v1/models",
+      { method: "GET" },
+      { timeoutMs: 120_000 },
+    )).rejects.toMatchObject({
+      code: "CREDENTIAL_PROXY_CONNECT_FAILED",
+      status: 502,
+      message: expect.stringContaining("SOCKS proxy failed to connect, code 91"),
+    });
+  });
+
   it("requires SOCKS4a for domain targets", async () => {
     enqueueSocket({ steps: [] });
     await expect(providerFetchForCredential(
