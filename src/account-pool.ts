@@ -10,17 +10,34 @@ interface PoolStat {
   last_used: number;
 }
 
+interface SmoothWeightRow {
+  [key: string]: SqlStorageValue;
+  credential_id: string;
+  current_weight: number;
+  configured_weight: number;
+}
+
+type AccountPoolStrategy = PoolStrategy | "smooth_weighted";
+
 interface AcquirePayload {
   providerId: string;
-  strategy: PoolStrategy;
+  strategy: AccountPoolStrategy;
   candidates: PoolCandidate[];
   sessionKey?: string | string[];
   leaseTtlMs?: number;
 }
 
+const MAX_CREDENTIAL_WEIGHT = 1_000_000;
+
 function sessionKeys(value: string | string[] | undefined): string[] {
   const values = Array.isArray(value) ? value : value ? [value] : [];
   return [...new Set(values.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()))].slice(0, 8);
+}
+
+function validSmoothWeight(candidate: PoolCandidate): boolean {
+  return Number.isInteger(candidate.weight)
+    && candidate.weight >= 1
+    && candidate.weight <= MAX_CREDENTIAL_WEIGHT;
 }
 
 export class AccountPool extends DurableObject<Env> {
@@ -48,6 +65,13 @@ export class AccountPool extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS counters (
           provider_id TEXT PRIMARY KEY,
           cursor INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS smooth_weights (
+          provider_id TEXT NOT NULL,
+          credential_id TEXT NOT NULL,
+          current_weight INTEGER NOT NULL DEFAULT 0,
+          configured_weight INTEGER NOT NULL,
+          PRIMARY KEY (provider_id, credential_id)
         );
         CREATE TABLE IF NOT EXISTS refresh_locks (
           credential_id TEXT PRIMARY KEY,
@@ -84,7 +108,7 @@ export class AccountPool extends DurableObject<Env> {
         return Response.json({ ok: true });
       }
       if (request.method === "POST" && url.pathname === "/reset") {
-        this.ctx.storage.sql.exec("DELETE FROM pool_stats; DELETE FROM leases; DELETE FROM affinities; DELETE FROM refresh_locks;");
+        this.ctx.storage.sql.exec("DELETE FROM pool_stats; DELETE FROM leases; DELETE FROM affinities; DELETE FROM smooth_weights; DELETE FROM refresh_locks;");
         return Response.json({ ok: true });
       }
       return new Response("Not found", { status: 404 });
@@ -149,6 +173,8 @@ export class AccountPool extends DurableObject<Env> {
       const candidate = candidates.find((entry) => entry.id === affinity.credential_id);
       const stat = candidate ? stats.get(candidate.id) : undefined;
       if (candidate && stat && stat.cooldown_until <= now && stat.inflight < candidate.maxConcurrency) {
+        // Sticky sessions intentionally bypass scheduler advancement. Affinity is a routing
+        // constraint, not another weighted selection event.
         return this.createLease(candidate.id, affinityKeys, payload.leaseTtlMs ?? 600_000, now);
       }
     }
@@ -163,33 +189,99 @@ export class AccountPool extends DurableObject<Env> {
     const tier = available.filter((candidate) => candidate.priority === lowestPriority);
     let chosen: PoolCandidate;
 
-    switch (payload.strategy) {
-      case "fill_first":
-        chosen = tier.sort((a, b) => a.id.localeCompare(b.id))[0]!;
-        break;
-      case "least_inflight":
-        chosen = tier.sort((a, b) => {
-          const left = stats.get(a.id)!;
-          const right = stats.get(b.id)!;
-          const ratio = left.inflight / a.maxConcurrency - right.inflight / b.maxConcurrency;
-          return ratio || left.last_used - right.last_used;
-        })[0]!;
-        break;
-      case "weighted": {
-        const expanded = tier.flatMap((candidate) => Array.from({ length: Math.min(100, Math.max(1, candidate.weight)) }, () => candidate));
-        const cursor = this.nextCursor(payload.providerId, expanded.length);
-        chosen = expanded[cursor]!;
-        break;
-      }
-      case "round_robin":
-      default: {
-        const sorted = [...tier].sort((a, b) => a.id.localeCompare(b.id));
-        const cursor = this.nextCursor(payload.providerId, sorted.length);
-        chosen = sorted[cursor]!;
+    if (payload.strategy === "smooth_weighted") {
+      chosen = this.nextSmoothWeighted(payload.providerId, tier);
+    } else {
+      switch (payload.strategy) {
+        case "fill_first":
+          chosen = tier.sort((a, b) => a.id.localeCompare(b.id))[0]!;
+          break;
+        case "least_inflight":
+          chosen = tier.sort((a, b) => {
+            const left = stats.get(a.id)!;
+            const right = stats.get(b.id)!;
+            const ratio = left.inflight / a.maxConcurrency - right.inflight / b.maxConcurrency;
+            return ratio || left.last_used - right.last_used;
+          })[0]!;
+          break;
+        case "weighted": {
+          // Preserve the deployed weighted cursor behavior. The new deterministic smooth
+          // algorithm is opt-in through `smooth_weighted`.
+          const expanded = tier.flatMap((candidate) => Array.from({ length: Math.min(100, Math.max(1, candidate.weight)) }, () => candidate));
+          const cursor = this.nextCursor(payload.providerId, expanded.length);
+          chosen = expanded[cursor]!;
+          break;
+        }
+        case "round_robin":
+        default: {
+          const sorted = [...tier].sort((a, b) => a.id.localeCompare(b.id));
+          const cursor = this.nextCursor(payload.providerId, sorted.length);
+          chosen = sorted[cursor]!;
+        }
       }
     }
 
     return this.createLease(chosen.id, affinityKeys, payload.leaseTtlMs ?? 600_000, now);
+  }
+
+  private nextSmoothWeighted(providerId: string, candidates: PoolCandidate[]): PoolCandidate {
+    const sorted = [...candidates].sort((left, right) => left.id.localeCompare(right.id));
+    if (sorted.some((candidate) => !validSmoothWeight(candidate))) {
+      throw new Error(`Credential weight must be an integer between 1 and ${MAX_CREDENTIAL_WEIGHT}`);
+    }
+
+    const existing = this.ctx.storage.sql
+      .exec<SmoothWeightRow>(
+        "SELECT credential_id,current_weight,configured_weight FROM smooth_weights WHERE provider_id=? ORDER BY credential_id",
+        providerId,
+      )
+      .toArray();
+    const existingById = new Map(existing.map((row) => [row.credential_id, row] as const));
+    const changed = existing.length !== sorted.length
+      || sorted.some((candidate) => existingById.get(candidate.id)?.configured_weight !== candidate.weight);
+
+    if (changed) {
+      // Reset the whole active tier when availability, membership, or weights change. An
+      // unavailable account therefore cannot accumulate credit and burst when it recovers.
+      this.ctx.storage.sql.exec("DELETE FROM smooth_weights WHERE provider_id=?", providerId);
+      for (const candidate of sorted) {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO smooth_weights(provider_id,credential_id,current_weight,configured_weight) VALUES(?,?,0,?)",
+          providerId,
+          candidate.id,
+          candidate.weight,
+        );
+      }
+    }
+
+    const currentById = changed
+      ? new Map(sorted.map((candidate) => [candidate.id, 0] as const))
+      : new Map(existing.map((row) => [row.credential_id, row.current_weight] as const));
+    const totalWeight = sorted.reduce((sum, candidate) => sum + candidate.weight, 0);
+    if (!Number.isSafeInteger(totalWeight)) throw new Error("Combined credential weight exceeds the safe scheduler range");
+
+    let chosen = sorted[0]!;
+    let chosenWeight = Number.NEGATIVE_INFINITY;
+    const updated = new Map<string, number>();
+    for (const candidate of sorted) {
+      const current = (currentById.get(candidate.id) ?? 0) + candidate.weight;
+      updated.set(candidate.id, current);
+      if (current > chosenWeight) {
+        chosen = candidate;
+        chosenWeight = current;
+      }
+    }
+    updated.set(chosen.id, (updated.get(chosen.id) ?? 0) - totalWeight);
+
+    for (const candidate of sorted) {
+      this.ctx.storage.sql.exec(
+        "UPDATE smooth_weights SET current_weight=? WHERE provider_id=? AND credential_id=?",
+        updated.get(candidate.id) ?? 0,
+        providerId,
+        candidate.id,
+      );
+    }
+    return chosen;
   }
 
   private nextCursor(providerId: string, modulo: number): number {

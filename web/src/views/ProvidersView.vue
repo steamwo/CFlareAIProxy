@@ -11,7 +11,7 @@ import PageHeader from "../components/PageHeader.vue";
 import ProxyEditor from "../components/ProxyEditor.vue";
 import { api, jsonBody } from "../api";
 import { useApiRequest } from "../composables/useApiRequest";
-import type { Provider } from "../types";
+import type { PoolStrategy, Provider } from "../types";
 
 interface ModelSelection {
   upstreamModel: string;
@@ -23,7 +23,7 @@ interface FormState {
   name: string;
   baseUrl: string;
   apiMode: "chat" | "responses" | "both";
-  poolStrategy: "round_robin" | "fill_first" | "weighted" | "least_inflight";
+  poolStrategy: PoolStrategy;
   routingWeight: number;
   enabled: boolean;
   apiKey: string;
@@ -56,7 +56,8 @@ const apiModes = [
   { label: "仅 Responses", value: "responses" },
 ];
 const pools = [
-  { label: "按权重（推荐）", value: "weighted" },
+  { label: "按权重（兼容）", value: "weighted" },
+  { label: "平滑加权", value: "smooth_weighted" },
   { label: "轮询", value: "round_robin" },
   { label: "填满优先", value: "fill_first" },
   { label: "最少并发", value: "least_inflight" },
