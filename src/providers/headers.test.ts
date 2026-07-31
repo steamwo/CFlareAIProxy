@@ -109,14 +109,14 @@ describe("Codex compatibility", () => {
     expect(disableCodexCloaking(codexProvider())).toBe(false);
   });
 
-  it("preserves caller identity when cloaking is disabled and no configured identity exists", () => {
+  it("preserves caller User-Agent while retaining configured Originator when cloaking is disabled", () => {
     const headers = mergedHeaders(
       { "user-agent": "caller-agent" },
       codexProvider({ disable_codex_cloaking: true }),
       credential(),
     );
     expect(headers.get("user-agent")).toBe("caller-agent");
-    expect(headers.get("originator")).toBeNull();
+    expect(headers.get("originator")).toBe("codex_cli_rs");
   });
 
   it("applies credential identity after provider and caller identity", () => {
