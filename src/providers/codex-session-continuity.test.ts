@@ -94,7 +94,7 @@ describe("Codex HTTP session continuity", () => {
 
     expect(first).toBe(second);
     expect(first).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-5[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
-    expect(new Set([first, otherGateway, otherProvider, otherSession])).toHaveLength(4);
+    expect(new Set([first, otherGateway, otherProvider, otherSession]).size).toBe(4);
   });
 
   it("does not derive an identifier from prompts, API keys, or request correlation ids alone", async () => {
