@@ -78,11 +78,11 @@ socks5h://user:pass@host:port
 
 说明：
 
-- HTTPS 上游通过 HTTP CONNECT 或 SOCKS5 隧道建立 TLS；
+- HTTPS 上游通过 HTTP CONNECT、SOCKS4/4a 或 SOCKS5 隧道建立 TLS；
 - 使用 HTTP 代理访问 HTTPS 上游时，Proxy URL 仍填写 `http://`，不是 `https://`；
 - `socks4://` 只接受 IPv4 目标；`socks4a://` 会把域名交给代理解析；URL 用户名映射为 SOCKS4 USERID，SOCKS4/4a 不支持密码认证；
 - `socks5h://` 与 `socks5://` 在 Worker 实现中都由代理连接目标主机；建议使用 `socks5h://` 明确表达远端解析意图；
-- 代理用户名和密码支持 URL 编码。
+- HTTP 和 SOCKS5 用户名/密码、SOCKS4 USERID 均支持 URL 编码。
 
 示例：
 
@@ -219,7 +219,9 @@ OpenCode Zen 的官方请求和镜像故障转移都通过该账号的最终代�
 | 现象 | 优先检查 |
 | --- | --- |
 | `CONNECT_REJECTED` | HTTP 代理是否允许 CONNECT、认证是否正确。 |
+| `SOCKS_CONNECT_FAILED` | SOCKS4/4a 或 SOCKS5 代理返回的连接拒绝码、目标地址和端口。 |
 | `AUTH_FAILED` | SOCKS5 用户名、密码和 URL 编码。 |
+| `SOCKS4_IPV4_REQUIRED` | `socks4://` 仅能连接 IPv4 目标；域名目标改用 `socks4a://`。 |
 | `TLS_HANDSHAKE_FAILED` | 代理是否透明篡改 TLS、目标 SNI 是否可达。 |
 | 连接超时 | 代理公网可达性、防火墙、端口和 Cloudflare Socket 支持。 |
 | 出口 IP 未变化 | 是否配置到了正确层级、账号是否有 `direct` 覆盖。 |
