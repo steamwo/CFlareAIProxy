@@ -3,9 +3,7 @@ import type { PublicModel } from "../types";
 
 export function normalizeAllowedModelSelection(values: readonly string[], models: readonly PublicModel[]): string[] {
   const aliases = new Map<string, string>();
-  const available = new Set<string>();
   for (const model of models) {
-    available.add(model.id);
     if (model.x_cflare_provider !== "qoder" || !model.x_cflare_upstream_model) continue;
     aliases.set(`qoder/${model.x_cflare_upstream_model}`, model.id);
   }
@@ -16,10 +14,7 @@ export function normalizeAllowedModelSelection(values: readonly string[], models
     const value = raw.trim();
     if (!value) continue;
     const normalized = aliases.get(value) ?? value;
-    // Editing an existing key must not resurrect model IDs that are no longer in the
-    // server-provided catalogue. This also removes legacy Qoder display names after the
-    // last enabled Qoder account disappears.
-    if (!available.has(normalized) || seen.has(normalized)) continue;
+    if (seen.has(normalized)) continue;
     seen.add(normalized);
     output.push(normalized);
   }
