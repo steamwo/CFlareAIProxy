@@ -9,6 +9,13 @@ function codexClientVersion(provider: ProviderConfig): string {
   return typeof configured === "string" && configured.trim() ? configured.trim() : CODEX_CLIENT_VERSION;
 }
 
+export function disableCodexCloaking(provider: ProviderConfig): boolean {
+  return provider.options.disable_codex_cloaking === true
+    || provider.options.disableCodexCloaking === true
+    || provider.options.codex_preserve_identity_headers === true
+    || provider.options.codexPreserveIdentityHeaders === true;
+}
+
 export function codexAccountId(credential: Credential): string | undefined {
   const metadataId = credential.metadata.account_id;
   if (typeof metadataId === "string" && metadataId) return metadataId;
@@ -46,11 +53,15 @@ export function providerAuthHeaders(provider: ProviderConfig, credential: Creden
   }
 
   if (provider.kind === "codex") {
+    // Authentication and account identity are protected regardless of the transmitted
+    // client identity policy.
     headers.set("authorization", `Bearer ${credential.secret}`);
     headers.set("accept", headers.get("accept") ?? "application/json");
     headers.set("content-type", headers.get("content-type") ?? "application/json");
-    headers.set("originator", headers.get("originator") ?? "codex_cli_rs");
-    headers.set("user-agent", `codex_cli_rs/${codexClientVersion(provider)} ${CODEX_USER_AGENT_SUFFIX}`);
+    if (!disableCodexCloaking(provider)) {
+      headers.set("originator", headers.get("originator") ?? "codex_cli_rs");
+      headers.set("user-agent", `codex_cli_rs/${codexClientVersion(provider)} ${CODEX_USER_AGENT_SUFFIX}`);
+    }
     const accountId = codexAccountId(credential);
     if (accountId) headers.set("Chatgpt-Account-Id", accountId);
   }
