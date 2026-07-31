@@ -1,7 +1,20 @@
+import { CODEX_CLIENT_VERSION } from "../builtin-channels";
 import type { Credential, ProviderConfig } from "../types";
 import { decodeJwtPayload, pickString } from "../utils";
 
-const CODEX_USER_AGENT = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal";
+const CODEX_USER_AGENT_SUFFIX = "(Debian 13.0.0; x86_64) WindowsTerminal";
+
+function codexClientVersion(provider: ProviderConfig): string {
+  const configured = provider.options.codex_client_version;
+  return typeof configured === "string" && configured.trim() ? configured.trim() : CODEX_CLIENT_VERSION;
+}
+
+export function disableCodexCloaking(provider: ProviderConfig): boolean {
+  return provider.options.disable_codex_cloaking === true
+    || provider.options.disableCodexCloaking === true
+    || provider.options.codex_preserve_identity_headers === true
+    || provider.options.codexPreserveIdentityHeaders === true;
+}
 
 export function codexAccountId(credential: Credential): string | undefined {
   const metadataId = credential.metadata.account_id;
@@ -40,11 +53,15 @@ export function providerAuthHeaders(provider: ProviderConfig, credential: Creden
   }
 
   if (provider.kind === "codex") {
+    // Authentication and account identity are protected regardless of the transmitted
+    // client identity policy.
     headers.set("authorization", `Bearer ${credential.secret}`);
     headers.set("accept", headers.get("accept") ?? "application/json");
     headers.set("content-type", headers.get("content-type") ?? "application/json");
-    headers.set("originator", headers.get("originator") ?? "codex_cli_rs");
-    headers.set("user-agent", CODEX_USER_AGENT);
+    if (!disableCodexCloaking(provider)) {
+      headers.set("originator", headers.get("originator") ?? "codex_cli_rs");
+      headers.set("user-agent", `codex_cli_rs/${codexClientVersion(provider)} ${CODEX_USER_AGENT_SUFFIX}`);
+    }
     const accountId = codexAccountId(credential);
     if (accountId) headers.set("Chatgpt-Account-Id", accountId);
   }

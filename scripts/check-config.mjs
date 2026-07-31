@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { root } from "./lib.mjs";
+import { EXPECTED_WORKER_NAME, root } from "./lib.mjs";
 
-const EXPECTED_WORKER_NAME = "cfap";
 const config = JSON.parse(readFileSync(join(root, "wrangler.jsonc"), "utf8"));
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const errors = [];

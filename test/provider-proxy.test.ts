@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   hostnameMatchesProxyBypassRule,
-  validateBridgeUrl,
   validateProxyUrl,
 } from "../src/upstream-fetch";
 
@@ -16,12 +15,6 @@ describe("provider proxy validation", () => {
     expect(() => validateProxyUrl("ftp://127.0.0.1:21")).toThrow();
     expect(() => validateProxyUrl("https://127.0.0.1:443")).toThrow();
     expect(validateProxyUrl("socks5://127.0.0.1").port).toBe("1080");
-  });
-
-  it("requires HTTPS for remote bridges but permits localhost HTTP", () => {
-    expect(validateBridgeUrl("https://bridge.example.com").hostname).toBe("bridge.example.com");
-    expect(validateBridgeUrl("http://127.0.0.1:9090").port).toBe("9090");
-    expect(() => validateBridgeUrl("http://bridge.example.com")).toThrow();
   });
 
   it("matches NO_PROXY entries by exact host or subdomain", () => {

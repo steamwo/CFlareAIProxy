@@ -29,9 +29,6 @@
     "codex:refresh": "node scripts/codex-auth.mjs refresh",
     "codex:sync": "node scripts/codex-auth.mjs sync",
     "codex:watch": "node scripts/codex-auth.mjs watch",
-    "proxy-bridge:install": "npm --prefix proxy-bridge install",
-    "proxy-bridge:start": "npm --prefix proxy-bridge start",
-    "proxy-bridge:check": "npm --prefix proxy-bridge run check",
     "build:web": "vite build",
     "typecheck:worker": "tsc -p tsconfig.worker.json --noEmit",
     "typecheck:web": "vue-tsc -p web/tsconfig.json --noEmit",
@@ -47,16 +44,17 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260722.1",
-    "typescript": "5.9.3",
-    "vitest": "3.2.4",
-    "wrangler": "4.113.0",
     "@types/node": "22.20.1",
     "@vitejs/plugin-vue": "6.0.7",
+    "rollup-plugin-visualizer": "7.0.1",
+    "typescript": "5.9.3",
     "vite": "7.3.6",
-    "vue-tsc": "3.3.7"
+    "vitest": "3.2.4",
+    "vue-tsc": "3.3.7",
+    "wrangler": "4.113.0"
   },
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.13.0"
   },
   "cloudflare": {
     "bindings": {
@@ -80,12 +78,6 @@
       },
       "ADMIN_PASSWORD": {
         "description": "Administrator login password for /admin. Use a strong unique password."
-      },
-      "PROXY_BRIDGE_URL": {
-        "description": "Legacy compatibility setting. Native HTTP/SOCKS proxying no longer requires a bridge."
-      },
-      "PROXY_BRIDGE_TOKEN": {
-        "description": "Legacy compatibility setting. Native HTTP/SOCKS proxying no longer requires a bridge token."
       }
     }
   },

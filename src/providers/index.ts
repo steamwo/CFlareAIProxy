@@ -1,5 +1,5 @@
 import type { Env, ProviderKind, ProxyRequestContext, UpstreamBuildResult } from "../types";
-import { buildCodexRequest } from "./codex";
+import { buildCodexCustomToolRequest } from "./codex-custom-tools";
 import { buildGenericRequest } from "./generic";
 import { buildKimiRequest } from "./kimi";
 import { buildOpenCodeRequest } from "./opencode";
@@ -10,7 +10,7 @@ export interface ProviderAdapter {
 }
 
 const adapters = new Map<ProviderKind, ProviderAdapter>([
-  ["codex", { build: (context) => buildCodexRequest(context) }],
+  ["codex", { build: (context) => buildCodexCustomToolRequest(context) }],
   ["kimi", { build: (context) => buildKimiRequest(context) }],
   ["qoder", { build: (context, env) => buildQoderRequest(context, env) }],
   ["opencode", { build: (context) => buildOpenCodeRequest(context) }],

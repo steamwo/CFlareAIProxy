@@ -12,6 +12,7 @@ interface OAuthSessionRow {
   flow: string;
   secret_ciphertext: string;
   payload_json: string;
+  last_polled_at: number | null;
   expires_at: number;
   created_at: number;
 }
@@ -119,7 +120,12 @@ async function readSession(env: Env, sessionIdOrState: string): Promise<{
     .bind(sessionIdOrState, sessionIdOrState, nowSeconds())
     .first<OAuthSessionRow>();
   if (!row) throw new GatewayError(404, "OAUTH_SESSION_NOT_FOUND", "OAuth session was not found or has expired");
-  const secret = parseJson<OAuthSessionSecret>(await decryptSecret(row.secret_ciphertext, env.MASTER_KEY), {});
+  // Sessions written just before a MASTER_KEY rotation must stay readable, otherwise an
+  // authorization flow already in flight dies mid-callback with an opaque DECRYPT_FAILED.
+  const secret = parseJson<OAuthSessionSecret>(
+    await decryptSecret(row.secret_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS),
+    {},
+  );
   return { row, secret, payload: parseJson<Record<string, unknown>>(row.payload_json, {}) };
 }
 
@@ -326,10 +332,43 @@ async function finalizeCredential(
   return { status: "complete", credentialId, message: "OAuth credential created" };
 }
 
+/**
+ * Shortest gap the gateway will forward a poll upstream, in seconds.
+ *
+ * `intervalSeconds` in the start response is only advice — nothing stopped a client from
+ * polling in a tight loop, which hammers the provider's device-code endpoint and pays for a
+ * session read plus a decrypt on every iteration. This floor sits just under the smallest
+ * interval we hand out (2s for Qoder) so a well-behaved console is never throttled by the
+ * advice it was given, while a loop collapses to one upstream call per window.
+ */
+const POLL_MIN_INTERVAL_SECONDS = 2;
+
+/**
+ * Atomically claims the right to forward one poll upstream. The conditional UPDATE is the
+ * synchronization point: concurrent requests may read the same session, but only one can
+ * advance last_polled_at inside a window.
+ */
+async function claimPollSlot(env: Env, row: OAuthSessionRow, at: number): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE oauth_sessions SET last_polled_at=?
+     WHERE id=? AND (last_polled_at IS NULL OR last_polled_at<=?)`,
+  ).bind(at, row.id, at - POLL_MIN_INTERVAL_SECONDS).run();
+  return Number(result.meta.changes ?? 0) > 0;
+}
+
 export async function pollOAuth(env: Env, providerId: string, sessionId: string): Promise<OAuthPollResult> {
   const provider = await getProvider(env, providerId);
   const session = await readSession(env, sessionId);
   if (session.row.provider_id !== providerId) throw new GatewayError(400, "OAUTH_PROVIDER_MISMATCH", "OAuth session belongs to another provider");
+
+  const now = nowSeconds();
+  if (!(await claimPollSlot(env, session.row, now))) {
+    // Deliberately shaped like any other pending result: a caller that is polling too fast
+    // learns only that authorization has not completed, which is also what it would have
+    // learned from the upstream. Surfacing "you are rate limited" would tell an abuser
+    // exactly how to pace itself.
+    return { status: "pending", retryAfterSeconds: POLL_MIN_INTERVAL_SECONDS };
+  }
 
   if (session.row.flow === "device_code") {
     const tokenUrl = stringValue(provider.auth, "token_url");

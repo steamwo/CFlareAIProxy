@@ -1,41 +1,39 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { NButton, NCard, NDescriptions, NDescriptionsItem, NPagination, NSelect, NSpace, NSwitch, NTag, useMessage } from "naive-ui";
+import { NButton, NCard, NDescriptions, NDescriptionsItem, NPagination, NSelect, NSpace, NSwitch, NTag } from "naive-ui";
 import { KeyRound, RefreshCw, Route } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import ProviderIcon from "../components/ProviderIcon.vue";
 import ProxyEditor from "../components/ProxyEditor.vue";
 import { api, jsonBody } from "../api";
+import { useApiRequest } from "../composables/useApiRequest";
 import type { Channel, PoolStrategy } from "../types";
 
 const rows = ref<Channel[]>([]);
-const loading = ref(false);
 const proxyOpen = ref(false);
 const selected = ref<Channel | null>(null);
 const page = ref(1);
 const pageSize = ref(6);
-const message = useMessage();
+const { loading, run } = useApiRequest();
 const poolOptions = [
   { label: "轮询", value: "round_robin" },
   { label: "填满优先", value: "fill_first" },
-  { label: "按权重", value: "weighted" },
+  { label: "按权重（兼容）", value: "weighted" },
+  { label: "平滑加权", value: "smooth_weighted" },
   { label: "最少并发", value: "least_inflight" },
 ];
 const pageCount = computed(() => Math.max(1, Math.ceil(rows.value.length / pageSize.value)));
 const pagedRows = computed(() => rows.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
 watch(pageCount, (count) => { if (page.value > count) page.value = count; });
 async function load() {
-  loading.value = true;
-  try { rows.value = (await api<{ data: Channel[] }>("/channels")).data; }
-  catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
-  finally { loading.value = false; }
+  await run(async () => { rows.value = (await api<{ data: Channel[] }>("/channels")).data; });
 }
 async function update(row: Channel, patch: { enabled?: boolean; poolStrategy?: PoolStrategy }) {
-  try {
-    await api(`/channels/${row.id}`, { method: "PATCH", body: jsonBody(patch) });
-    message.success("渠道设置已更新");
-    await load();
-  } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
+  const updated = await run(
+    () => api(`/channels/${row.id}`, { method: "PATCH", body: jsonBody(patch) }),
+    { loading: null, success: "渠道设置已更新" },
+  );
+  if (updated !== undefined) await load();
 }
 function editProxy(row: Channel) { selected.value = row; proxyOpen.value = true; }
 onMounted(load);

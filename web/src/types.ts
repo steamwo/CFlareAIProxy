@@ -1,4 +1,4 @@
-export type PoolStrategy = "round_robin" | "fill_first" | "weighted" | "least_inflight";
+export type PoolStrategy = "round_robin" | "fill_first" | "weighted" | "smooth_weighted" | "least_inflight";
 
 export interface ApiEnvelope<T> { data: T }
 export interface Session { authenticated: boolean; username: string; expiresAt: number; service: string }
@@ -9,7 +9,6 @@ export interface ProxySummary {
   proxyHost?: string;
   hasProviderOverride?: boolean;
   hasSystemProxy?: boolean;
-  bridgeConfigured?: boolean;
   runtimeReady?: boolean;
 }
 export interface Channel {
@@ -34,7 +33,10 @@ export interface DiscoveredModel {
   provider_id: string; credential_id: string; model_id: string; display_name: string;
   endpoint: string; owned_by: string; enabled: number; discovered_at: number;
 }
-export interface PublicModel { id: string; object?: string; owned_by?: string; display_name?: string; endpoints?: string[] }
+export interface PublicModel {
+  id: string; object?: string; owned_by?: string; display_name?: string; endpoints?: string[];
+  x_cflare_provider?: string; x_cflare_upstream_model?: string;
+}
 export interface QuotaWindow {
   key: string; label: string; limit?: number; remaining?: number; usedPercent?: number;
   remainingPercent?: number; resetAt?: number; windowSeconds?: number;

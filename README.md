@@ -27,6 +27,8 @@ CFlareAIProxy 把不同上游的授权方式、请求协议、账号池和故障
 | **能力感知** | 模型目录可暴露 tools、图片、推理等级和输入/输出模态；请求进入上游前会做能力校验。 |
 | **原生代理** | Worker 原生 HTTP CONNECT / SOCKS5；支持账号、供应商和系统三级代理策略及 `direct`/`none` 覆盖。 |
 | **限流与成本** | 每个网关 Key 可限制 RPM、并发、月 Token 和模型范围；日志记录缓存 Token 与估算费用。 |
+| **故障告警** | 熔断、账号耗尽、队列死信与定时任务失败可推送到自定义 webhook，带去重窗口。 |
+| **备份与轮换** | 配置可整体导出/恢复（凭据保持密文）；`MASTER_KEY` 支持不停机轮换。 |
 | **一体化管理台** | Vue 3 SPA 与 Hono API 由同一个 Worker 提供，无需单独部署前端和跨域服务。 |
 
 ## 架构
@@ -65,7 +67,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | **OpenAI Codex** | PKCE OAuth / 授权 JSON / 本地助手 | Responses 为主，Chat 与 Completions 自动转换 | 支持流式错误识别、完成事件检查和输出重建。 |
 | **Kimi Coding** | Device OAuth | Chat、Responses、Completions 转换 | 处理工具消息关联、模型名归一化和流式 usage。 |
-| **Qoder** | PKCE Device OAuth | Qoder 专用请求与 SSE | 内置 COSY 签名、模型发现和个人/组织额度。 |
+| **Qoder** | PKCE Device OAuth | Qoder 专用请求与 SSE | 模型列表自动将 `display_name` 作为公开名称，渠道内部映射到匿名模型名；内置 COSY 签名和个人/组织额度。 |
 | **OpenCode Zen** | API Key / 匿名免费模型 | Responses、Anthropic Messages、Google GenerateContent、Chat | 官方线路失败后可按配置尝试镜像线路。 |
 | **OpenAI-compatible** | API Key | Chat、Responses 或 both | 可发现模型、设置公开别名、权重和代理。 |
 
@@ -250,9 +252,10 @@ curl https://你的-worker地址/health
 
 ## 安全模型
 
-- 上游 Token、API Key 和 Proxy URL 使用 `MASTER_KEY` 进行 AES-GCM 加密；
+- 上游 Token、API Key 和 Proxy URL 使用 `MASTER_KEY` 进行 AES-GCM 加密，支持不停机轮换；
 - 网关 Key 只保存哈希，完整值仅在创建时显示一次；
 - 管理台使用 HttpOnly Cookie，同域部署避免额外的跨域凭据风险；
+- 管理台登录失败会按 IP 递增退避并有全局兜底，锁定期内对错密码不可区分；
 - 默认不保存完整提示词和模型输出；
 - 内置渠道端点、OAuth 配置和协议规则由代码注册表固定；
 - 代理配置不会在管理接口中回显完整认证信息；
@@ -275,6 +278,7 @@ pnpm run smoke:admin
 | --- | --- |
 | [API 与客户端接入](docs/API_USAGE.md) | Curl、OpenAI SDK、流式请求、错误格式和模型能力字段。 |
 | [部署与升级指南](DEPLOYMENT.md) | 本地运行、Cloudflare 部署、资源、Secret、migration 与排障。 |
+| [运维手册](docs/OPERATIONS.md) | 登录限流、故障告警、配置备份、密钥轮换与定时任务。 |
 | [管理台说明](docs/ADMIN_UI.md) | 页面职责、账号与供应商边界、路由和登录架构。 |
 | [代理与出口策略](docs/PROVIDER_PROXY.md) | 账号/供应商/系统代理优先级、协议和失败行为。 |
 | [模型、配额与 OpenCode](docs/MODELS_QUOTAS_OPENCODE.md) | 动态模型、能力元数据、额度快照和 OpenCode 双向概念。 |

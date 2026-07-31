@@ -4,10 +4,10 @@ import { GatewayError } from "./errors";
 import {
   isOpenCodeAnonymousCredential, isOpenCodeAnonymousModel, openCodeAnonymousCredential, openCodeAnonymousCredentialRow,
 } from "./providers/opencode-anonymous";
+import { discoveredModelAllowed, normalizeAllowedModelNames, publicDiscoveredModelId, QODER_PROVIDER_ID, sortModelRoutes } from "./qoder-model-routing";
 import type {
   Credential,
   CredentialRow,
-  DiscoveredModelRow,
   Env,
   GatewayEndpoint,
   GatewayKeyRow,
@@ -21,7 +21,7 @@ import type {
   ProxyProtocol,
   QuotaSnapshot,
   QuotaSnapshotRow,
-  UsageEvent,
+  QuotaWindow,
 } from "./types";
 import { parseJson, sha256Hex } from "./utils";
 
@@ -31,6 +31,27 @@ export async function getProvider(env: Env, providerId: string): Promise<Provide
     .first<ProviderRow>();
   if (!row) throw new GatewayError(404, "PROVIDER_NOT_FOUND", `Provider ${providerId} was not found`);
   return hydrateProvider(row);
+}
+
+/**
+ * Per-sweep provider cache for batch jobs.
+ *
+ * Quota and catalogue refreshes order accounts by staleness, so a batch routinely holds
+ * many accounts of the same channel; without a cache each re-reads the identical provider
+ * row. Passed explicitly rather than held at module scope so a long-lived isolate can never
+ * serve a provider row an operator has since edited.
+ */
+export type ProviderCache = Map<string, Promise<ProviderConfig>>;
+
+export function loadCachedProvider(env: Env, providerId: string, cache?: ProviderCache): Promise<ProviderConfig> {
+  if (!cache) return getProvider(env, providerId);
+  const cached = cache.get(providerId);
+  if (cached) return cached;
+  const pending = getProvider(env, providerId);
+  // A rejected lookup is evicted so a transient failure is retried by the next account.
+  pending.catch(() => cache.delete(providerId));
+  cache.set(providerId, pending);
+  return pending;
 }
 
 export function hydrateProvider(row: ProviderRow): ProviderConfig {
@@ -69,7 +90,6 @@ function maskedProxy(value: string | null): Omit<ProviderProxySummary, "source" 
     enabled: Boolean(value),
     proxyProtocol,
     proxyHost,
-    bridgeConfigured: false,
     runtimeReady,
   };
 }
@@ -77,7 +97,7 @@ function maskedProxy(value: string | null): Omit<ProviderProxySummary, "source" 
 async function readSystemProxyUrl(env: Env): Promise<string> {
   const row = await env.DB.prepare("SELECT value_ciphertext FROM system_settings WHERE key='system_proxy_url'")
     .first<{ value_ciphertext: string | null }>();
-  return row?.value_ciphertext ? await decryptSecret(row.value_ciphertext, env.MASTER_KEY) : "";
+  return row?.value_ciphertext ? await decryptSecret(row.value_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS) : "";
 }
 
 async function readProviderProxyUrl(env: Env, providerId: string): Promise<string> {
@@ -85,7 +105,7 @@ async function readProviderProxyUrl(env: Env, providerId: string): Promise<strin
     .bind(providerId)
     .first<{ enabled: number; proxy_url_ciphertext: string | null }>();
   if (!row || row.enabled !== 1 || !row.proxy_url_ciphertext) return "";
-  return decryptSecret(row.proxy_url_ciphertext, env.MASTER_KEY);
+  return decryptSecret(row.proxy_url_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS);
 }
 
 export async function getProviderProxyConfig(env: Env, providerId: string): Promise<ProviderProxyConfig | null> {
@@ -96,9 +116,7 @@ export async function getProviderProxyConfig(env: Env, providerId: string): Prom
   return {
     providerId,
     enabled: true,
-    bridgeUrl: env.PROXY_BRIDGE_URL?.trim() ?? "",
     proxyUrl,
-    bridgeToken: env.PROXY_BRIDGE_TOKEN ?? "",
     noProxy: [],
     connectTimeoutMs: 20_000,
     requestTimeoutMs: 120_000,
@@ -133,16 +151,19 @@ export async function upsertProviderProxyConfig(
   const now = Math.floor(Date.now() / 1000);
   const proxyUrl = input.proxyUrl.trim();
   const ciphertext = proxyUrl ? await encryptSecret(proxyUrl, env.MASTER_KEY) : null;
+  // bridge_url / bridge_token_ciphertext are dead columns from the removed proxy bridge.
+  // Migration 0004 declares bridge_url NOT NULL and shipped migrations are append-only, so
+  // the write keeps pinning them to empty/NULL rather than dropping the columns.
   await env.DB.prepare(
     `INSERT INTO provider_proxies
       (provider_id,enabled,bridge_url,proxy_url_ciphertext,bridge_token_ciphertext,no_proxy_json,
        connect_timeout_ms,request_timeout_ms,created_at,updated_at)
-     VALUES(?,?,?, ?,NULL,'[]',20000,120000,?,?)
+     VALUES(?,?,'', ?,NULL,'[]',20000,120000,?,?)
      ON CONFLICT(provider_id) DO UPDATE SET
        enabled=excluded.enabled,bridge_url='',proxy_url_ciphertext=excluded.proxy_url_ciphertext,
        bridge_token_ciphertext=NULL,no_proxy_json='[]',connect_timeout_ms=20000,
        request_timeout_ms=120000,updated_at=excluded.updated_at`,
-  ).bind(input.providerId, proxyUrl ? 1 : 0, "", ciphertext, now, now).run();
+  ).bind(input.providerId, proxyUrl ? 1 : 0, ciphertext, now, now).run();
 }
 
 export async function deleteProviderProxyConfig(env: Env, providerId: string): Promise<void> {
@@ -168,6 +189,47 @@ export async function deleteSystemProxyUrl(env: Env): Promise<void> {
   await env.DB.prepare("DELETE FROM system_settings WHERE key='system_proxy_url'").run();
 }
 
+export async function gatewayKeyAllowsModel(env: Env, publicModel: string, allowedModels: string[]): Promise<boolean> {
+  if (allowedModels.length === 0 || allowedModels.includes(publicModel)) return true;
+  const allowed = new Set(allowedModels);
+  if (![...allowed].some((model) => model.startsWith(`${QODER_PROVIDER_ID}/`))) return false;
+  const result = await env.DB.prepare(
+    `SELECT model_id FROM discovered_models
+     WHERE provider_id='qoder' AND credential_id='' AND display_name=? AND enabled=1
+     GROUP BY model_id`,
+  ).bind(publicModel).all<{ model_id: string }>();
+  return result.results.some((row) => allowed.has(`${QODER_PROVIDER_ID}/${row.model_id}`));
+}
+
+async function loadQoderAllowedModelAliases(env: Env): Promise<Map<string, string>> {
+  const result = await env.DB.prepare(
+    `SELECT model_id,display_name,discovered_at FROM discovered_models
+     WHERE provider_id='qoder' AND credential_id='' AND enabled=1
+     ORDER BY discovered_at DESC,model_id ASC`,
+  ).all<{ model_id: string; display_name: string; discovered_at: number }>();
+  const aliases = new Map<string, string>();
+  for (const row of result.results) {
+    const displayName = row.display_name.trim();
+    if (displayName && !aliases.has(row.model_id)) aliases.set(row.model_id, displayName);
+  }
+  return aliases;
+}
+
+export async function normalizeGatewayAllowedModelLists(
+  env: Env,
+  allowedModelLists: readonly (readonly string[])[],
+): Promise<string[][]> {
+  const normalized = allowedModelLists.map((models) => normalizeAllowedModelNames(models, new Map()));
+  const legacyPrefix = `${QODER_PROVIDER_ID}/`;
+  if (!normalized.some((models) => models.some((model) => model.startsWith(legacyPrefix)))) return normalized;
+  const aliases = await loadQoderAllowedModelAliases(env);
+  return normalized.map((models) => normalizeAllowedModelNames(models, aliases));
+}
+
+export async function normalizeGatewayAllowedModels(env: Env, allowedModels: readonly string[]): Promise<string[]> {
+  return (await normalizeGatewayAllowedModelLists(env, [allowedModels]))[0] ?? [];
+}
+
 export async function listRoutesForModel(
   env: Env,
   publicModel: string,
@@ -179,7 +241,39 @@ export async function listRoutesForModel(
      WHERE r.public_model = ? AND r.enabled = 1 AND r.endpoint = ?
      ORDER BY r.priority ASC, r.weight DESC, r.created_at ASC`,
   ).bind(publicModel, endpoint).all<ModelRouteRow>();
-  if (configured.results.length) return configured.results;
+
+  let qoderRoutes: ModelRouteRow[] = [];
+  if (!configured.results.some((route) => route.provider_id === QODER_PROVIDER_ID)) {
+    const discovered = await env.DB.prepare(
+      `SELECT dm.model_id, MIN(dm.discovered_at) AS created_at, p.options_json
+       FROM discovered_models dm
+       JOIN providers p ON p.id=dm.provider_id AND p.kind='qoder' AND p.enabled=1
+       WHERE dm.provider_id='qoder' AND dm.credential_id='' AND dm.display_name=?
+         AND dm.endpoint=? AND dm.enabled=1
+       GROUP BY dm.model_id,p.options_json
+       ORDER BY MAX(dm.discovered_at) DESC,dm.model_id ASC
+       LIMIT 1`,
+    ).bind(publicModel, endpoint).all<{ model_id: string; created_at: number; options_json: string }>();
+    qoderRoutes = discovered.results.map((row) => {
+      const options = parseJson<Record<string, unknown>>(row.options_json, {});
+      const weight = typeof options.routing_weight === "number" ? Math.max(1, Math.floor(options.routing_weight)) : 1;
+      return {
+        id: `discovered:qoder:${endpoint}:${row.model_id}`,
+        public_model: publicModel,
+        provider_id: QODER_PROVIDER_ID,
+        upstream_model: row.model_id,
+        endpoint,
+        enabled: 1,
+        priority: 100,
+        weight,
+        options_json: JSON.stringify({ dynamic: true, channel_mapping: true }),
+        created_at: row.created_at,
+        updated_at: row.created_at,
+      };
+    });
+  }
+  const directRoutes = sortModelRoutes([...configured.results, ...qoderRoutes]);
+  if (directRoutes.length) return directRoutes;
 
   // Dynamically discovered models use provider/model. OpenAI-compatible providers
   // with an explicit model selection only expose the chosen aliases above.
@@ -223,7 +317,7 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
   const cached = await env.CONFIG_CACHE.get(cacheKey, "json").catch(() => null) as Array<Record<string, unknown>> | null;
   if (cached) {
     const allowed = new Set(allowedModels);
-    return allowed.size ? cached.filter((model) => allowed.has(String(model.id))) : cached;
+    return allowed.size ? cached.filter((model) => discoveredModelAllowed(model, allowed)) : cached;
   }
 
   const [discoveredResult, routeResult] = await Promise.all([
@@ -235,7 +329,10 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
        FROM discovered_models dm
        JOIN providers p ON p.id=dm.provider_id AND p.enabled=1
        LEFT JOIN credentials c ON c.id=dm.credential_id AND c.enabled=1
-       WHERE dm.enabled=1 AND (dm.credential_id='' OR c.id IS NOT NULL)
+       WHERE dm.enabled=1 AND (
+         (p.kind='qoder' AND dm.credential_id='')
+         OR (p.kind<>'qoder' AND (dm.credential_id='' OR c.id IS NOT NULL))
+       )
        GROUP BY dm.provider_id,dm.model_id
        ORDER BY dm.provider_id,dm.model_id`,
     ).all<{
@@ -254,7 +351,7 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
   for (const row of discoveredResult.results) {
     const options = parseJson<Record<string, unknown>>(row.options_json, {});
     if (row.kind === "openai-compatible" && Array.isArray(options.selected_models)) continue;
-    const id = `${row.provider_id}/${row.model_id}`;
+    const id = publicDiscoveredModelId(row.kind, row.provider_id, row.model_id, row.display_name || row.model_id);
     modelMap.set(id, {
       id,
       object: "model",
@@ -268,21 +365,29 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
     });
   }
   for (const row of routeResult.results) {
+    const existing = modelMap.get(row.public_model);
+    const routeProviders = row.providers ? row.providers.split(",") : [];
+    const existingProviders = Array.isArray(existing?.x_cflare_providers)
+      ? existing.x_cflare_providers.map(String)
+      : typeof existing?.x_cflare_provider === "string" ? [existing.x_cflare_provider] : [];
+    const routeEndpoints = row.endpoints ? row.endpoints.split(",") : [];
+    const existingEndpoints = Array.isArray(existing?.x_cflare_endpoints) ? existing.x_cflare_endpoints.map(String) : [];
     modelMap.set(row.public_model, {
+      ...existing,
       id: row.public_model,
       object: "model",
-      created: row.created_at,
-      owned_by: "cflare-route",
+      created: Math.min(Number(existing?.created ?? row.created_at), row.created_at),
+      owned_by: existing?.owned_by ?? "cflare-route",
       display_name: row.public_model,
-      x_cflare_providers: row.providers ? row.providers.split(",") : [],
-      x_cflare_endpoints: row.endpoints ? row.endpoints.split(",") : [],
+      x_cflare_providers: [...new Set([...existingProviders, ...routeProviders])],
+      x_cflare_endpoints: [...new Set([...existingEndpoints, ...routeEndpoints])],
       x_cflare_managed_route: true,
     });
   }
   const models = [...modelMap.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
   await env.CONFIG_CACHE.put(cacheKey, JSON.stringify(models), { expirationTtl: 120 }).catch(() => undefined);
   const allowed = new Set(allowedModels);
-  return allowed.size ? models.filter((model) => allowed.has(String(model.id))) : models;
+  return allowed.size ? models.filter((model) => discoveredModelAllowed(model, allowed)) : models;
 }
 
 export async function listCredentialRows(env: Env, providerId: string): Promise<CredentialRow[]> {
@@ -318,8 +423,13 @@ function exhaustedUntil(snapshot: QuotaSnapshot, row: Pick<QuotaSnapshotRow, "fe
     return { exhausted: retryAt > now, reason: "可用余额已耗尽", retryAt };
   }
 
+  // Response rate-limit headers are short rolling counters (typically per minute) captured on every
+  // upstream call. They are display-only: treating `remaining: 0` as quota exhaustion would park the
+  // account for the whole snapshot TTL over a limit that resets within a minute.
+  const windowSource = (window: QuotaWindow): QuotaSnapshot["source"] => window.source ?? snapshot.source;
   const windows = snapshot.windows.filter((window) =>
-    window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined,
+    windowSource(window) !== "headers"
+    && (window.remaining !== undefined || window.remainingPercent !== undefined || window.usedPercent !== undefined),
   );
   if (!windows.length) return { exhausted: false };
   const isEmpty = (window: QuotaSnapshot["windows"][number]) =>
@@ -385,24 +495,6 @@ export async function listCredentialAvailabilityForModel(
   return output;
 }
 
-export async function listCredentialRowsForModel(
-  env: Env,
-  providerId: string,
-  upstreamModel: string,
-  endpoint: GatewayEndpoint,
-): Promise<CredentialRow[]> {
-  return (await listCredentialAvailabilityForModel(env, providerId, upstreamModel, endpoint))
-    .filter((entry) => entry.available)
-    .map((entry) => entry.row);
-}
-
-export async function listDiscoveredModelRows(env: Env, providerId?: string): Promise<DiscoveredModelRow[]> {
-  const result = providerId
-    ? await env.DB.prepare("SELECT * FROM discovered_models WHERE provider_id=? ORDER BY model_id,endpoint,credential_id").bind(providerId).all<DiscoveredModelRow>()
-    : await env.DB.prepare("SELECT * FROM discovered_models ORDER BY provider_id,model_id,endpoint,credential_id").all<DiscoveredModelRow>();
-  return result.results;
-}
-
 export async function getCredential(env: Env, credentialId: string): Promise<Credential> {
   if (isOpenCodeAnonymousCredential(credentialId)) return openCodeAnonymousCredential();
   const row = await env.DB.prepare("SELECT * FROM credentials WHERE id = ?")
@@ -411,10 +503,16 @@ export async function getCredential(env: Env, credentialId: string): Promise<Cre
   if (!row || row.enabled !== 1) {
     throw new GatewayError(503, "NO_CREDENTIAL", "No enabled credential is available", "upstream_error");
   }
+  // Both decryptions await the same memoized CryptoKey; running them together
+  // removes one serial await from the hot path.
+  const [secret, refreshToken] = await Promise.all([
+    decryptSecret(row.secret_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS),
+    row.refresh_ciphertext ? decryptSecret(row.refresh_ciphertext, env.MASTER_KEY, env.MASTER_KEY_PREVIOUS) : Promise.resolve(undefined),
+  ]);
   return {
     ...row,
-    secret: await decryptSecret(row.secret_ciphertext, env.MASTER_KEY),
-    refreshToken: row.refresh_ciphertext ? await decryptSecret(row.refresh_ciphertext, env.MASTER_KEY) : undefined,
+    secret,
+    refreshToken,
     metadata: parseJson<Record<string, unknown>>(row.metadata_json, {}),
   };
 }
@@ -462,7 +560,8 @@ export async function createCredential(
       now,
     )
     .run();
-  await env.CONFIG_CACHE.delete(`provider:${input.providerId}`);
+  // No `provider:<id>` KV key is ever written or read (getProvider goes straight to
+  // D1), so the former invalidation here was a pure KV round trip against a dead key.
   return id;
 }
 
@@ -529,6 +628,7 @@ export async function createGatewayKey(
   for (const byte of random) encoded += byte.toString(16).padStart(2, "0");
   const key = `sk_cfapi_${encoded}`;
   const now = Math.floor(Date.now() / 1000);
+  const allowedModels = await normalizeGatewayAllowedModels(env, input.allowedModels ?? []);
   await env.DB.prepare(
     `INSERT INTO gateway_keys
       (id, name, key_prefix, key_hash, enabled, rpm, max_concurrency,
@@ -543,7 +643,7 @@ export async function createGatewayKey(
       input.rpm ?? 60,
       input.maxConcurrency ?? 8,
       input.monthlyTokenLimit ?? 0,
-      JSON.stringify(input.allowedModels ?? []),
+      JSON.stringify(allowedModels),
       input.expiresAt ?? null,
       now,
       now,
@@ -552,54 +652,3 @@ export async function createGatewayKey(
   return { id, key };
 }
 
-export async function insertUsage(env: Env, event: UsageEvent): Promise<void> {
-  let costMicros = 0;
-  if (event.providerId && event.upstreamModel) {
-    const price = await env.DB.prepare(
-      `SELECT input_micros_per_million, output_micros_per_million, cache_micros_per_million
-       FROM model_prices WHERE provider_id = ? AND model = ?`,
-    ).bind(event.providerId, event.upstreamModel).first<{
-      input_micros_per_million: number;
-      output_micros_per_million: number;
-      cache_micros_per_million: number;
-    }>();
-    if (price) {
-      const cachedTokens = Math.min(event.usage.promptTokens, event.usage.cachedTokens);
-      const uncachedInputTokens = Math.max(0, event.usage.promptTokens - cachedTokens);
-      costMicros = Math.max(0, Math.ceil(
-        (uncachedInputTokens * price.input_micros_per_million
-          + cachedTokens * price.cache_micros_per_million
-          + event.usage.completionTokens * price.output_micros_per_million) / 1_000_000,
-      ));
-    }
-  }
-
-  await env.DB.prepare(
-    `INSERT OR REPLACE INTO request_logs
-      (request_id, gateway_key_id, provider_id, credential_id, public_model, upstream_model,
-       endpoint, status_code, prompt_tokens, completion_tokens, cached_tokens, total_tokens, cost_micros, latency_ms,
-       first_token_ms, error_code, error_message, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      event.requestId,
-      event.gatewayKeyId ?? null,
-      event.providerId ?? null,
-      event.credentialId ?? null,
-      event.publicModel ?? null,
-      event.upstreamModel ?? null,
-      event.endpoint ?? null,
-      event.statusCode,
-      event.usage.promptTokens,
-      event.usage.completionTokens,
-      event.usage.cachedTokens,
-      event.usage.totalTokens,
-      costMicros,
-      event.latencyMs,
-      event.firstTokenMs ?? null,
-      event.errorCode ?? null,
-      event.errorMessage?.slice(0, 1000) ?? null,
-      event.createdAt,
-    )
-    .run();
-}

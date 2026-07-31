@@ -1,7 +1,7 @@
 import type { Env, ProviderKind } from "./types";
 import { parseJson } from "./utils";
 
-const ALLOWED_REASONING_LEVELS = new Set(["none", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const ALLOWED_REASONING_LEVELS = new Set(["none", "auto", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 
 export interface CodexClientCatalogContext {
   multiAgentModels: Set<string>;
@@ -39,6 +39,8 @@ function modelProviders(model: Record<string, unknown>): string[] {
 function reasoningDescription(level: string): string {
   switch (level) {
     case "none": return "No reasoning";
+    case "auto": return "Automatically select the reasoning depth";
+    case "minimal": return "Fastest responses with minimal reasoning";
     case "low": return "Fast responses with lighter reasoning";
     case "medium": return "Balances speed and reasoning depth for everyday tasks";
     case "high": return "Greater reasoning depth for complex problems";
@@ -53,7 +55,7 @@ function reasoningMetadata(capabilities: Record<string, unknown>): { levels?: Ar
   const levels = stringArray(capabilities.reasoningLevels ?? capabilities.reasoning_levels)
     .filter((level) => ALLOWED_REASONING_LEVELS.has(level));
   if (levels.length === 0) return {};
-  const defaultLevel = levels.includes("medium") ? "medium" : levels.find((level) => level !== "none") ?? levels[0];
+  const defaultLevel = levels.includes("medium") ? "medium" : levels.find((level) => level !== "none" && level !== "auto") ?? levels.find((level) => level === "auto") ?? levels[0];
   return { levels: levels.map((effort) => ({ effort, description: reasoningDescription(effort) })), defaultLevel };
 }
 
