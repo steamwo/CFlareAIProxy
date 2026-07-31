@@ -1,6 +1,7 @@
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { normalizeBaseUrl, sanitizeHeaders } from "../utils";
 import { providerAuthHeaders } from "./headers";
+import { resolveCodexHttpSessionId } from "./codex-session-continuity";
 
 function contentToText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -189,7 +190,7 @@ function normalizeCodexBody(body: Record<string, unknown>, model: string): Recor
   return output;
 }
 
-export function buildCodexRequest(context: ProxyRequestContext): UpstreamBuildResult {
+export async function buildCodexRequest(context: ProxyRequestContext): Promise<UpstreamBuildResult> {
   const baseUrl = normalizeBaseUrl(context.provider.base_url);
   const headers = sanitizeHeaders(context.originalRequest.headers, context.provider.headers);
   providerAuthHeaders(context.provider, context.credential).forEach((value, key) => headers.set(key, value));
@@ -201,6 +202,12 @@ export function buildCodexRequest(context: ProxyRequestContext): UpstreamBuildRe
   }
   const translated = context.endpoint === "responses" ? { ...context.body } : chatToResponses(context.body, context.upstreamModel);
   const body = normalizeCodexBody(translated, context.upstreamModel);
+  const sessionId = await resolveCodexHttpSessionId(context.body, context.originalRequest, context.provider.id);
+  if (sessionId) {
+    body.prompt_cache_key = sessionId;
+    headers.set("session_id", sessionId);
+    headers.set("Conversation_id", sessionId);
+  }
   return {
     url: `${baseUrl}${context.provider.endpoints.responses ?? "/responses"}`,
     init: { method: "POST", headers, body: JSON.stringify(body), redirect: "manual" },
