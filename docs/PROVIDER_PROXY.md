@@ -1,6 +1,6 @@
 # 代理与出口策略
 
-CFlareAIProxy 在 Cloudflare Worker 内使用原生 TCP Socket 实现 HTTP CONNECT 与 SOCKS5 代理。当前版本不依赖 Proxy Bridge，并且在选中代理后失败时不会静默回退到 Worker 直连出口。
+CFlareAIProxy 在 Cloudflare Worker 内使用原生 TCP Socket 实现 HTTP CONNECT、SOCKS4/4a 与 SOCKS5 代理。当前版本不依赖 Proxy Bridge，并且在选中代理后失败时不会静默回退到 Worker 直连出口。
 
 ## 代理优先级
 
@@ -70,6 +70,8 @@ none
 
 ```text
 http://user:pass@host:port
+socks4://user@host:port
+socks4a://user@host:port
 socks5://user:pass@host:port
 socks5h://user:pass@host:port
 ```
@@ -78,6 +80,7 @@ socks5h://user:pass@host:port
 
 - HTTPS 上游通过 HTTP CONNECT 或 SOCKS5 隧道建立 TLS；
 - 使用 HTTP 代理访问 HTTPS 上游时，Proxy URL 仍填写 `http://`，不是 `https://`；
+- `socks4://` 只接受 IPv4 目标；`socks4a://` 会把域名交给代理解析；URL 用户名映射为 SOCKS4 USERID，SOCKS4/4a 不支持密码认证；
 - `socks5h://` 与 `socks5://` 在 Worker 实现中都由代理连接目标主机；建议使用 `socks5h://` 明确表达远端解析意图；
 - 代理用户名和密码支持 URL 编码。
 
@@ -86,6 +89,7 @@ socks5h://user:pass@host:port
 ```text
 http://proxy.example.com:8080
 http://alice:p%40ss@proxy.example.com:8080
+socks4a://alice@127.0.0.1:1080
 socks5h://alice:secret@127.0.0.1:1080
 ```
 
@@ -100,6 +104,15 @@ Worker
             └─ TLS → api.example.com
 ```
 
+### SOCKS4/4a + HTTPS 上游
+
+```text
+Worker
+  └─ TCP → SOCKS4/4a Proxy
+       └─ SOCKS4 CONNECT api.example.com:443
+            └─ TLS → api.example.com
+```
+
 ### SOCKS5 + HTTPS 上游
 
 ```text
@@ -109,7 +122,7 @@ Worker
             └─ TLS → api.example.com
 ```
 
-Worker 会校验代理握手、CONNECT 状态、SOCKS5 认证结果、TLS 握手和上游 HTTP 响应头。
+Worker 会校验代理握手、HTTP CONNECT 状态、SOCKS4/4a 返回码、SOCKS5 认证结果、TLS 握手和上游 HTTP 响应头。
 
 ## 失败行为
 
@@ -117,6 +130,7 @@ Worker 会校验代理握手、CONNECT 状态、SOCKS5 认证结果、TLS 握手
 
 - 代理连接超时；
 - HTTP CONNECT 被拒绝；
+- SOCKS4/4a 拒绝连接或 SOCKS4 使用了域名目标；
 - SOCKS5 不支持所需认证方式；
 - SOCKS5 用户名或密码错误；
 - 代理无法连接目标主机；

@@ -6,7 +6,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const CRLF = encoder.encode("\r\n");
 const HEADER_END = encoder.encode("\r\n\r\n");
-const NATIVE_PROXY_PROTOCOLS = new Set<ProxyProtocol>(["http", "socks", "socks5", "socks5h"]);
+const NATIVE_PROXY_PROTOCOLS = new Set<ProxyProtocol>(["http", "socks", "socks4", "socks4a", "socks5", "socks5h"]);
 const HOP_BY_HOP_HEADERS = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
   "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length",
@@ -272,11 +272,14 @@ export function validateProxyUrl(value: string): URL {
   const protocol = url.protocol.replace(/:$/, "") as ProxyProtocol;
   if (!NATIVE_PROXY_PROTOCOLS.has(protocol)) {
     if (protocol === "https") {
-      throw new GatewayError(400, "PROXY_PROTOCOL_UNSUPPORTED", "HTTPS 目标仍应填写 http:// 代理地址；当前原生代理支持 http://、socks5:// 和 socks5h://");
+      throw new GatewayError(400, "PROXY_PROTOCOL_UNSUPPORTED", "HTTPS 目标仍应填写 http:// 代理地址；当前原生代理支持 http://、socks4://、socks4a://、socks5:// 和 socks5h://");
     }
-    throw new GatewayError(400, "PROXY_PROTOCOL_UNSUPPORTED", "代理协议仅支持 http://、socks5:// 和 socks5h://");
+    throw new GatewayError(400, "PROXY_PROTOCOL_UNSUPPORTED", "代理协议仅支持 http://、socks4://、socks4a://、socks5:// 和 socks5h://");
   }
   if (!url.hostname) throw new GatewayError(400, "PROXY_URL_INVALID", "代理 URL 必须包含主机");
+  if ((protocol === "socks4" || protocol === "socks4a") && url.password) {
+    throw new GatewayError(400, "PROXY_URL_INVALID", "SOCKS4/4a 不支持密码认证；URL 用户名仅作为 USERID");
+  }
   if (!url.port) url.port = protocol === "http" ? "8080" : "1080";
   return url;
 }
@@ -345,6 +348,56 @@ async function httpConnect(context: TunnelContext): Promise<void> {
   const first = raw.split("\r\n", 1)[0] ?? "";
   const status = Number.parseInt(first.split(/\s+/)[1] ?? "0", 10);
   if (status < 200 || status >= 300) throw dialect.connectRejected(first);
+}
+
+function parseIpv4(hostname: string): Uint8Array | null {
+  const parts = hostname.split(".");
+  if (parts.length !== 4) return null;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^(?:0|[1-9]\d{0,2})$/.test(part)) return null;
+    const value = Number.parseInt(part, 10);
+    if (value > 255) return null;
+    octets.push(value);
+  }
+  return new Uint8Array(octets);
+}
+
+async function socks4Connect(context: TunnelContext, remoteDns: boolean): Promise<void> {
+  const { socket, reader, target, proxy, dialect, idleTimeoutMs } = context;
+  const userId = encoder.encode(decodeURIComponent(proxy.username || ""));
+  if (userId.byteLength > 255 || userId.includes(0)) throw dialect.proxyCredentialTooLong();
+
+  const port = Number.parseInt(targetPort(target), 10);
+  const host = encoder.encode(target.hostname);
+  if (host.byteLength === 0 || host.byteLength > 255 || host.includes(0)) throw dialect.hostTooLong();
+
+  let address: Uint8Array;
+  let domainSuffix = new Uint8Array();
+  if (remoteDns) {
+    address = new Uint8Array([0x00, 0x00, 0x00, 0x01]);
+    domainSuffix = concatBytes([host, new Uint8Array([0x00])]);
+  } else {
+    const ipv4 = parseIpv4(target.hostname);
+    if (!ipv4) {
+      throw new GatewayError(400, "SOCKS4_IPV4_REQUIRED", "socks4:// 仅支持 IPv4 目标；域名目标请使用 socks4a://");
+    }
+    address = ipv4;
+  }
+
+  const request = concatBytes([
+    new Uint8Array([0x04, 0x01, (port >> 8) & 0xff, port & 0xff]),
+    address,
+    userId,
+    new Uint8Array([0x00]),
+    domainSuffix,
+  ]);
+  await writeBytes(socket, request, idleTimeoutMs, dialect);
+
+  const reply = await reader.readExact(8);
+  if ((reply[0] !== 0x00 && reply[0] !== 0x04) || reply[1] !== 0x5a) {
+    throw dialect.socksConnectFailed(reply[1]);
+  }
 }
 
 async function socks5Connect(context: TunnelContext): Promise<void> {
@@ -513,7 +566,7 @@ export interface ProxyRequestOptions {
 }
 
 /**
- * Runs one HTTP request through an HTTP CONNECT or SOCKS5 proxy. Every socket
+ * Runs one HTTP request through an HTTP CONNECT, SOCKS4/4a, or SOCKS5 proxy. Every socket
  * operation past the connect phase is bounded by `idleTimeoutMs`, including the
  * reads performed lazily by the returned response body.
  */
@@ -532,6 +585,7 @@ export async function proxyRequest(options: ProxyRequestOptions): Promise<Respon
   try {
     const context: TunnelContext = { socket, reader, target, proxy, dialect, idleTimeoutMs };
     if (protocol === "http" && target.protocol === "https:") await httpConnect(context);
+    else if (protocol === "socks4" || protocol === "socks4a") await socks4Connect(context, protocol === "socks4a");
     else if (protocol !== "http") await socks5Connect(context);
 
     if (target.protocol === "https:") {
