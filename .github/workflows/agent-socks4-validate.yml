@@ -1,4 +1,4 @@
-name: Validate native SOCKS4 support
+name: Finalize and validate native SOCKS4 support
 
 on:
   push:
@@ -16,6 +16,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/restore-socks4-proxy
+      - name: Align documentation and error vocabulary
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path('src/credential-fetch.ts'): {
+                  'Credential proxy username or password is too long': 'Credential SOCKS username, password, or USERID is too long or invalid',
+                  'Credential SOCKS5 proxy failed to connect, code ${code}': 'Credential SOCKS proxy failed to connect, code ${code}',
+              },
+              Path('src/upstream-fetch.ts'): {
+                  'SOCKS5 用户名或密码过长': 'SOCKS 用户名、密码或 USERID 过长或无效',
+                  'SOCKS5 连接上游失败，代码 ${code}': 'SOCKS 代理连接上游失败，代码 ${code}',
+                  '标准 CONNECT/SOCKS5 代理': '标准 CONNECT/SOCKS 代理',
+              },
+              Path('README.md'): {
+                  'Worker 原生 HTTP CONNECT / SOCKS5；': 'Worker 原生 HTTP CONNECT / SOCKS4/4a / SOCKS5；',
+                  'http://user:pass@host:port\nsocks5://user:pass@host:port\nsocks5h://user:pass@host:port': 'http://user:pass@host:port\nsocks4://user@host:port\nsocks4a://user@host:port\nsocks5://user:pass@host:port\nsocks5h://user:pass@host:port',
+              },
+          }
+          for path, mapping in replacements.items():
+              text = path.read_text()
+              for old, new in mapping.items():
+                  if old not in text:
+                      raise SystemExit(f'missing marker in {path}: {old}')
+                  text = text.replace(old, new, 1)
+              path.write_text(text)
+          PY
       - uses: pnpm/action-setup@v4
         with:
           version: 11.9.0
@@ -36,10 +65,11 @@ jobs:
         run: pnpm run build:web
       - name: Wrangler dry run
         run: pnpm run config:check
-      - name: Remove temporary workflow
+      - name: Commit validated implementation
         run: |
           git rm .github/workflows/agent-socks4-validate.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Remove temporary SOCKS4 validation workflow"
+          git add README.md src/credential-fetch.ts src/upstream-fetch.ts
+          git commit -m "Finalize native SOCKS4 proxy support"
           git push origin HEAD:agent/restore-socks4-proxy
