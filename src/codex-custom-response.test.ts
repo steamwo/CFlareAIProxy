@@ -3,8 +3,8 @@ import { prepareCodexCustomToolResponse } from "./codex-custom-response";
 import { buildCodexCustomToolRequest } from "./providers/codex-custom-tools";
 import type { ProxyRequestContext } from "./types";
 
-function seedToolName(requestId: string, longName: string): string {
-  const result = buildCodexCustomToolRequest({
+async function seedToolName(requestId: string, longName: string): Promise<string> {
+  const result = await buildCodexCustomToolRequest({
     requestId,
     endpoint: "chat",
     publicModel: "public-model",
@@ -71,7 +71,7 @@ describe("Codex custom tool response translation", () => {
   it("restores long names and emits done-only arguments once", async () => {
     const requestId = "done-only";
     const longName = "apply_a_repository_patch_with_a_custom_tool_name_that_is_longer_than_sixty_four_characters";
-    const shortName = seedToolName(requestId, longName);
+    const shortName = await seedToolName(requestId, longName);
     const item = { id: "item-1", type: "custom_tool_call", call_id: "call-1", name: shortName, input: "payload" };
     const chunks = await streamChunks(requestId, [
       { type: "response.output_item.added", output_index: 4, item },
@@ -139,7 +139,7 @@ describe("Codex custom tool response translation", () => {
   it("converts non-streaming custom calls and restores their names", async () => {
     const requestId = "non-stream";
     const longName = "run_a_custom_repository_operation_with_a_name_that_exceeds_the_codex_tool_name_limit";
-    const shortName = seedToolName(requestId, longName);
+    const shortName = await seedToolName(requestId, longName);
     const upstream = Response.json({
       id: "response-1",
       created_at: 1,

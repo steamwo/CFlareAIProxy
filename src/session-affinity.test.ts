@@ -63,15 +63,12 @@ describe("session affinity signals", () => {
     expect(combined).toContain(conversationOnly);
   });
 
-  it("derives a stable fallback from the initial message root", async () => {
+  it("does not derive affinity from prompt or instruction content", async () => {
     const body = {
       instructions: "Be precise.",
       input: [{ role: "user", content: [{ type: "input_text", text: "Explain Durable Objects" }] }],
     };
-    const first = await buildSessionAffinityKey(request(), body, "tenant-a", "codex");
-    const second = await buildSessionAffinityKey(request(), body, "tenant-a", "codex");
-    expect(first).toBe(second);
-    expect(first).toMatch(/^v2:codex:tenant-a:[a-f0-9]{64}$/);
+    expect(await buildSessionAffinityKey(request(), body, "tenant-a", "codex")).toBeUndefined();
   });
 
   it("namespaces the same external session by provider and gateway key", async () => {

@@ -1,7 +1,7 @@
 const MAX_EXPLICIT_ID_LENGTH = 256;
 const CONTROL_CHARACTER = /\p{Cc}/u;
 
-interface SessionSignal {
+export interface SessionSignal {
   source: string;
   value: string;
   legacy?: boolean;
@@ -44,63 +44,7 @@ function conversationId(body: Record<string, unknown>): string | undefined {
   return normalizeExplicitId(record(conversation).id);
 }
 
-function contentText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return "";
-  return value.map((part) => {
-    if (typeof part === "string") return part;
-    const item = record(part);
-    if (typeof item.text === "string") return item.text;
-    if (item.content !== undefined) return contentText(item.content);
-    return "";
-  }).filter(Boolean).join("\n");
-}
-
-function messageHashSeed(body: Record<string, unknown>): string | undefined {
-  const instructions: string[] = [];
-  const topLevelInstructions = contentText(body.instructions);
-  if (topLevelInstructions) instructions.push(topLevelInstructions.slice(0, 400));
-
-  let firstUser = "";
-  const messages = Array.isArray(body.messages) ? body.messages : [];
-  for (const rawMessage of messages) {
-    const message = record(rawMessage);
-    const role = typeof message.role === "string" ? message.role : "";
-    const text = contentText(message.content).trim();
-    if (!text) continue;
-    if ((role === "system" || role === "developer") && instructions.length < 4) {
-      instructions.push(text.slice(0, 400));
-    } else if (role === "user" && !firstUser) {
-      firstUser = text.slice(0, 800);
-      break;
-    }
-  }
-
-  if (!firstUser) {
-    const input = body.input;
-    if (typeof input === "string") {
-      firstUser = input.trim().slice(0, 800);
-    } else if (Array.isArray(input)) {
-      for (const rawItem of input) {
-        const item = record(rawItem);
-        const role = typeof item.role === "string" ? item.role : "";
-        const text = contentText(item.content).trim();
-        if (!text) continue;
-        if ((role === "system" || role === "developer") && instructions.length < 4) {
-          instructions.push(text.slice(0, 400));
-        } else if (role === "user") {
-          firstUser = text.slice(0, 800);
-          break;
-        }
-      }
-    }
-  }
-
-  if (!firstUser) return undefined;
-  return JSON.stringify({ instructions, firstUser });
-}
-
-function extractSessionAffinitySignals(request: Request, body: Record<string, unknown>): SessionSignal[] {
+export function extractSessionAffinitySignals(request: Request, body: Record<string, unknown>): SessionSignal[] {
   const headers = request.headers;
   const explicit = [
     headerSignal(headers, "x-claude-code-session-id", "claude"),
@@ -145,8 +89,9 @@ function extractSessionAffinitySignals(request: Request, body: Record<string, un
   const user = normalizeExplicitId(body.user);
   if (user) return [{ source: "user", value: user, legacy: true }];
 
-  const seed = messageHashSeed(body);
-  return seed ? [{ source: "message-root", value: seed }] : [];
+  // No prompt/message-derived fallback. Affinity must come from an explicit client or
+  // protocol session signal so unrelated requests cannot become linkable by content.
+  return [];
 }
 
 export function extractSessionAffinitySignal(request: Request, body: Record<string, unknown>): SessionSignal | undefined {
