@@ -20,12 +20,20 @@ describe("configured model capabilities", () => {
     expect(configuredModelCapabilities({
       models: [{
         id: "gpt-array",
-        capabilities: { reasoningLevels: ["auto", "medium"], contextWindow: 200000 },
+        capabilities: { reasoningLevels: ["auto", "medium"], "max-context-length": 200000 },
       }],
     }, "gpt-array")).toEqual(expect.objectContaining({
       reasoningLevels: ["auto", "medium"],
       contextWindow: 200000,
     }));
+  });
+
+  it("accepts max context length aliases and ignores invalid overrides", () => {
+    expect(normalizeCapabilities({ maxContextLength: 123456 }).contextWindow).toBe(123456);
+    expect(normalizeCapabilities({ max_context_length: 234567 }).contextWindow).toBe(234567);
+    expect(normalizeCapabilities({ "max-context-length": 345678 }).contextWindow).toBe(345678);
+    expect(normalizeCapabilities({ "max-context-length": 0, context_window: 456789 }).contextWindow).toBe(456789);
+    expect(normalizeCapabilities({ "max-context-length": -1, context_window: 567890 }).contextWindow).toBe(567890);
   });
 
   it("applies route, provider, then discovered precedence", () => {
@@ -37,8 +45,9 @@ describe("configured model capabilities", () => {
     const provider = normalizeCapabilities({
       reasoningLevels: ["auto", "medium"],
       supportsTools: false,
+      "max-context-length": 150000,
     });
-    const route = normalizeCapabilities({ contextWindow: 200000 });
+    const route = normalizeCapabilities({ "max-context-length": 200000 });
 
     expect(mergeModelCapabilities(route, mergeModelCapabilities(provider, discovered))).toEqual(expect.objectContaining({
       reasoningLevels: ["auto", "medium"],
