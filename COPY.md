@@ -6,7 +6,7 @@
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
 <!-- upstream-ref: 41fc5e134631789e98137245f576680c7fb9b322 -->
-<!-- local-implementation-ref: a85ce7850d3f837364c2ba357b49d5a6410abf07 -->
+<!-- local-implementation-ref: 9b649071150bc73ce88078d394de7e7d33c734b4 -->
 <!-- last-reviewed: 2026-08-03 -->
 
 ## 1. 当前基线
@@ -17,14 +17,14 @@
 | 上游分支 | `main` |
 | 已审阅上游提交 | `41fc5e134631789e98137245f576680c7fb9b322` |
 | 本地分支 | `dev` |
-| 本地实现基线 | `a85ce7850d3f837364c2ba357b49d5a6410abf07` |
+| 本地实现基线 | `9b649071150bc73ce88078d394de7e7d33c734b4` |
 | 审阅日期 | 2026-08-03 |
 
 本轮审阅范围为 `bc71c77f..41fc5e13`：
 
-- `41fc5e13` 为 Codex OAuth refresh 增加 30 秒有界超时，并使刷新生命周期不继承首个调用方已取消的 context。CFlareAIProxy 的 `refreshCredential` 已通过 `providerFetch(..., { purpose: "oauth", timeoutMs: 30_000 })` 使用独立超时信号，且函数不接收下游请求的 `AbortSignal`；本轮补充定向 Vitest，锁定超时中止和调用方取消隔离语义。
+- `41fc5e13` 为 Codex OAuth refresh 增加 30 秒有界超时，并使刷新生命周期不继承首个调用方已取消的 context。CFlareAIProxy 的直连与账号级代理 refresh 均使用独立的 30 秒超时信号；传输超时现在分类为 504 `OAUTH_REFRESH_FAILED`，其他传输故障分类为 502 `OAUTH_REFRESH_FAILED`，不会退化成 `INTERNAL_ERROR`。
 - 同一提交包含 Claude OAuth/TLS handshake 变化，按当前范围继续排除，不移植 Claude 专用行为。
-- 范围内 Home client closure 与进程内 singleflight 生命周期不适用于 Workers；本项目继续使用 Durable Object 管理同账号刷新锁，不引入常驻进程级状态。
+- Workers 不复制 Go singleflight 的“等待共享 refresh 结果”模型。并发请求由 Durable Object refresh lock 选出唯一持有者，其他请求不得接管；调用方请求信号不会传入 refresh fetch，也不会删除 Durable Object 中的持锁记录。定向测试分别覆盖独立 timeout signal、错误分类、并发唯一持有者和取消后的锁所有权保持。
 
 本轮新增定向测试；连接器环境无法运行本地 Worker typecheck 或 Vitest，需由 PR CI 完成验证。
 
@@ -70,7 +70,7 @@
 | Codex Alpha Search / 特殊路由插件 | 未对齐 | 尚未实现插件式模型选择 | 有真实使用需求后再跟进 |
 | 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | 跟进 credential concurrency、会话信号优先级和选择算法变化，保持无关 provider 更新不扰动既有租约；平滑加权轮询与 weight 校验见 Issue #47 |
 | 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断 | 继续细化按错误类型的 cooldown；不移植 PostgreSQL store |
-| Token/OAuth 刷新锁 | 大体对齐 | 使用 Durable Object 防止同账号并发刷新；Codex refresh 使用独立的 30 秒有界超时，不继承下游请求取消 | 跟进新的 OAuth 字段和刷新失败语义；Home/Redis 401 恢复协议不适用 |
+| Token/OAuth 刷新锁 | 大体对齐 | Durable Object 选出唯一 refresh 持有者；直连与账号级代理 refresh 使用独立 30 秒超时；超时/传输故障分类为 `OAUTH_REFRESH_FAILED` | 跟进新的 OAuth 字段和刷新失败语义；Workers 不提供 Go singleflight 式等待共享结果；Home/Redis 401 恢复协议不适用 |
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理 |
 | Provider/System 代理 | 已对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连 | 持续跟进 Workers Socket 限制 |
 | OpenAI-compatible 自定义上游 | 已对齐 | 可配置 base URL、API mode、模型、权重、Key 和代理 | 配置型模型精确 thinking capability、优先级和热更新跟进 Issue #49 |
@@ -155,7 +155,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
-| 2026-08-03 | `bc71c77f..41fc5e13` | `a85ce785` | Codex OAuth refresh 的 30 秒有界超时和调用方取消隔离语义在 Workers 实现中已具备；新增定向 Vitest 覆盖独立 timeout signal、超时中止及已取消调用方不污染共享刷新。Claude OAuth/TLS handshake 与 Home client closure 继续排除。连接器环境未运行测试，交由 PR CI 验证。 |
+| 2026-08-03 | `bc71c77f..41fc5e13` | `9b649071` | Codex OAuth refresh 在 Workers 中使用独立 30 秒 timeout signal；直连和账号级代理的超时/传输故障均分类为可观测的 `OAUTH_REFRESH_FAILED`。并发语义由 Durable Object refresh lock 提供唯一持有者，不复制 Go singleflight 的等待共享结果；测试覆盖并发唯一持有者及调用方取消后锁所有权保持。Claude OAuth/TLS handshake 与 Home client closure 继续排除。连接器环境未运行测试，交由 PR CI 验证。 |
 | 2026-07-31 | `a80e8082..4a315136` | 文档更新 | 4 个提交中 `7d00936a` 为 Kimi registry 增加 `kimi-k3-256k`，并更新 `kimi-k3` 的 1M context、65K output 与 `low/high/max` thinking metadata，属于 Kimi/provider-model registry 范围内实质变化。CFlareAIProxy 的公开目录来自 discovered models 与显式 routes，不复制上游静态目录，因此未硬编码新模型；待发现或配置该模型时验证能力与别名回写。`f179a0f4`、`4db8e120` 及合并提交 `4a315136` 为 Home/Redis/Go SDK 的 401 OAuth 恢复、token 指纹、选择重派发及 WebSocket retention，Workers 当前无对应 Home 协议，未移植。 |
 | 2026-07-30 | `928478e4..a80e8082` | 文档更新；Issue #55 | `a80e8082` 为 Codex HTTP 请求新增可关闭的 cloaking 策略，但默认会在客户端、配置和自定义 header 之后强制覆盖固定 `User-Agent` 与 `Originator`，同时更新固定 UA 版本。该行为属于 Codex HTTP 范围内实质变化，但涉及官方客户端身份伪装、header 优先级、审计可观测性、API-key/OAuth 差异和合规决策，未直接移植；WebSocket 测试继续排除，已创建仅限 HTTP/SSE 的 Issue #55。 |
 | 2026-07-30 | `b4d94d58..928478e4` | 文档更新；Issue #52 补充 | 2 个提交中 `928478e4` 固化 Codex API-key 未显式配置模型时使用内置默认目录，并新增测试要求默认注册集和 `/v1/models` 来源包含 `gpt-image-1.5`、`gpt-image-2`，显式模型模式不得混入默认图像模型。该行为继续涉及公开模型面、发现失败时的误宣传及 credential 身份绑定，未直接移植，已补充 Issue #52 验收要求。`e8e39526` 仅为 Gin/文件型管理端规范化解析和展示 credential weight；Workers 侧账号权重由 D1 数据直接表达，无对应 auth-file 扫描路径，不移植。 |
