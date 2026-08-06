@@ -1,7 +1,7 @@
 import { updateCredentialTokens } from "./db";
 import { GatewayError } from "./errors";
 import { credentialProxyUrl, providerFetchForCredential } from "./credential-fetch";
-import { refreshCredential } from "./oauth";
+import { OAUTH_REFRESH_TIMEOUT_MS, oauthRefreshTransportError, refreshCredential } from "./oauth";
 import type { Credential, Env, ProviderConfig } from "./types";
 import { classifyUpstreamResponse, gatewayErrorFromClassification } from "./upstream-errors";
 
@@ -68,14 +68,19 @@ export async function refreshCredentialForInference(
   const headers = provider.kind === "kimi"
     ? kimiHeaders(credential)
     : new Headers({ accept: "application/json", "content-type": "application/x-www-form-urlencoded" });
-  const response = await providerFetchForCredential(
-    env,
-    provider,
-    credential,
-    tokenUrl,
-    { method: "POST", headers, body },
-    { purpose: "oauth", timeoutMs: 30_000 },
-  );
+  let response: Response;
+  try {
+    response = await providerFetchForCredential(
+      env,
+      provider,
+      credential,
+      tokenUrl,
+      { method: "POST", headers, body },
+      { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS },
+    );
+  } catch (error) {
+    throw oauthRefreshTransportError(provider, error);
+  }
   const text = await response.text();
   let payload: Record<string, unknown> = {};
   try { payload = text ? JSON.parse(text) as Record<string, unknown> : {}; } catch { /* classified below */ }
