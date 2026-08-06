@@ -34,6 +34,7 @@ describe("Codex client model catalog", () => {
       supports_image_detail_original: true,
       context_window: 128000,
       max_context_window: 128000,
+      max_context_length: 128000,
       visibility: "list",
       priority: 10,
       supports_search_tool: true,
@@ -46,6 +47,22 @@ describe("Codex client model catalog", () => {
         { effort: "high", description: "Greater reasoning depth for complex problems" },
       ],
       service_tiers: [{ id: "priority", name: "priority", description: "priority" }],
+    });
+  });
+
+  it("uses max context length overrides before legacy aliases", () => {
+    const [model] = buildCodexClientModels([{
+      id: "large-context",
+      x_cflare_endpoints: ["responses"],
+      x_cflare_capabilities: {
+        "max-context-length": 200000,
+        contextWindow: 128000,
+      },
+    }]);
+    expect(model).toMatchObject({
+      context_window: 200000,
+      max_context_window: 200000,
+      max_context_length: 200000,
     });
   });
 
