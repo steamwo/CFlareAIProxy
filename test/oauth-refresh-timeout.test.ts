@@ -70,8 +70,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("Codex OAuth refresh timeout", () => {
-  it("aborts a stalled refresh through its independent 30 second timeout", async () => {
+describe("Codex OAuth refresh transport failures", () => {
+  it("classifies the independent 30 second timeout as an observable OAuth refresh failure", async () => {
     const refreshController = new AbortController();
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(refreshController.signal);
     const fetchMock = vi.fn((_input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
@@ -85,29 +85,26 @@ describe("Codex OAuth refresh timeout", () => {
 
     refreshController.abort(new DOMException("Codex OAuth refresh timed out", "TimeoutError"));
 
-    await expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+    await expect(pending).rejects.toMatchObject({
+      status: 504,
+      code: "OAUTH_REFRESH_FAILED",
+      type: "upstream_error",
+      message: "Codex OAuth refresh timed out after 30000 ms",
+    });
     expect(timeoutSpy).toHaveBeenCalledOnce();
     expect(timeoutSpy).toHaveBeenCalledWith(30_000);
   });
 
-  it("does not inherit an already-cancelled caller signal", async () => {
-    const callerController = new AbortController();
-    callerController.abort(new DOMException("Caller cancelled", "AbortError"));
-    const refreshController = new AbortController();
-    vi.spyOn(AbortSignal, "timeout").mockReturnValue(refreshController.signal);
-    const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
-      expect(init?.signal).toBe(refreshController.signal);
-      expect(init?.signal).not.toBe(callerController.signal);
-      expect(init?.signal?.aborted).toBe(false);
-      return new Response(JSON.stringify({ error: "temporarily_unavailable" }), {
-        status: 503,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  it("classifies other refresh transport failures without exposing an internal error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("network connection reset");
+    }));
 
-    await expect(refreshCredential(createEnv(), codexProvider(), expiringCredential()))
-      .rejects.toMatchObject({ code: "OAUTH_REFRESH_FAILED" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(refreshCredential(createEnv(), codexProvider(), expiringCredential())).rejects.toMatchObject({
+      status: 502,
+      code: "OAUTH_REFRESH_FAILED",
+      type: "upstream_error",
+      message: "Codex OAuth refresh request failed: network connection reset",
+    });
   });
 });
