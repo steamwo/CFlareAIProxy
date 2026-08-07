@@ -6,7 +6,7 @@
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
 <!-- upstream-ref: 41fc5e134631789e98137245f576680c7fb9b322 -->
-<!-- local-implementation-ref: b03f190ee2f8806fd65a1137f877a9727d547d9b -->
+<!-- local-implementation-ref: 2a057b44eba5decb5afea5bc4daeb521dc016365 -->
 <!-- last-reviewed: 2026-08-03 -->
 
 ## 1. 当前基线
@@ -17,7 +17,7 @@
 | 上游分支 | `main` |
 | 已审阅上游提交 | `41fc5e134631789e98137245f576680c7fb9b322` |
 | 本地分支 | `dev` |
-| 本地实现基线 | `b03f190ee2f8806fd65a1137f877a9727d547d9b` |
+| 本地实现基线 | `2a057b44eba5decb5afea5bc4daeb521dc016365` |
 | 审阅日期 | 2026-08-03 |
 
 本轮审阅范围为 `bc71c77f..41fc5e13`：
@@ -153,12 +153,11 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
-| 2026-08-03 | `bc71c77f..41fc5e13` | `b03f190e` | Codex OAuth refresh 在 Workers 中使用独立 30 秒 timeout signal；Codex 直连和账号级代理的超时/传输故障均分类为可观测的 `OAUTH_REFRESH_FAILED`。并发语义由 Durable Object refresh lock 提供唯一持有者，不复制 Go singleflight 的等待共享结果；测试覆盖并发唯一持有者及调用方取消后锁所有权保持。Claude OAuth/TLS handshake 与 Home client closure 继续排除。 |
+| 2026-08-03 | `bc71c77f..41fc5e13` | `2a057b44` | Codex OAuth refresh 在 Workers 中使用独立 30 秒 timeout signal；Codex 直连和账号级代理的超时/传输故障均分类为可观测的 `OAUTH_REFRESH_FAILED`。并发语义由 Durable Object refresh lock 提供唯一持有者，不复制 Go singleflight 的等待共享结果；测试覆盖并发唯一持有者及调用方取消后锁所有权保持。Claude OAuth/TLS handshake 与 Home client closure 继续排除。 |
 | 2026-07-31 | `a80e8082..4a315136` | 文档更新 | 4 个提交中 `7d00936a` 为 Kimi registry 增加 `kimi-k3-256k`，并更新 `kimi-k3` 的 1M context、65K output 与 `low/high/max` thinking metadata，属于 Kimi/provider-model registry 范围内实质变化。CFlareAIProxy 的公开目录来自 discovered models 与显式 routes，不复制上游静态目录，因此未硬编码新模型；待发现或配置该模型时验证能力与别名回写。`f179a0f4`、`4db8e120` 及合并提交 `4a315136` 为 Home/Redis/Go SDK 的 401 OAuth 恢复、token 指纹、选择重派发及 WebSocket retention，Workers 当前无对应 Home 协议，未移植。 |
 | 2026-07-30 | `928478e4..a80e8082` | 文档更新；Issue #55 补充 | `a80e8082` 为 Codex HTTP 请求新增可关闭的 cloaking 策略，但默认会在客户端、配置和自定义 header 之后强制覆盖固定 `User-Agent` 与 `Originator`，同时更新固定 UA 版本。该行为属于 Codex HTTP 范围内实质变化，但涉及官方客户端身份伪装、header 优先级、审计可观测性、API-key/OAuth 差异和合规决策，未直接移植；WebSocket 测试继续排除，已创建仅限 HTTP/SSE 的 Issue #55。 |
 | 2026-07-30 | `b4d94d58..928478e4` | 文档更新；Issue #52 补充 | 2 个提交中 `928478e4` 固化 Codex API-key 未显式配置模型时使用内置默认目录，并新增测试要求默认注册集和 `/v1/models` 来源包含 `gpt-image-1.5`、`gpt-image-2`，显式模型模式不得混入默认图像模型。该行为继续涉及公开模型面、发现失败时的误宣传及 credential 身份绑定，未直接移植，已补充 Issue #52 验收要求。`e8e39526` 仅为 Gin/文件型管理端规范化解析和展示 credential weight；Workers 侧账号权重由 D1 数据直接表达，无对应 auth-file 扫描路径，不移植。 |
-| 2026-07-30 | `2b63d6bc..b4d94d58` | 文档更新；Issue #52 | 3 个提交中 `b4d94d58` 恢复 Codex API-key 未显式配置模型时的内置 Codex Pro 默认目录，并增加配置索引 credential 校验、回退匹配和陈旧模型清理，属于 provider/model registry 范围内实质变化。该提交推翻上一轮 configured-models-only 语义；因 Workers 侧需先决定隐式默认目录、D1 账号与 route/provider/discovery 的凭据身份绑定、配置轮换和陈旧目录失效策略，未直接移植。`1c1d8efd` 为 Antigravity/Gemini 专用 response schema 修复，`a2ff6914` 为本地 Git store 恢复逻辑，均排除。 |
-| 2026-07-30 | `4a2eb54d..2b63d6bc` | 文档更新 | 3 个提交中 `2c8e5ba4` 修正 Codex API-key credential 模型注册，只暴露明确配置模型且空配置不注册模型；CFlareAIProxy 的 `/v1/models` 和 Codex client catalog 已仅从启用的 discovered models 与显式 routes 构建，不存在强制注入内置模型路径，因此行为已具备，无运行代码或测试变更。`8cdd3f1d` 为合并提交，`2b63d6bc` 仅涉及 Gemini schema cleaning，排除。 |
+| 2026-07-30 | `2b63d6bc..b4d94d58` | 文档更新；Issue #52 | 3 个提交中 `b4d94d58` 恢复 Codex API-key credential 模型注册，只暴露明确配置模型且空配置不注册模型；CFlareAIProxy 的 `/v1/models` 和 Codex client catalog 已仅从启用的 discovered models 与显式 routes 构建，不存在强制注入内置模型路径，因此行为已具备，无运行代码或测试变更。`8cdd3f1d` 为合并提交，`2b63d6bc` 仅涉及 Gemini schema cleaning，排除。 |
 | 2026-07-30 | `c9417c8a..4a2eb54d` | 文档更新；Issue #49 | 10 个提交中 `f3229143` 为 Codex/OpenAI-compatible 配置型模型新增精确 thinking capability、模型哈希失效与统一 capability-aware 请求应用，属于 provider/model registry 范围内实质变化；因 Workers 侧需明确配置与发现 metadata 优先级、KV/DO 热更新失效、alias 回写和 level 校验，未直接移植。`74d38e09`、`fecebcca`、`4a2eb54d` 均仅涉及 Claude 协议转换；Home CAS、Antigravity/Gemini schema 和 Gemini registry 变化排除。 |
 | 2026-07-28 | `cade44b9..c9417c8a` | 文档更新；Issue #47 | 15 个提交中 `5dcca50f` 的 smooth weighted round-robin、credential weight 统一解析与严格校验属于账号选择范围内实质变化；因 Workers 侧由 Durable Object 管理权重、租约、并发与会话亲和，上游 Go 进程内 current-weight 状态不能直接移植，需先明确状态隔离、sticky 推进、cooldown 恢复、热更新和 DO 重启语义。客户端元数据、Home、pluginhost、store、Claude 和仅 Antigravity/Gemini/Grok 变化排除。 |
 | 2026-07-28 | `8423cce2..cade44b9` | 文档更新；Issue #42 | 16 个提交中，会话亲和原生信号优先级、控制字符校验、Home alias 保留、Codex tool output 图片及 `minimal` reasoning 为范围内实质变化；因涉及 Durable Object 亲和键、租户隔离、公开 HTTP/Responses 转换边界且无法可靠执行本地测试，未直接移植，创建仅限 HTTP/SSE 的跟进。Gemini/Antigravity usage 零值、request lifecycle plugin、gitstore、Claude、Gemini registry 和文档变化排除。 |
