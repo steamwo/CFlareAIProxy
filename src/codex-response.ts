@@ -58,6 +58,17 @@ function patchTerminal(event: Record<string, unknown>, state: CodexState): Recor
   return event;
 }
 
+function patchStartResponseModel(event: Record<string, unknown>, model: string): Record<string, unknown> {
+  if (event.type !== "response.created" && event.type !== "response.in_progress") return event;
+  const response = responseRecord(event.response);
+  const current = response.model;
+  if (current !== undefined && current !== null && (typeof current !== "string" || current.trim() !== "")) return event;
+  const fallback = model.trim();
+  if (!fallback) return event;
+  event.response = { ...response, model: fallback };
+  return event;
+}
+
 function strictResponsesStream(context: CodexResponseContext): Response {
   if (!context.upstream.body) throw new GatewayError(502, "CODEX_STREAM_EMPTY", "Codex returned an empty stream", "upstream_error");
   const state: CodexState = { terminal: false, items: new Map(), fallbackItems: [] };
@@ -75,6 +86,7 @@ function strictResponsesStream(context: CodexResponseContext): Response {
       return;
     }
     rememberItem(event, state);
+    event = patchStartResponseModel(event, context.model);
     if (event.type === "response.completed" || event.type === "response.incomplete") {
       state.terminal = true;
       event = patchTerminal(event, state);
