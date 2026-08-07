@@ -1,4 +1,8 @@
 import { GatewayError } from "./errors";
+import {
+  markOpenAiTextOnlyToolResultNormalization,
+  prepareOpenAiToolResultsForValidation,
+} from "./openai-tool-results";
 import type { Env, GatewayEndpoint, ModelRouteRow } from "./types";
 import { parseJson } from "./utils";
 
@@ -152,13 +156,14 @@ function discoveredCapabilities(capabilitiesJson: string | undefined, rawJson: s
 export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoint: GatewayEndpoint): Promise<RouteRuntimeOptions> {
   const options = parseJson<Record<string, unknown>>(route.options_json, {});
   const row = await env.DB.prepare(
-    `SELECT p.options_json AS provider_options_json,d.capabilities_json,d.raw_json
+    `SELECT p.kind AS provider_kind,p.options_json AS provider_options_json,d.capabilities_json,d.raw_json
      FROM providers p
      LEFT JOIN discovered_models d
        ON d.provider_id=p.id AND d.model_id=? AND d.endpoint=? AND d.enabled=1
      WHERE p.id=?
      ORDER BY d.discovered_at DESC,d.credential_id ASC LIMIT 1`,
   ).bind(route.upstream_model, endpoint, route.provider_id).first<{
+    provider_kind: string;
     provider_options_json: string;
     capabilities_json: string | null;
     raw_json: string | null;
@@ -173,6 +178,7 @@ export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoi
     routeConfigured,
     mergeModelCapabilities(providerConfigured, discovered),
   );
+  if (row?.provider_kind === "openai-compatible") markOpenAiTextOnlyToolResultNormalization(capabilities);
   const forceResponseModelMapping = options.force_response_model_mapping === true
     || options.forceResponseModelMapping === true
     || capabilities.forceResponseModelMapping === true;
@@ -192,6 +198,7 @@ function containsImage(value: unknown, depth = 0): boolean {
 }
 
 export function validateModelCapabilities(body: Record<string, unknown>, capabilities: ModelCapabilities): void {
+  prepareOpenAiToolResultsForValidation(body, capabilities);
   if (capabilities.supportsTools === false && Array.isArray(body.tools) && body.tools.length > 0) {
     throw new GatewayError(400, "MODEL_TOOLS_UNSUPPORTED", "The selected model does not support tool calls", "invalid_request_error");
   }
