@@ -139,7 +139,7 @@ async function verifyProviderModelRefreshCursorSignature(
   if (await crypto.subtle.verify("HMAC", current, signature, encoded)) return true;
   const previous = typeof env.MASTER_KEY_PREVIOUS === "string" ? env.MASTER_KEY_PREVIOUS.trim() : "";
   if (!previous) return false;
-  const previousKey = await providerRefreshCursorKey(previous, "MASTER_KEY_PREVIOUS");
+  const previousKey = await providerRefreshCursorKey(env.MASTER_KEY_PREVIOUS, "MASTER_KEY_PREVIOUS");
   return crypto.subtle.verify("HMAC", previousKey, signature, encoded);
 }
 
@@ -660,7 +660,21 @@ export async function listDiscoveredModels(env: Env): Promise<Array<DiscoveredMo
     `SELECT dm.*, c.label AS credential_label, p.name AS provider_name
      FROM discovered_models dm
      JOIN providers p ON p.id=dm.provider_id
-     LEFT JOIN credentials c ON c.id=dm.credential_id
+     LEFT JOIN credentials c ON c.id=dm.credential_id AND c.provider_id=dm.provider_id
+     WHERE p.kind<>'qoder'
+       OR (
+         p.enabled=1
+         AND (
+           (dm.credential_id<>'' AND c.enabled=1)
+           OR (
+             dm.credential_id=''
+             AND EXISTS(
+               SELECT 1 FROM credentials qoder_credential
+               WHERE qoder_credential.provider_id=p.id AND qoder_credential.enabled=1
+             )
+           )
+         )
+       )
      ORDER BY p.name,dm.model_id,dm.endpoint,c.label`,
   ).all<DiscoveredModelRow & { credential_label: string; provider_name: string }>();
   return result.results;
