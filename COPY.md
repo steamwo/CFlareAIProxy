@@ -6,7 +6,7 @@
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
 <!-- upstream-ref: 41fc5e134631789e98137245f576680c7fb9b322 -->
-<!-- local-implementation-ref: b03f190ee2f8806fd65a1137f877a9727d547d9b -->
+<!-- local-implementation-ref: 2a057b44eba5decb5afea5bc4daeb521dc016365 -->
 <!-- last-reviewed: 2026-08-03 -->
 
 ## 1. 当前基线
@@ -17,7 +17,7 @@
 | 上游分支 | `main` |
 | 已审阅上游提交 | `41fc5e134631789e98137245f576680c7fb9b322` |
 | 本地分支 | `dev` |
-| 本地实现基线 | `b03f190ee2f8806fd65a1137f877a9727d547d9b` |
+| 本地实现基线 | `2a057b44eba5decb5afea5bc4daeb521dc016365` |
 | 审阅日期 | 2026-08-03 |
 
 本轮审阅范围为 `bc71c77f..41fc5e13`：
@@ -153,7 +153,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
-| 2026-08-03 | `bc71c77f..41fc5e13` | `b03f190e` | Codex OAuth refresh 在 Workers 中使用独立 30 秒 timeout signal；Codex 直连和账号级代理的超时/传输故障均分类为可观测的 `OAUTH_REFRESH_FAILED`。并发语义由 Durable Object refresh lock 提供唯一持有者，不复制 Go singleflight 的等待共享结果；测试覆盖并发唯一持有者及调用方取消后锁所有权保持。Claude OAuth/TLS handshake 与 Home client closure 继续排除。 |
+| 2026-08-03 | `bc71c77f..41fc5e13` | `2a057b44` | Codex OAuth refresh 在 Workers 中使用独立 30 秒 timeout signal；Codex 直连和账号级代理的超时/传输故障均分类为可观测的 `OAUTH_REFRESH_FAILED`。并发语义由 Durable Object refresh lock 提供唯一持有者，不复制 Go singleflight 的等待共享结果；测试覆盖并发唯一持有者及调用方取消后锁所有权保持。Claude OAuth/TLS handshake 与 Home client closure 继续排除。 |
 | 2026-07-31 | `a80e8082..4a315136` | 文档更新 | 4 个提交中 `7d00936a` 为 Kimi registry 增加 `kimi-k3-256k`，并更新 `kimi-k3` 的 1M context、65K output 与 `low/high/max` thinking metadata，属于 Kimi/provider-model registry 范围内实质变化。CFlareAIProxy 的公开目录来自 discovered models 与显式 routes，不复制上游静态目录，因此未硬编码新模型；待发现或配置该模型时验证能力与别名回写。`f179a0f4`、`4db8e120` 及合并提交 `4a315136` 为 Home/Redis/Go SDK 的 401 OAuth 恢复、token 指纹、选择重派发及 WebSocket retention，Workers 当前无对应 Home 协议，未移植。 |
 | 2026-07-30 | `928478e4..a80e8082` | 文档更新；Issue #55 补充 | `a80e8082` 为 Codex HTTP 请求新增可关闭的 cloaking 策略，但默认会在客户端、配置和自定义 header 之后强制覆盖固定 `User-Agent` 与 `Originator`，同时更新固定 UA 版本。该行为属于 Codex HTTP 范围内实质变化，但涉及官方客户端身份伪装、header 优先级、审计可观测性、API-key/OAuth 差异和合规决策，未直接移植；WebSocket 测试继续排除，已创建仅限 HTTP/SSE 的 Issue #55。 |
 | 2026-07-30 | `b4d94d58..928478e4` | 文档更新；Issue #52 补充 | 2 个提交中 `928478e4` 固化 Codex API-key 未显式配置模型时使用内置默认目录，并新增测试要求默认注册集和 `/v1/models` 来源包含 `gpt-image-1.5`、`gpt-image-2`，显式模型模式不得混入默认图像模型。该行为继续涉及公开模型面、发现失败时的误宣传及 credential 身份绑定，未直接移植，已补充 Issue #52 验收要求。`e8e39526` 仅为 Gin/文件型管理端规范化解析和展示 credential weight；Workers 侧账号权重由 D1 数据直接表达，无对应 auth-file 扫描路径，不移植。 |
