@@ -69,17 +69,28 @@ export async function refreshCredentialForInference(
     ? kimiHeaders(credential)
     : new Headers({ accept: "application/json", "content-type": "application/x-www-form-urlencoded" });
   let response: Response;
-  try {
+  if (provider.kind === "codex") {
+    try {
+      response = await providerFetchForCredential(
+        env,
+        provider,
+        credential,
+        tokenUrl,
+        { method: "POST", headers, body },
+        { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS },
+      );
+    } catch (error) {
+      throw oauthRefreshTransportError(provider, error);
+    }
+  } else {
     response = await providerFetchForCredential(
       env,
       provider,
       credential,
       tokenUrl,
       { method: "POST", headers, body },
-      { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS },
+      { purpose: "oauth", timeoutMs: 30_000 },
     );
-  } catch (error) {
-    throw oauthRefreshTransportError(provider, error);
   }
   const text = await response.text();
   let payload: Record<string, unknown> = {};
