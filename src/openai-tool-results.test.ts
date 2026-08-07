@@ -1,11 +1,41 @@
 import { describe, expect, it } from "vitest";
-import type { ModelCapabilities } from "./model-capabilities";
+import {
+  routeRuntimeOptions,
+  validateModelCapabilities,
+  type ModelCapabilities,
+} from "./model-capabilities";
 import {
   OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT,
   markOpenAiTextOnlyToolResultNormalization,
   normalizeOpenAiToolResultsTextOnly,
   prepareOpenAiToolResultsForValidation,
 } from "./openai-tool-results";
+import type { Env, ModelRouteRow } from "./types";
+
+function envForProviderKind(providerKind: string): Env {
+  return {
+    DB: {
+      prepare: () => ({
+        bind: () => ({
+          first: async () => ({
+            provider_kind: providerKind,
+            provider_options_json: "{}",
+            capabilities_json: null,
+            raw_json: null,
+          }),
+        }),
+      }),
+    },
+  } as unknown as Env;
+}
+
+function textOnlyRoute(): ModelRouteRow {
+  return {
+    provider_id: "provider-1",
+    upstream_model: "text-only-upstream",
+    options_json: JSON.stringify({ capabilities: { input_modalities: ["text"] } }),
+  } as ModelRouteRow;
+}
 
 describe("OpenAI-compatible text-only tool results", () => {
   it("flattens only tool message content and preserves ordinary multimodal messages", () => {
@@ -81,5 +111,27 @@ describe("OpenAI-compatible text-only tool results", () => {
     };
     prepareOpenAiToolResultsForValidation(body, capabilities);
     expect(Array.isArray((body.messages as Array<Record<string, unknown>>)[0]?.content)).toBe(true);
+  });
+
+  it("activates only for OpenAI-compatible routes and still rejects ordinary image input", async () => {
+    const route = textOnlyRoute();
+    const openAi = await routeRuntimeOptions(envForProviderKind("openai-compatible"), route, "chat");
+    const toolOnly: Record<string, unknown> = {
+      messages: [{ role: "tool", content: [{ type: "image_url", image_url: { url: "https://example.com/tool.png" } }] }],
+    };
+    expect(() => validateModelCapabilities(toolOnly, openAi.capabilities)).not.toThrow();
+    expect((toolOnly.messages as Array<Record<string, unknown>>)[0]?.content).toBe(OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT);
+
+    const userImage: Record<string, unknown> = {
+      messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/user.png" } }] }],
+    };
+    expect(() => validateModelCapabilities(userImage, openAi.capabilities)).toThrow(/does not support image input/i);
+
+    const custom = await routeRuntimeOptions(envForProviderKind("custom"), route, "chat");
+    const customTool: Record<string, unknown> = {
+      messages: [{ role: "tool", content: [{ type: "image_url", image_url: { url: "https://example.com/tool.png" } }] }],
+    };
+    expect(() => validateModelCapabilities(customTool, custom.capabilities)).toThrow(/does not support image input/i);
+    expect(Array.isArray((customTool.messages as Array<Record<string, unknown>>)[0]?.content)).toBe(true);
   });
 });
