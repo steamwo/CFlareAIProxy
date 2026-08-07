@@ -1,6 +1,7 @@
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { normalizeBaseUrl, sanitizeHeaders } from "../utils";
 import { providerAuthHeaders } from "./headers";
+import { responsesToolOutputToChatContent } from "./responses-tool-output";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -102,7 +103,7 @@ function responsesInputToMessages(body: Record<string, unknown>): Array<Record<s
       const item = record(raw);
       const type = typeof item.type === "string" ? item.type : "";
       if (type === "function_call_output" || type === "custom_tool_call_output") {
-        messages.push({ role: "tool", tool_call_id: item.call_id, content: item.output ?? "" });
+        messages.push({ role: "tool", tool_call_id: item.call_id, content: responsesToolOutputToChatContent(item.output ?? "") });
       } else if (type === "function_call" || type === "custom_tool_call") {
         messages.push({ role: "assistant", content: null, tool_calls: [{ id: item.call_id ?? item.id, type: "function", function: { name: item.name ?? "unknown", arguments: item.arguments ?? "{}" } }] });
       } else {
