@@ -66,26 +66,60 @@ describe("Codex Chat Completions tool output conversion", () => {
   });
 });
 
-describe("Codex Responses input message IDs", () => {
-  it("prefixes invalid message IDs before applying the 64 character limit", () => {
-    const longId = `item_${"x".repeat(80)}`;
-    const [item] = normalizeCodexInputMessageIds([{ type: "message", id: longId, role: "user" }]) as Array<Record<string, unknown>>;
-    expect(item?.id).toBe(`msg_${longId}`.slice(0, 64));
-    expect(String(item?.id)).toHaveLength(64);
+describe("Codex Responses input item IDs", () => {
+  it("normalizes supported item IDs and leaves other item types unchanged", () => {
+    const input = [
+      { type: "message", id: "item_message", role: "user" },
+      { type: "reasoning", id: "item_reasoning" },
+      { type: "function_call", id: "item_function_call", call_id: "call_1" },
+      { type: "function_call_output", id: "item_function_call_output", call_id: "call_1" },
+      { type: "message", id: "msg-existing" },
+      { type: "reasoning", id: "rs-existing" },
+      { type: "function_call", id: "fc-existing", call_id: "call_2" },
+    ];
+    const once = normalizeCodexInputMessageIds(input) as Array<Record<string, unknown>>;
+
+    expect(once.map((item) => item.id)).toEqual([
+      "msg_item_message",
+      "rs_item_reasoning",
+      "fc_item_function_call",
+      "item_function_call_output",
+      "msg-existing",
+      "rs-existing",
+      "fc-existing",
+    ]);
+    expect(normalizeCodexInputMessageIds(once)).toEqual(once);
   });
 
-  it("preserves valid IDs, truncates them deterministically, and is idempotent", () => {
+  it("prefixes supported IDs before applying the 64 character limit", () => {
+    const longId = `item_${"x".repeat(80)}`;
+    const normalized = normalizeCodexInputMessageIds([
+      { type: "message", id: longId },
+      { type: "reasoning", id: longId },
+      { type: "function_call", id: longId },
+    ]) as Array<Record<string, unknown>>;
+
+    expect(normalized.map((item) => item.id)).toEqual([
+      `msg_${longId}`.slice(0, 64),
+      `rs_${longId}`.slice(0, 64),
+      `fc_${longId}`.slice(0, 64),
+    ]);
+    expect(normalized.every((item) => String(item.id).length === 64)).toBe(true);
+  });
+
+  it("preserves already valid prefixes and is idempotent", () => {
     const input = [
-      { type: "message", id: "msg-valid", role: "user" },
-      { type: "message", id: `msg_${"y".repeat(80)}`, role: "assistant" },
-      { type: "function_call", id: `call_${"z".repeat(80)}` },
+      { type: "message", id: `msg_${"m".repeat(80)}` },
+      { type: "reasoning", id: `rs_${"r".repeat(80)}` },
+      { type: "function_call", id: `fc_${"f".repeat(80)}` },
     ];
     const once = normalizeCodexInputMessageIds(input) as Array<Record<string, unknown>>;
     const twice = normalizeCodexInputMessageIds(once);
 
-    expect(once[0]?.id).toBe("msg-valid");
-    expect(String(once[1]?.id)).toHaveLength(64);
-    expect(once[2]?.id).toBe(input[2]?.id);
+    expect(once.every((item) => String(item.id).length === 64)).toBe(true);
+    expect(String(once[0]?.id).startsWith("msg_")).toBe(true);
+    expect(String(once[1]?.id).startsWith("rs_")).toBe(true);
+    expect(String(once[2]?.id).startsWith("fc_")).toBe(true);
     expect(twice).toEqual(once);
   });
 
