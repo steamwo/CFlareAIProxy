@@ -80,6 +80,7 @@ export function oauthRefreshTransportError(
   error: unknown,
   timeoutMs = OAUTH_REFRESH_TIMEOUT_MS,
 ): GatewayError {
+  if (provider.kind !== "codex") throw error;
   if (error instanceof GatewayError) {
     return new GatewayError(error.status, "OAUTH_REFRESH_FAILED", error.message, error.type);
   }
