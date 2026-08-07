@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chatToResponses } from "./codex";
+import { chatToResponses, normalizeCodexInputMessageIds } from "./codex";
 
 function toolOutput(content: unknown): unknown {
   const converted = chatToResponses({
@@ -63,5 +63,37 @@ describe("Codex Chat Completions tool output conversion", () => {
   it("does not treat invalid image-shaped objects as images", () => {
     const invalid = JSON.stringify([{ type: "input_image", detail: "low" }]);
     expect(toolOutput(invalid)).toBe(invalid);
+  });
+});
+
+describe("Codex Responses input message IDs", () => {
+  it("prefixes invalid message IDs before applying the 64 character limit", () => {
+    const longId = `item_${"x".repeat(80)}`;
+    const [item] = normalizeCodexInputMessageIds([{ type: "message", id: longId, role: "user" }]) as Array<Record<string, unknown>>;
+    expect(item?.id).toBe(`msg_${longId}`.slice(0, 64));
+    expect(String(item?.id)).toHaveLength(64);
+  });
+
+  it("preserves valid IDs, truncates them deterministically, and is idempotent", () => {
+    const input = [
+      { type: "message", id: "msg-valid", role: "user" },
+      { type: "message", id: `msg_${"y".repeat(80)}`, role: "assistant" },
+      { type: "function_call", id: `call_${"z".repeat(80)}` },
+    ];
+    const once = normalizeCodexInputMessageIds(input) as Array<Record<string, unknown>>;
+    const twice = normalizeCodexInputMessageIds(once);
+
+    expect(once[0]?.id).toBe("msg-valid");
+    expect(String(once[1]?.id)).toHaveLength(64);
+    expect(once[2]?.id).toBe(input[2]?.id);
+    expect(twice).toEqual(once);
+  });
+
+  it("keeps duplicate message IDs stable instead of inventing request-local suffixes", () => {
+    const normalized = normalizeCodexInputMessageIds([
+      { type: "message", id: "duplicate" },
+      { type: "message", id: "duplicate" },
+    ]) as Array<Record<string, unknown>>;
+    expect(normalized.map((item) => item.id)).toEqual(["msg_duplicate", "msg_duplicate"]);
   });
 });

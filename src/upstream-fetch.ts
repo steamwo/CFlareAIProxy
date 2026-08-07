@@ -2,6 +2,7 @@ import { getProviderProxyConfig } from "./db";
 import { GatewayError } from "./errors";
 import { idleTimeoutFor, proxyRequest, validateProxyUrl, type ProxyDialect } from "./proxy-transport";
 import type { Env, ProviderConfig, ProviderProxyConfig } from "./types";
+import { classifyTransportError } from "./upstream-errors";
 
 export { validateProxyUrl };
 
@@ -71,6 +72,22 @@ function shouldBypass(config: ProviderProxyConfig, target: URL): boolean {
   return config.noProxy.some((rule) => hostnameMatchesProxyBypassRule(target.hostname.toLowerCase(), rule));
 }
 
+function isOAuthRefreshRequest(init: RequestInit, options: ProviderFetchOptions): boolean {
+  if (options.purpose !== "oauth") return false;
+  if (init.body instanceof URLSearchParams) return init.body.get("grant_type") === "refresh_token";
+  if (typeof init.body !== "string") return false;
+  try {
+    return new URLSearchParams(init.body).get("grant_type") === "refresh_token";
+  } catch {
+    return false;
+  }
+}
+
+function oauthRefreshTransportError(error: unknown, provider: ProviderConfig, timeoutMs: number): GatewayError {
+  const classified = classifyTransportError(error, `${provider.name} OAuth refresh`, timeoutMs);
+  return new GatewayError(classified.status, "OAUTH_REFRESH_FAILED", classified.message, "upstream_error");
+}
+
 export function isTlsHandshakeFailure(error: unknown): boolean {
   const code = error instanceof GatewayError ? error.code : "";
   return code === "PROXY_TLS_HANDSHAKE_FAILED"
@@ -102,12 +119,18 @@ export async function providerFetch(
   const timeoutMs = Math.max(1000, options.timeoutMs ?? 120_000);
   const config = options.proxyConfig === undefined ? await getProviderProxyConfig(env, provider.id) : options.proxyConfig;
   if (!config?.enabled || shouldBypass(config, url)) {
-    return fetch(url.toString(), { ...init, signal: init.signal ?? AbortSignal.timeout(timeoutMs) });
+    try {
+      return await fetch(url.toString(), { ...init, signal: init.signal ?? AbortSignal.timeout(timeoutMs) });
+    } catch (error) {
+      if (isOAuthRefreshRequest(init, options)) throw oauthRefreshTransportError(error, provider, timeoutMs);
+      throw error;
+    }
   }
   if (!config.proxyUrl) throw new GatewayError(500, "PROXY_URL_MISSING", `供应商 ${provider.name} 已启用代理，但代理 URL 为空`);
   try {
     return await nativeProxyFetch(config, url, init, timeoutMs);
   } catch (error) {
+    if (isOAuthRefreshRequest(init, options)) throw oauthRefreshTransportError(error, provider, timeoutMs);
     if (error instanceof GatewayError) throw error;
     throw new GatewayError(502, "PROXY_REQUEST_FAILED", `${provider.name} 通过代理请求失败：${errorMessage(error)}`, "upstream_error");
   }

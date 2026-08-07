@@ -56,11 +56,12 @@ function responsesStream(context: KimiResponseContext): Response {
   let textItemStarted = false;
   const startedToolItems = new Set<number>();
   let text = "";
-  let usage = emptyResponseUsage();
+  let usage: ReturnType<typeof emptyResponseUsage> | undefined;
   const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
   const responseId = `resp_${context.requestId}`;
   const body = transformResponseSse(context.upstream.body, (data, controller) => {
     if (data === "[DONE]") {
+      if (completed) return;
       completed = true;
       const output: Record<string, unknown>[] = [];
       if (text) output.push({ id: `msg_${context.requestId}`, type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] });
@@ -77,10 +78,17 @@ function responsesStream(context: KimiResponseContext): Response {
         frames.push({ type: "response.function_call_arguments.done", item_id: call.id, output_index: outputIndex, arguments: call.arguments || "{}" });
         frames.push({ type: "response.output_item.done", output_index: outputIndex, item: output[outputIndex] });
       }
-      const response = {
+      const response: Record<string, unknown> = {
         id: responseId, object: "response", created_at: Math.floor(Date.now() / 1000), status: "completed", model: context.model, output,
-        usage: { input_tokens: usage.promptTokens, output_tokens: usage.completionTokens, total_tokens: usage.totalTokens, input_tokens_details: { cached_tokens: usage.cachedTokens } },
       };
+      if (usage) {
+        response.usage = {
+          input_tokens: usage.promptTokens,
+          output_tokens: usage.completionTokens,
+          total_tokens: usage.totalTokens,
+          input_tokens_details: { cached_tokens: usage.cachedTokens },
+        };
+      }
       frames.push({ type: "response.completed", response });
       controller.enqueue(responseEncoder.encode(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("")}data: [DONE]\n\n`));
       return;
@@ -93,7 +101,9 @@ function responsesStream(context: KimiResponseContext): Response {
       controller.error(failure);
       return;
     }
-    usage = mergeResponseUsage(usage, responseUsage(chunk));
+    if (chunk.usage && typeof chunk.usage === "object") {
+      usage = mergeResponseUsage(usage ?? emptyResponseUsage(), responseUsage(chunk));
+    }
     if (!started) {
       started = true;
       controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify({ type: "response.created", response: { id: responseId, object: "response", created_at: Math.floor(Date.now() / 1000), status: "in_progress", model: context.model, output: [] } })}\n\n`));

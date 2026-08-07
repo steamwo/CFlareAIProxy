@@ -69,7 +69,18 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
     // valid levels, merge precedence falls back to the next capability source.
     reasoningLevels: reasoningLevels(raw.reasoningLevels ?? raw.reasoning_levels ?? raw.supported_reasoning_levels),
     serviceTiers: strings(raw.serviceTiers ?? raw.service_tiers, "id"),
-    contextWindow: positiveNumber(raw.contextWindow, raw.context_window, raw.context_length, raw.max_context_window),
+    // max-context-length is the explicit configured override used by upstream. Keep it
+    // ahead of discovered/default aliases within one source, while source precedence
+    // remains route > provider > discovery in the merge below.
+    contextWindow: positiveNumber(
+      raw.maxContextLength,
+      raw.max_context_length,
+      raw["max-context-length"],
+      raw.contextWindow,
+      raw.context_window,
+      raw.context_length,
+      raw.max_context_window,
+    ),
     visibility: rawVisibility === "hide" || rawVisibility === "list" ? rawVisibility : undefined,
     priority: positiveNumber(raw.priority),
     supportsTools: booleanValue(raw.supportsTools, raw.supports_tools),
