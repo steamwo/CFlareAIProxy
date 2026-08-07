@@ -58,6 +58,24 @@ function patchTerminal(event: Record<string, unknown>, state: CodexState): Recor
   return event;
 }
 
+function hydrateCompletedOutputItemIds(event: Record<string, unknown>, state: CodexState): Record<string, unknown> {
+  const response = responseRecord(event.response);
+  if (!Array.isArray(response.output) || response.output.length === 0) return event;
+  let changed = false;
+  const output = response.output.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const item = raw as Record<string, unknown>;
+    const id = item.id;
+    if (id !== undefined && id !== null && (typeof id !== "string" || id.trim() !== "")) return raw;
+    const collectedId = state.items.get(index)?.id;
+    if (typeof collectedId !== "string" || collectedId.trim() === "") return raw;
+    changed = true;
+    return { ...item, id: collectedId };
+  });
+  if (changed) event.response = { ...response, output };
+  return event;
+}
+
 function strictResponsesStream(context: CodexResponseContext): Response {
   if (!context.upstream.body) throw new GatewayError(502, "CODEX_STREAM_EMPTY", "Codex returned an empty stream", "upstream_error");
   const state: CodexState = { terminal: false, items: new Map(), fallbackItems: [] };
@@ -196,7 +214,8 @@ function parseSse(text: string): Record<string, unknown> {
     rememberItem(event, state);
     if (event.type === "response.completed" || event.type === "response.incomplete") {
       state.terminal = true;
-      terminal = patchTerminal(event, state);
+      const patched = patchTerminal(event, state);
+      terminal = event.type === "response.completed" ? hydrateCompletedOutputItemIds(patched, state) : patched;
     }
   }
   if (!state.terminal || !terminal) throw new GatewayError(502, "CODEX_STREAM_INCOMPLETE", "CODEX_STREAM_INCOMPLETE: Codex stream closed before response.completed", "upstream_error");
