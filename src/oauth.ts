@@ -80,7 +80,6 @@ export function oauthRefreshTransportError(
   error: unknown,
   timeoutMs = OAUTH_REFRESH_TIMEOUT_MS,
 ): GatewayError {
-  if (provider.kind !== "codex") throw error;
   if (error instanceof GatewayError) {
     return new GatewayError(error.status, "OAUTH_REFRESH_FAILED", error.message, error.type);
   }
@@ -506,16 +505,11 @@ export async function refreshCredential(env: Env, provider: ProviderConfig, cred
   let payload: Record<string, unknown>;
   if (provider.kind === "qoder") {
     const refreshUrl = stringValue(provider.auth, "refresh_url") ?? "https://center.qoder.sh/algo/api/v3/user/refresh_token";
-    let response: Response;
-    try {
-      response = await providerFetch(env, provider, refreshUrl, {
-        method: "POST",
-        headers: { authorization: `Bearer ${credential.secret}`, accept: "application/json", "content-type": "application/json" },
-        body: JSON.stringify({ refreshToken: credential.refreshToken }),
-      }, { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS });
-    } catch (error) {
-      throw oauthRefreshTransportError(provider, error);
-    }
+    const response = await providerFetch(env, provider, refreshUrl, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential.secret}`, accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify({ refreshToken: credential.refreshToken }),
+    }, { purpose: "oauth", timeoutMs: 30_000 });
     payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
     if (!response.ok) return credential;
   } else {
@@ -533,14 +527,22 @@ export async function refreshCredential(env: Env, provider: ProviderConfig, cred
       ? kimiHeaders(typeof credential.metadata.device_id === "string" ? credential.metadata.device_id : crypto.randomUUID())
       : new Headers({ accept: "application/json", "content-type": "application/x-www-form-urlencoded" });
     let response: Response;
-    try {
+    if (provider.kind === "codex") {
+      try {
+        response = await providerFetch(env, provider, tokenUrl, {
+          method: "POST",
+          headers,
+          body,
+        }, { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS });
+      } catch (error) {
+        throw oauthRefreshTransportError(provider, error);
+      }
+    } else {
       response = await providerFetch(env, provider, tokenUrl, {
         method: "POST",
         headers,
         body,
-      }, { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS });
-    } catch (error) {
-      throw oauthRefreshTransportError(provider, error);
+      }, { purpose: "oauth", timeoutMs: 30_000 });
     }
     payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
     if (!response.ok) throw new GatewayError(502, "OAUTH_REFRESH_FAILED", oauthEndpointError(provider, "refresh", response.status, payload));
