@@ -76,12 +76,10 @@ try {
     } else {
       console.log("  ✓ ADMIN_TOKEN 与 MASTER_KEY 已存在，将保留原值");
     }
-  }
 
-  console.log("• 部署 Worker；Wrangler 将自动配置 D1/KV，并注册 Durable Objects/Queues...");
-  runWrangler(deployArgs);
-
-  if (!dryRun) {
+    // Resources already exist at this point, so migrate before publishing code that may
+    // depend on new columns/tables. If migration fails, the old Worker keeps serving against
+    // the old schema instead of exposing a partially upgraded deployment.
     console.log("• 应用远程 D1 迁移...");
     runWrangler(["d1", "migrations", "apply", "DB", "--remote", "--yes"]);
     console.log("• 验证远程 D1 schema...");
@@ -89,7 +87,13 @@ try {
       "d1", "execute", "DB", "--remote", "--yes", "--json",
       "--command", "SELECT COUNT(*) AS provider_count FROM providers",
     ]);
-    console.log("✓ CFlareAIProxy 部署、密钥初始化和数据库迁移完成");
+  }
+
+  console.log("• 部署 Worker；Wrangler 将自动配置 D1/KV，并注册 Durable Objects/Queues...");
+  runWrangler(deployArgs);
+
+  if (!dryRun) {
+    console.log("✓ CFlareAIProxy 数据库迁移、密钥初始化和 Worker 部署完成");
   }
 } finally {
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
