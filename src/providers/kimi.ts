@@ -1,6 +1,7 @@
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { normalizeBaseUrl, sanitizeHeaders } from "../utils";
 import { providerAuthHeaders } from "./headers";
+import { normalizeKimiUpstreamModel } from "./kimi-model";
 import {
   rememberKimiResponseToolIdentities,
   responsesInputToMessages,
@@ -103,7 +104,7 @@ function requestBody(context: ProxyRequestContext): Record<string, unknown> {
   const overrides = record(context.provider.options.request_overrides);
   for (const [key, value] of Object.entries(defaults)) if (body[key] === undefined) body[key] = value;
   Object.assign(body, overrides);
-  body.model = context.upstreamModel.replace(/\[1m\]$/i, "");
+  body.model = normalizeKimiUpstreamModel(context.upstreamModel);
   body.messages = normalizeKimiMessages(body.messages);
   if (body.stream === true) {
     const streamOptions = record(body.stream_options);
