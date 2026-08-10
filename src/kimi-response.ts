@@ -46,7 +46,7 @@ function responseToolItem(
   const common: Record<string, unknown> = {
     id: call.id,
     call_id: call.id,
-    name: identity?.name ?? call.name || "unknown",
+    name: identity?.name ?? (call.name || "unknown"),
     status,
   };
   if (identity?.namespace) common.namespace = identity.namespace;
