@@ -118,4 +118,19 @@ describe("Kimi Responses assistant-turn reconstruction", () => {
     expect(result[1]).toMatchObject({ role: "tool", tool_call_id: "call_1" });
     expect((result[2]?.tool_calls as Array<Record<string, unknown>>)[0]).toMatchObject({ id: "call_2" });
   });
+
+  it("resets the mergeable assistant across an unknown item boundary", () => {
+    const result = messages([
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "before boundary" }] },
+      { type: "future_item", content: "opaque boundary" },
+      { type: "function_call", call_id: "call_after_unknown", name: "lookup", arguments: "{}" },
+    ]);
+
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({ role: "assistant", content: [{ type: "text", text: "before boundary" }] });
+    expect(result[0]?.tool_calls).toBeUndefined();
+    expect(result[1]).toMatchObject({ role: "user", content: "opaque boundary" });
+    expect(result[2]).toMatchObject({ role: "assistant", content: null, reasoning_content: "[reasoning unavailable]" });
+    expect((result[2]?.tool_calls as Array<Record<string, unknown>>)[0]).toMatchObject({ id: "call_after_unknown" });
+  });
 });
