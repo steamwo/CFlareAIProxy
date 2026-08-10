@@ -4,6 +4,7 @@ import {
   prepareOpenAiToolResultsForValidation,
 } from "./openai-tool-results";
 import { setOpenAiPromptCacheRouteSupport } from "./providers/openai-prompt-cache";
+import { setReasoningSummaryRouteSupport } from "./reasoning-summary-intent";
 import type { Env, GatewayEndpoint, ModelRouteRow } from "./types";
 import { parseJson } from "./utils";
 
@@ -23,6 +24,7 @@ export interface ModelCapabilities {
   supportsImages?: boolean;
   supportsSearchTool?: boolean;
   supportsPromptCacheKey?: boolean;
+  supportsReasoningSummary?: boolean;
   forceResponseModelMapping?: boolean;
 }
 
@@ -71,13 +73,8 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
   return {
     inputModalities: strings(raw.inputModalities ?? raw.input_modalities ?? raw.supported_input_modalities),
     outputModalities: strings(raw.outputModalities ?? raw.output_modalities ?? raw.supported_output_modalities),
-    // Unknown levels are deliberately removed. If a configured declaration contains no
-    // valid levels, merge precedence falls back to the next capability source.
     reasoningLevels: reasoningLevels(raw.reasoningLevels ?? raw.reasoning_levels ?? raw.supported_reasoning_levels),
     serviceTiers: strings(raw.serviceTiers ?? raw.service_tiers, "id"),
-    // max-context-length is the explicit configured override used by upstream. Keep it
-    // ahead of discovered/default aliases within one source, while source precedence
-    // remains route > provider > discovery in the merge below.
     contextWindow: positiveNumber(
       raw.maxContextLength,
       raw.max_context_length,
@@ -100,6 +97,18 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
       raw.support_prompt_cache_key,
       raw["support-prompt-cache-key"],
     ),
+    supportsReasoningSummary: booleanValue(
+      raw.supportsReasoningSummary,
+      raw.supports_reasoning_summary,
+      raw["supports-reasoning-summary"],
+      raw.supportReasoningSummary,
+      raw.support_reasoning_summary,
+      raw["support-reasoning-summary"],
+      raw.supportsReasoningSummaries,
+      raw.supports_reasoning_summaries,
+      raw.supportsReasoningSummaryParameter,
+      raw.supports_reasoning_summary_parameter,
+    ),
     forceResponseModelMapping: raw.forceResponseModelMapping === true || raw.force_response_model_mapping === true ? true : undefined,
   };
 }
@@ -117,6 +126,7 @@ export function mergeModelCapabilities(primary: ModelCapabilities, fallback: Mod
     supportsImages: primary.supportsImages ?? fallback.supportsImages,
     supportsSearchTool: primary.supportsSearchTool ?? fallback.supportsSearchTool,
     supportsPromptCacheKey: primary.supportsPromptCacheKey ?? fallback.supportsPromptCacheKey,
+    supportsReasoningSummary: primary.supportsReasoningSummary ?? fallback.supportsReasoningSummary,
     forceResponseModelMapping: primary.forceResponseModelMapping ?? fallback.forceResponseModelMapping,
   };
 }
@@ -210,10 +220,8 @@ function containsImage(value: unknown, depth = 0): boolean {
 
 export function validateModelCapabilities(body: Record<string, unknown>, capabilities: ModelCapabilities): void {
   prepareOpenAiToolResultsForValidation(body, capabilities);
-  // The selected route has already resolved route > configured-model > discovery
-  // precedence. Store that decision request-locally so the generic provider adapter
-  // can honor route-scoped prompt-cache opt-in without parallel config plumbing.
   setOpenAiPromptCacheRouteSupport(body, capabilities.supportsPromptCacheKey);
+  setReasoningSummaryRouteSupport(body, capabilities.supportsReasoningSummary);
   if (capabilities.supportsTools === false && Array.isArray(body.tools) && body.tools.length > 0) {
     throw new GatewayError(400, "MODEL_TOOLS_UNSUPPORTED", "The selected model does not support tool calls", "invalid_request_error");
   }
