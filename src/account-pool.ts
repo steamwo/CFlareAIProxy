@@ -23,6 +23,7 @@ interface AcquirePayload {
   providerId: string;
   strategy: AccountPoolStrategy;
   candidates: PoolCandidate[];
+  model?: string;
   sessionKey?: string | string[];
   leaseTtlMs?: number;
 }
@@ -94,6 +95,7 @@ export class AccountPool extends DurableObject<Env> {
           success: boolean;
           statusCode?: number;
           cooldownMs?: number;
+          cooldownEligible?: boolean;
         };
         this.release(payload);
         return Response.json({ ok: true });
@@ -183,7 +185,12 @@ export class AccountPool extends DurableObject<Env> {
       const stat = stats.get(candidate.id);
       return stat && stat.cooldown_until <= now && stat.inflight < candidate.maxConcurrency;
     });
-    if (available.length === 0) throw new Error("All credentials are busy or cooling down");
+    if (available.length === 0) {
+      const model = typeof payload.model === "string" ? payload.model.trim() : "";
+      throw new Error(model
+        ? `All credentials are busy or cooling down for model ${JSON.stringify(model)}`
+        : "All credentials are busy or cooling down");
+    }
 
     const lowestPriority = Math.min(...available.map((candidate) => candidate.priority));
     const tier = available.filter((candidate) => candidate.priority === lowestPriority);
@@ -324,7 +331,7 @@ export class AccountPool extends DurableObject<Env> {
     return { leaseId, credentialId, expiresAt };
   }
 
-  private release(payload: { leaseId: string; success: boolean; statusCode?: number; cooldownMs?: number }): void {
+  private release(payload: { leaseId: string; success: boolean; statusCode?: number; cooldownMs?: number; cooldownEligible?: boolean }): void {
     const lease = this.ctx.storage.sql
       .exec<{ credential_id: string }>("SELECT credential_id FROM leases WHERE lease_id = ?", payload.leaseId)
       .toArray()[0];
@@ -344,7 +351,8 @@ export class AccountPool extends DurableObject<Env> {
     }
 
     const status = payload.statusCode ?? 500;
-    const shouldCooldown = status === 401 || status === 403 || status === 408 || status === 429 || status >= 500;
+    const shouldCooldown = payload.cooldownEligible !== false
+      && (status === 401 || status === 403 || status === 408 || status === 429 || status >= 500);
     if (shouldCooldown) {
       const stat = this.ctx.storage.sql
         .exec<{ failures: number }>("SELECT failures FROM pool_stats WHERE credential_id = ?", lease.credential_id)
