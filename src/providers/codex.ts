@@ -1,4 +1,3 @@
-import { rememberCodexClientIdentity } from "../codex-client-identity";
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { normalizeBaseUrl, sanitizeHeaders } from "../utils";
 import { providerAuthHeaders } from "./headers";
@@ -205,7 +204,6 @@ function normalizeCodexBody(body: Record<string, unknown>, model: string): Recor
 }
 
 export async function buildCodexRequest(context: ProxyRequestContext): Promise<UpstreamBuildResult> {
-  rememberCodexClientIdentity(context.requestId, context.originalRequest);
   const baseUrl = normalizeBaseUrl(context.provider.base_url);
   const headers = sanitizeHeaders(context.originalRequest.headers, context.provider.headers);
   providerAuthHeaders(context.provider, context.credential).forEach((value, key) => headers.set(key, value));
