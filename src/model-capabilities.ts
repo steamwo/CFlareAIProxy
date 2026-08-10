@@ -3,6 +3,7 @@ import {
   markOpenAiTextOnlyToolResultNormalization,
   prepareOpenAiToolResultsForValidation,
 } from "./openai-tool-results";
+import { setOpenAiPromptCacheRouteSupport } from "./providers/openai-prompt-cache";
 import type { Env, GatewayEndpoint, ModelRouteRow } from "./types";
 import { parseJson } from "./utils";
 
@@ -21,6 +22,7 @@ export interface ModelCapabilities {
   supportsTools?: boolean;
   supportsImages?: boolean;
   supportsSearchTool?: boolean;
+  supportsPromptCacheKey?: boolean;
   forceResponseModelMapping?: boolean;
 }
 
@@ -90,6 +92,14 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
     supportsTools: booleanValue(raw.supportsTools, raw.supports_tools),
     supportsImages: booleanValue(raw.supportsImages, raw.supports_images),
     supportsSearchTool: booleanValue(raw.supportsSearchTool, raw.supports_search_tool),
+    supportsPromptCacheKey: booleanValue(
+      raw.supportsPromptCacheKey,
+      raw.supports_prompt_cache_key,
+      raw["supports-prompt-cache-key"],
+      raw.supportPromptCacheKey,
+      raw.support_prompt_cache_key,
+      raw["support-prompt-cache-key"],
+    ),
     forceResponseModelMapping: raw.forceResponseModelMapping === true || raw.force_response_model_mapping === true ? true : undefined,
   };
 }
@@ -106,6 +116,7 @@ export function mergeModelCapabilities(primary: ModelCapabilities, fallback: Mod
     supportsTools: primary.supportsTools ?? fallback.supportsTools,
     supportsImages: primary.supportsImages ?? fallback.supportsImages,
     supportsSearchTool: primary.supportsSearchTool ?? fallback.supportsSearchTool,
+    supportsPromptCacheKey: primary.supportsPromptCacheKey ?? fallback.supportsPromptCacheKey,
     forceResponseModelMapping: primary.forceResponseModelMapping ?? fallback.forceResponseModelMapping,
   };
 }
@@ -199,6 +210,10 @@ function containsImage(value: unknown, depth = 0): boolean {
 
 export function validateModelCapabilities(body: Record<string, unknown>, capabilities: ModelCapabilities): void {
   prepareOpenAiToolResultsForValidation(body, capabilities);
+  // The selected route has already resolved route > configured-model > discovery
+  // precedence. Store that decision request-locally so the generic provider adapter
+  // can honor route-scoped prompt-cache opt-in without parallel config plumbing.
+  setOpenAiPromptCacheRouteSupport(body, capabilities.supportsPromptCacheKey);
   if (capabilities.supportsTools === false && Array.isArray(body.tools) && body.tools.length > 0) {
     throw new GatewayError(400, "MODEL_TOOLS_UNSUPPORTED", "The selected model does not support tool calls", "invalid_request_error");
   }
