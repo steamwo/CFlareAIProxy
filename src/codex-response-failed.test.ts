@@ -78,6 +78,9 @@ describe("official Codex client stream failure encoding", () => {
       endpoint: "responses",
     });
     const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    expect(new TextDecoder().decode(first.value)).toContain('data: {"error":');
     await expect(reader.read()).rejects.toBeTruthy();
   });
 });
