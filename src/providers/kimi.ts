@@ -1,7 +1,12 @@
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { normalizeBaseUrl, sanitizeHeaders } from "../utils";
 import { providerAuthHeaders } from "./headers";
-import { responsesToolOutputToChatContent } from "./responses-tool-output";
+import {
+  rememberKimiResponseToolIdentities,
+  responsesInputToMessages,
+  responsesToolChoiceToChat,
+  responsesToolsToChat,
+} from "./kimi-responses";
 
 const REASONING_UNAVAILABLE = "[reasoning unavailable]";
 
@@ -68,149 +73,6 @@ export function normalizeKimiMessages(messages: unknown): Array<Record<string, u
   return output;
 }
 
-function responsesContentToChat(value: unknown): unknown {
-  if (!Array.isArray(value)) return value;
-  return value.map((raw) => {
-    const part = record(raw);
-    const type = typeof part.type === "string" ? part.type : "";
-    if ((type === "input_text" || type === "output_text") && typeof part.text === "string") {
-      return { type: "text", text: part.text };
-    }
-    if (type === "input_image") {
-      const image = part.image_url ?? part.image;
-      if (typeof image === "string") return { type: "image_url", image_url: { url: image } };
-      if (image && typeof image === "object" && !Array.isArray(image)) return { type: "image_url", image_url: image };
-    }
-    return part;
-  });
-}
-
-function responsesToolChoiceToChat(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const choice = record(value);
-  if (choice.type === "function" && typeof choice.name === "string") {
-    return { type: "function", function: { name: choice.name } };
-  }
-  return value;
-}
-
-function reasoningTextParts(value: unknown): string[] {
-  if (typeof value === "string") {
-    const text = value.trim();
-    return text && text !== REASONING_UNAVAILABLE ? [text] : [];
-  }
-  if (Array.isArray(value)) return value.flatMap((entry) => reasoningTextParts(entry));
-  const item = record(value);
-  if (!Object.keys(item).length) return [];
-  if (typeof item.text === "string") return reasoningTextParts(item.text);
-  return [];
-}
-
-function reasoningItemText(item: Record<string, unknown>): string {
-  const parts = [item.summary, item.content, item.reasoning_content, item.text]
-    .flatMap((value) => reasoningTextParts(value));
-  return [...new Set(parts)].join("\n");
-}
-
-function mergeReasoning(existing: unknown, extra: string): string | undefined {
-  const parts = [
-    ...reasoningTextParts(existing),
-    ...reasoningTextParts(extra),
-  ];
-  const unique = [...new Set(parts)];
-  return unique.length ? unique.join("\n") : undefined;
-}
-
-function responsesInputToMessages(body: Record<string, unknown>): Array<Record<string, unknown>> {
-  const messages: Array<Record<string, unknown>> = [];
-  if (typeof body.instructions === "string" && body.instructions.trim()) messages.push({ role: "system", content: body.instructions });
-  const input = body.input;
-  if (typeof input === "string") messages.push({ role: "user", content: input });
-  else if (Array.isArray(input)) {
-    let mergeableAssistantIndex = -1;
-    const pendingReasoning: string[] = [];
-
-    for (const raw of input) {
-      if (typeof raw === "string") {
-        messages.push({ role: "user", content: raw });
-        mergeableAssistantIndex = -1;
-        pendingReasoning.length = 0;
-        continue;
-      }
-      const item = record(raw);
-      const type = typeof item.type === "string" ? item.type : "";
-
-      if (type === "reasoning") {
-        const reasoning = reasoningItemText(item);
-        if (reasoning && !pendingReasoning.includes(reasoning)) pendingReasoning.push(reasoning);
-        continue;
-      }
-
-      if (type === "function_call_output" || type === "custom_tool_call_output") {
-        messages.push({ role: "tool", tool_call_id: item.call_id, content: responsesToolOutputToChatContent(item.output ?? "") });
-        mergeableAssistantIndex = -1;
-        pendingReasoning.length = 0;
-        continue;
-      }
-
-      if (type === "function_call" || type === "custom_tool_call") {
-        const toolCall = {
-          id: item.call_id ?? item.id,
-          type: "function",
-          function: { name: item.name ?? "unknown", arguments: item.arguments ?? "{}" },
-        };
-        const reasoning = pendingReasoning.join("\n");
-        const mergeable = mergeableAssistantIndex >= 0 ? messages[mergeableAssistantIndex] : undefined;
-        if (mergeable?.role === "assistant") {
-          const calls = Array.isArray(mergeable.tool_calls) ? mergeable.tool_calls : [];
-          mergeable.tool_calls = [...calls, toolCall];
-          const mergedReasoning = mergeReasoning(mergeable.reasoning_content, reasoning);
-          if (mergedReasoning) mergeable.reasoning_content = mergedReasoning;
-        } else {
-          messages.push({
-            role: "assistant",
-            content: null,
-            reasoning_content: reasoning || REASONING_UNAVAILABLE,
-            tool_calls: [toolCall],
-          });
-          mergeableAssistantIndex = messages.length - 1;
-        }
-        pendingReasoning.length = 0;
-        continue;
-      }
-
-      const role = typeof item.role === "string" ? item.role : "user";
-      const message: Record<string, unknown> = {
-        role,
-        content: responsesContentToChat(item.content ?? item.text ?? ""),
-      };
-      if (role === "assistant") {
-        const reasoning = pendingReasoning.join("\n");
-        if (reasoning) message.reasoning_content = reasoning;
-        messages.push(message);
-        mergeableAssistantIndex = messages.length - 1;
-      } else {
-        messages.push(message);
-        mergeableAssistantIndex = -1;
-      }
-      pendingReasoning.length = 0;
-    }
-  }
-  return messages;
-}
-
-function responsesToolsToChat(value: unknown): unknown[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value.map((raw) => {
-    const tool = record(raw);
-    if (tool.type === "function" && tool.function && typeof tool.function === "object") return tool;
-    if (tool.type === "function") {
-      return { type: "function", function: { name: tool.name ?? "unknown", description: tool.description, parameters: tool.parameters ?? {} } };
-    }
-    return tool;
-  });
-}
-
 function requestBody(context: ProxyRequestContext): Record<string, unknown> {
   const source = context.body;
   let body: Record<string, unknown>;
@@ -219,8 +81,9 @@ function requestBody(context: ProxyRequestContext): Record<string, unknown> {
       messages: responsesInputToMessages(source),
       stream: source.stream === true,
     };
-    const tools = responsesToolsToChat(source.tools);
-    if (tools) body.tools = tools;
+    const translatedTools = responsesToolsToChat(source);
+    if (translatedTools.tools.length > 0) body.tools = translatedTools.tools;
+    rememberKimiResponseToolIdentities(context.requestId, translatedTools.identities);
     if (source.tool_choice !== undefined) body.tool_choice = responsesToolChoiceToChat(source.tool_choice);
     if (source.temperature !== undefined) body.temperature = source.temperature;
     if (source.top_p !== undefined) body.top_p = source.top_p;
