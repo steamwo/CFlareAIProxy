@@ -1,4 +1,3 @@
-import { applyReasoningSummaryIntent } from "../reasoning-summary-intent";
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { normalizeBaseUrl, sanitizeHeaders } from "../utils";
 import { applyOpenAiPromptCacheKey } from "./openai-prompt-cache";
@@ -25,10 +24,7 @@ export async function buildGenericRequest(context: ProxyRequestContext): Promise
   for (const [key, value] of Object.entries(defaults)) if (body[key] === undefined) body[key] = value;
   Object.assign(body, overrides);
   body.model = context.upstreamModel;
-  if (context.provider.kind === "openai-compatible") {
-    applyReasoningSummaryIntent(body, context);
-    await applyOpenAiPromptCacheKey(body, context);
-  }
+  if (context.provider.kind === "openai-compatible") await applyOpenAiPromptCacheKey(body, context);
   const headers = sanitizeHeaders(context.originalRequest.headers, context.provider.headers);
 
   const authHeader = typeof context.provider.auth.header === "string" ? context.provider.auth.header : "authorization";
