@@ -20,7 +20,13 @@ import { orderHealthyRoutes, recordProviderFailure, recordProviderSuccess } from
 import { buildSessionAffinityKey } from "./session-affinity";
 import { trackResponse } from "./stream";
 import type { CredentialRow, Env, GatewayEndpoint, LoggingSettings, ModelRouteRow, PoolCandidate, PoolLease, ProviderConfig, RateLease, Usage, UsageEvent } from "./types";
-import { classifyTransportError, classifyUpstreamResponse, gatewayErrorFromClassification } from "./upstream-errors";
+import {
+  classifyTransportError,
+  classifyUpstreamResponse,
+  credentialCooldownEligible,
+  gatewayErrorFromClassification,
+  providerFailureEligible,
+} from "./upstream-errors";
 import { asInt, parseJson, readJsonBody, truncate } from "./utils";
 
 function bearerToken(request: Request): string {
@@ -266,6 +272,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             providerId: provider.id,
             strategy: provider.pool_strategy,
             candidates,
+            model: publicModel,
             sessionKey: provider.options.session_affinity === false
               ? undefined
               : await buildSessionAffinityKey(c.req.raw, routeBody, gatewayKey.id, provider.id),
@@ -333,8 +340,10 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
           }
         } catch (error) {
           const normalized = classifyTransportError(error, provider.name, timeoutMs);
-          const health = await recordProviderFailure(c.env, provider.id, normalized.status, normalized.message);
-          if (health.disabledUntil > Date.now()) blockedProviders.add(provider.id);
+          if (providerFailureEligible(normalized)) {
+            const health = await recordProviderFailure(c.env, provider.id, normalized.status, normalized.message);
+            if (health.disabledUntil > Date.now()) blockedProviders.add(provider.id);
+          }
           throw normalized;
         }
 
@@ -347,6 +356,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             success: false,
             statusCode: classified.status,
             cooldownMs: classified.credentialFailure ? credentialCooldownMs(c.env, credential.id, classified.retryAfterMs) : 0,
+            cooldownEligible: classified.credentialFailure,
           }).catch(() => undefined);
           poolLease = undefined;
           if (classified.credentialFailure) await setCredentialError(c.env, credential.id, `${classified.code}: ${classified.message}`).catch(() => undefined);
@@ -387,6 +397,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
         const leaseId = poolLease.leaseId;
         const tracked = trackResponse(downstream, startedAt, async ({ usage, firstTokenMs, streamError }) => {
           const finalStatus = streamError ? 502 : downstream.status;
+          const streamCooldownEligible = streamError ? credentialCooldownEligible(streamError) : false;
           const event = {
             ...usageEvent(eventBase, usage, finalStatus, Date.now() - startedAt, firstTokenMs),
             ...(streamError ? { errorCode: "UPSTREAM_STREAM_ERROR", errorMessage: truncate(streamError, 1000) } : {}),
@@ -401,6 +412,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
                 : mirrorCredentialFailure
                   ? credentialCooldownMs(c.env, credential.id, mirrorCredentialFailure.retryAfterMs)
                   : 0,
+              cooldownEligible: streamError ? streamCooldownEligible : mirrorCredentialFailure?.credentialFailure === true,
             }),
             postDo(rateStub!, "/release", {
               leaseId: rateLeaseId!,
@@ -410,8 +422,8 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             queueError(c.env, logging, event),
             streamError
               ? Promise.allSettled([
-                  setCredentialError(c.env, credential.id, truncate(streamError, 1000)),
-                  recordProviderFailure(c.env, provider.id, 502, streamError),
+                  ...(streamCooldownEligible ? [setCredentialError(c.env, credential.id, truncate(streamError, 1000))] : []),
+                  ...(providerFailureEligible(streamError) ? [recordProviderFailure(c.env, provider.id, 502, streamError)] : []),
                 ])
               : recordProviderSuccess(c.env, provider.id),
           ];
@@ -437,6 +449,7 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
             success: false,
             statusCode: error instanceof GatewayError ? error.status : 500,
             cooldownMs: credentialCooldownMs(c.env, poolLease.credentialId),
+            cooldownEligible: credentialCooldownEligible(error),
           }).catch(() => undefined);
         }
         if (error instanceof GatewayError && error.status < 500 && error.code !== "AUTH_UNAVAILABLE" && error.code !== "RATE_LIMIT_EXCEEDED") throw error;

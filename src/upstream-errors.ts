@@ -12,6 +12,14 @@ export interface UpstreamErrorClassification {
   retryAfterMs?: number;
 }
 
+const CONNECTION_LIFECYCLE_CODES = new Set([
+  "CLIENT_CANCELED",
+  "UPSTREAM_CONNECTION_LIFECYCLE",
+  "UPSTREAM_CONNECTION_CLOSED",
+  "PROXY_CONNECTION_CLOSED",
+  "CREDENTIAL_PROXY_CLOSED",
+]);
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -57,6 +65,32 @@ function retryAfterFromPayload(payload: Record<string, unknown>, now = Date.now(
   return undefined;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : "";
+}
+
+export function isConnectionLifecycleError(error: unknown): boolean {
+  if (error instanceof GatewayError && CONNECTION_LIFECYCLE_CODES.has(error.code)) return true;
+  const name = errorName(error);
+  const message = errorMessage(error);
+  if (name === "AbortError") return true;
+  return /\bcontext cancelle?d\b|\brequest cancelle?d\b|\bunexpected\s+eof\b|(?:^|\s)eof(?:\s|$)|response (?:body )?ended early|chunked response ended early|connection (?:was )?closed/i.test(message);
+}
+
+export function credentialCooldownEligible(error: unknown): boolean {
+  return !isConnectionLifecycleError(error);
+}
+
+export function providerFailureEligible(error: unknown): boolean {
+  return !(error instanceof GatewayError && error.code === "CLIENT_CANCELED")
+    && !(errorName(error) === "AbortError")
+    && !/\bcontext cancelle?d\b|\brequest cancelle?d\b/i.test(errorMessage(error));
+}
+
 export function classifyUpstreamResponse(
   status: number,
   body: string,
@@ -83,6 +117,10 @@ export function classifyUpstreamResponse(
   if (upstreamCode === "previous_response_not_found" || /previous_response_id.*not found/.test(lower)) {
     return { status: 400, code: "PREVIOUS_RESPONSE_NOT_FOUND", type: "invalid_request_error", message, retryable: false, credentialFailure: false, providerFailure: false };
   }
+  if (upstreamCode === "item_not_found" || upstreamCode === "response_item_not_found"
+    || /(?:store\s*[=:]\s*false|store=false).*(?:item|response).*not found|(?:item|response).*not found.*(?:store\s*[=:]\s*false|store=false)/.test(lower)) {
+    return { status: 400, code: "RESPONSE_ITEM_NOT_FOUND", type: "invalid_request_error", message, retryable: false, credentialFailure: false, providerFailure: false };
+  }
   if (status === 401 || status === 403 || upstreamType === "authentication_error"
     || /invalid_api_key|invalid or expired token|refresh_token_reused|unauthorized|forbidden/.test(lower)) {
     return { status, code: "AUTH_UNAVAILABLE", type: status === 403 ? "permission_error" : "authentication_error", message, retryable: true, credentialFailure: true, providerFailure: false, retryAfterMs };
@@ -102,9 +140,15 @@ export function classifyUpstreamResponse(
 
 export function classifyTransportError(error: unknown, providerName: string, timeoutMs: number): GatewayError {
   if (error instanceof GatewayError) return error;
-  const message = error instanceof Error ? error.message : String(error);
-  const timedOut = error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")
-    || /timed?\s*out|timeout/i.test(message);
+  const message = errorMessage(error);
+  const name = errorName(error);
+  if (name === "AbortError" || /\bcontext cancelle?d\b|\brequest cancelle?d\b/i.test(message)) {
+    return new GatewayError(499, "CLIENT_CANCELED", `${providerName} request was canceled`, "upstream_error");
+  }
+  if (isConnectionLifecycleError(error)) {
+    return new GatewayError(502, "UPSTREAM_CONNECTION_LIFECYCLE", `${providerName} connection ended before the request completed: ${message}`, "upstream_error");
+  }
+  const timedOut = name === "TimeoutError" || /timed?\s*out|timeout/i.test(message);
   return new GatewayError(
     timedOut ? 504 : 502,
     timedOut ? "UPSTREAM_TIMEOUT" : "UPSTREAM_UNAVAILABLE",
