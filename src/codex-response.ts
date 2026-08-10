@@ -18,6 +18,7 @@ export interface CodexResponseContext {
 
 interface CodexState {
   terminal: boolean;
+  failed: boolean;
   items: Map<number, Record<string, unknown>>;
   fallbackItems: Record<string, unknown>[];
   nextSequenceNumber: number;
@@ -64,7 +65,11 @@ function responseFailedPayload(
   const error = Object.keys(upstreamError).length
     ? upstreamError
     : {
-        type: failure.status >= 500 ? "server_error" : "invalid_request_error",
+        type: failure.status >= 500
+          ? "server_error"
+          : failure.status === 400
+            ? "invalid_request_error"
+            : failure.type,
         code: failure.code,
         message: failure.message,
       };
@@ -128,9 +133,10 @@ function patchStartResponseModel(event: Record<string, unknown>, model: string):
 
 function strictResponsesStream(context: CodexResponseContext): Response {
   if (!context.upstream.body) throw new GatewayError(502, "CODEX_STREAM_EMPTY", "Codex returned an empty stream", "upstream_error");
-  const state: CodexState = { terminal: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
   const officialCodexClient = isRememberedOfficialCodexClient(context.requestId);
   const body = transformResponseSse(context.upstream.body, (data, controller) => {
+    if (state.failed) return;
     if (data === "[DONE]") {
       if (state.terminal) controller.enqueue(responseEncoder.encode("data: [DONE]\n\n"));
       return;
@@ -140,12 +146,14 @@ function strictResponsesStream(context: CodexResponseContext): Response {
     const failure = eventError(event);
     if (failure) {
       if (officialCodexClient) {
+        state.failed = true;
+        state.terminal = true;
         const payload = responseFailedPayload(event, failure, state.nextSequenceNumber);
         controller.enqueue(responseEncoder.encode(`event: response.failed\ndata: ${JSON.stringify(payload)}\n\n`));
       } else {
         controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify({ error: { message: failure.message, type: failure.type, code: failure.code } })}\n\n`));
+        controller.error(failure);
       }
-      controller.error(failure);
       return;
     }
     trackSequence(event, state);
@@ -174,7 +182,7 @@ function chatChunk(requestId: string, model: string, delta: Record<string, unkno
 
 function strictChatStream(context: CodexResponseContext): Response {
   if (!context.upstream.body) throw new GatewayError(502, "CODEX_STREAM_EMPTY", "Codex returned an empty stream", "upstream_error");
-  const state: CodexState = { terminal: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
   let roleSent = false;
   let finishReason = "stop";
   const emittedToolItems = new Set<number>();
@@ -261,7 +269,7 @@ function chatFromResponse(payload: Record<string, unknown>, model: string, reque
 }
 
 function parseSse(text: string): Record<string, unknown> {
-  const state: CodexState = { terminal: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
   let terminal: Record<string, unknown> | undefined;
   for (const frame of text.split(/\r?\n\r?\n/)) {
     const data = responseFrameData(frame);
