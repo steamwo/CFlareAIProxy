@@ -56,6 +56,16 @@ describe("OpenAI-compatible SSE terminal boundary", () => {
     expect(text.match(/data: \[DONE\]/g)).toHaveLength(1);
   });
 
+  it("recognizes an unterminated final [DONE] frame without duplicating it", async () => {
+    const response = await prepareProviderResponse(context(chunkedSse([
+      "data: {\"id\":\"chunk_1\",\"choices\":[]}\n\ndata: [DONE]",
+    ])));
+
+    const text = await response.text();
+    expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
+    expect(text.match(/data: \[DONE\]/g)).toHaveLength(1);
+  });
+
   it("separates an unterminated final SSE frame before synthetic [DONE]", async () => {
     const response = await prepareProviderResponse(context(chunkedSse([
       "data: {\"id\":\"chunk_partial\",\"choices\":[]}",
