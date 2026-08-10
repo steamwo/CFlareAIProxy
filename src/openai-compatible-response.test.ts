@@ -43,6 +43,28 @@ describe("OpenAI-compatible SSE terminal boundary", () => {
     expect(text.match(/data: \[DONE\]/g)).toHaveLength(1);
   });
 
+  it("synthesizes one [DONE] on clean EOF when upstream omitted it", async () => {
+    const response = await prepareProviderResponse(context(chunkedSse([
+      "data: {\"id\":\"chunk_1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+      "data: {\"id\":\"chunk_2\",\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+    ])));
+
+    const text = await response.text();
+    expect(text).toContain("\"id\":\"chunk_1\"");
+    expect(text).toContain("\"id\":\"chunk_2\"");
+    expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
+    expect(text.match(/data: \[DONE\]/g)).toHaveLength(1);
+  });
+
+  it("separates an unterminated final SSE frame before synthetic [DONE]", async () => {
+    const response = await prepareProviderResponse(context(chunkedSse([
+      "data: {\"id\":\"chunk_partial\",\"choices\":[]}",
+    ])));
+
+    const text = await response.text();
+    expect(text).toBe("data: {\"id\":\"chunk_partial\",\"choices\":[]}\n\ndata: [DONE]\n\n");
+  });
+
   it("does not treat multiline data containing [DONE] as a terminal frame", async () => {
     const response = await prepareProviderResponse(context(chunkedSse([
       "data: [DONE]\ndata: still-data\n\ndata: {\"id\":\"after_multiline\",\"choices\":[]}\n\n",
@@ -51,6 +73,7 @@ describe("OpenAI-compatible SSE terminal boundary", () => {
     const text = await response.text();
     expect(text).toContain("data: [DONE]\ndata: still-data\n\n");
     expect(text).toContain("\"id\":\"after_multiline\"");
+    expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
   });
 
   it("leaves non-OpenAI passthrough streams unchanged", async () => {
