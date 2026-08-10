@@ -58,14 +58,17 @@ export function normalizeKimiMessages(messages: unknown): Array<Record<string, u
           if (id) pending.push(id);
         }
       }
-    } else if (role === "tool") {
-      let id = typeof message.tool_call_id === "string" ? message.tool_call_id.trim() : "";
-      if (!id && typeof message.call_id === "string") id = message.call_id.trim();
-      if (!id && pending.length === 1) id = pending[0]!;
-      if (id) {
-        message.tool_call_id = id;
-        const index = pending.indexOf(id);
-        if (index >= 0) pending.splice(index, 1);
+    } else {
+      latestReasoning = "";
+      if (role === "tool") {
+        let id = typeof message.tool_call_id === "string" ? message.tool_call_id.trim() : "";
+        if (!id && typeof message.call_id === "string") id = message.call_id.trim();
+        if (!id && pending.length === 1) id = pending[0]!;
+        if (id) {
+          message.tool_call_id = id;
+          const index = pending.indexOf(id);
+          if (index >= 0) pending.splice(index, 1);
+        }
       }
     }
     output.push(message);
