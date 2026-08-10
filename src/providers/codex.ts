@@ -136,8 +136,19 @@ export function normalizeCodexInputMessageIds(value: unknown): unknown {
   return value.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
     const item = raw as Record<string, unknown>;
-    if (item.type !== "message" || typeof item.id !== "string" || item.id.length === 0) return raw;
-    const prefixed = item.id.startsWith("msg") ? item.id : `msg_${item.id}`;
+    const prefix = item.type === "message"
+      ? "msg"
+      : item.type === "reasoning"
+        ? "rs"
+        : item.type === "function_call"
+          ? "fc"
+          : item.type === "custom_tool_call"
+            ? "ctc"
+            : item.type === "custom_tool_call_output"
+              ? "ctco"
+              : undefined;
+    if (!prefix || typeof item.id !== "string" || item.id.length === 0) return raw;
+    const prefixed = item.id.startsWith(prefix) ? item.id : `${prefix}_${item.id}`;
     const id = prefixed.slice(0, 64);
     return id === item.id ? raw : { ...item, id };
   });
@@ -198,7 +209,11 @@ function normalizeCodexBody(body: Record<string, unknown>, model: string): Recor
   delete output.generate;
   delete output.prompt_cache_retention;
   delete output.safety_identifier;
+  const streamOptions = record(output.stream_options);
+  const hasReasoningSummaryDelivery = Object.prototype.hasOwnProperty.call(streamOptions, "reasoning_summary_delivery");
+  const reasoningSummaryDelivery = streamOptions.reasoning_summary_delivery;
   delete output.stream_options;
+  if (hasReasoningSummaryDelivery) output.stream_options = { reasoning_summary_delivery: reasoningSummaryDelivery };
   if ((!Array.isArray(output.tools) || output.tools.length === 0) && output.parallel_tool_calls !== undefined) delete output.parallel_tool_calls;
   return output;
 }
