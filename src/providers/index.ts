@@ -1,3 +1,4 @@
+import { rememberCodexClientIdentity } from "../codex-client-identity";
 import type { Env, ProviderKind, ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { buildCodexCustomToolRequest } from "./codex-custom-tools";
 import { buildGenericRequest } from "./generic";
@@ -10,7 +11,10 @@ export interface ProviderAdapter {
 }
 
 const adapters = new Map<ProviderKind, ProviderAdapter>([
-  ["codex", { build: (context) => buildCodexCustomToolRequest(context) }],
+  ["codex", { build: (context) => {
+    rememberCodexClientIdentity(context.requestId, context.originalRequest);
+    return buildCodexCustomToolRequest(context);
+  } }],
   ["kimi", { build: (context) => buildKimiRequest(context) }],
   ["qoder", { build: (context, env) => buildQoderRequest(context, env) }],
   ["opencode", { build: (context) => buildOpenCodeRequest(context) }],
