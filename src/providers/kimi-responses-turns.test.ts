@@ -101,8 +101,7 @@ describe("Kimi Responses assistant-turn reconstruction", () => {
     expect(result).toHaveLength(3);
     expect(result[0]?.tool_calls).toBeUndefined();
     expect(result[1]).toMatchObject({ role: "user" });
-    expect(result[2]).toMatchObject({ role: "assistant", content: null });
-    expect(result[2]?.reasoning_content).toBeUndefined();
+    expect(result[2]).toMatchObject({ role: "assistant", content: null, reasoning_content: "[reasoning unavailable]" });
     expect((result[2]?.tool_calls as unknown[])).toHaveLength(1);
   });
 
