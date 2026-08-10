@@ -4,6 +4,7 @@ import type { ProviderConfig, ProxyRequestContext } from "../types";
 const MAX_PROMPT_CACHE_KEY_LENGTH = 256;
 const CONTROL_CHARACTER = /\p{Cc}/u;
 const DERIVED_PROMPT_CACHE_NAMESPACE = "cflareai:openai-compat:prompt-cache:v1";
+const routeSupportByBody = new WeakMap<Record<string, unknown>, boolean>();
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -61,8 +62,19 @@ function configuredModelPromptCacheSupport(options: Record<string, unknown>, mod
   return booleanOption(capabilities);
 }
 
-export function supportsOpenAiPromptCacheKey(provider: ProviderConfig, modelId: string): boolean {
+export function setOpenAiPromptCacheRouteSupport(body: Record<string, unknown>, support: boolean | undefined): void {
+  routeSupportByBody.delete(body);
+  if (support !== undefined) routeSupportByBody.set(body, support);
+}
+
+export function supportsOpenAiPromptCacheKey(
+  provider: ProviderConfig,
+  modelId: string,
+  body?: Record<string, unknown>,
+): boolean {
   if (provider.kind !== "openai-compatible") return false;
+  const routeSupport = body ? routeSupportByBody.get(body) : undefined;
+  if (routeSupport !== undefined) return routeSupport;
   const modelSupport = configuredModelPromptCacheSupport(provider.options, modelId);
   if (modelSupport !== undefined) return modelSupport;
   return booleanOption(provider.options) ?? false;
@@ -109,7 +121,7 @@ export async function applyOpenAiPromptCacheKey(
   body: Record<string, unknown>,
   context: ProxyRequestContext,
 ): Promise<void> {
-  if (!supportsOpenAiPromptCacheKey(context.provider, context.upstreamModel)) {
+  if (!supportsOpenAiPromptCacheKey(context.provider, context.upstreamModel, context.body)) {
     delete body.prompt_cache_key;
     return;
   }
