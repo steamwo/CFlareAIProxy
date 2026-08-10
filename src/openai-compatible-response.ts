@@ -45,9 +45,14 @@ export function stopOpenAiCompatibleSseAfterDone(response: Response): Response {
       if (done) return;
       buffer += decoder.decode();
       if (buffer) {
+        const finalFrameIsDone = sseFrameData(buffer).trim() === "[DONE]";
         controller.enqueue(encoder.encode(buffer));
         const separator = eofFrameSeparator(buffer);
         if (separator) controller.enqueue(encoder.encode(separator));
+        if (finalFrameIsDone) {
+          done = true;
+          return;
+        }
       }
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       done = true;
