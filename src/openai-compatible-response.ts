@@ -6,6 +6,12 @@ function sseFrameData(frame: string): string {
     .join("\n");
 }
 
+function eofFrameSeparator(buffer: string): string {
+  if (!buffer || buffer.endsWith("\r\n\r\n") || buffer.endsWith("\n\n")) return "";
+  if (buffer.endsWith("\r\n") || buffer.endsWith("\n")) return "\n";
+  return "\n\n";
+}
+
 export function stopOpenAiCompatibleSseAfterDone(response: Response): Response {
   if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) return response;
 
@@ -38,7 +44,13 @@ export function stopOpenAiCompatibleSseAfterDone(response: Response): Response {
     flush(controller) {
       if (done) return;
       buffer += decoder.decode();
-      if (buffer) controller.enqueue(encoder.encode(buffer));
+      if (buffer) {
+        controller.enqueue(encoder.encode(buffer));
+        const separator = eofFrameSeparator(buffer);
+        if (separator) controller.enqueue(encoder.encode(separator));
+      }
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      done = true;
     },
   }));
 
