@@ -6,7 +6,7 @@ export type ProviderKind =
   | "opencode"
   | "custom";
 
-export type GatewayEndpoint = "responses" | "chat" | "completions";
+export type GatewayEndpoint = "responses" | "chat" | "completions" | "messages";
 export type PoolStrategy = "round_robin" | "fill_first" | "weighted" | "smooth_weighted" | "least_inflight";
 export type ProxyProtocol = "http" | "https" | "socks" | "socks4" | "socks4a" | "socks5" | "socks5h";
 export type LogLevel = "error" | "warn" | "info" | "debug";
