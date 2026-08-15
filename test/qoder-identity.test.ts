@@ -37,10 +37,14 @@ describe("Qoder request identity", () => {
     const nextTask = [...toolTurn, { role: "user", content: "now fix it" }];
     const tools = [{ type: "function", function: { name: "search", parameters: { type: "object" } } }];
 
-    const requestSet = await qoderRequestSetId(sessionId, "qoder-model", initial);
-    expect(await qoderRequestSetId(sessionId, "qoder-model", toolTurn)).toBe(requestSet);
-    expect(await qoderRequestSetId(sessionId, "qoder-model", nextTask)).not.toBe(requestSet);
-    expect(await qoderChatRecordId(sessionId, "qoder-model", toolTurn, tools, 4096))
-      .not.toBe(await qoderChatRecordId(sessionId, "qoder-model", initial, tools, 4096));
+    const requestSet = await qoderRequestSetId(sessionId, "qoder-model", initial, 65536);
+    expect(await qoderRequestSetId(sessionId, "qoder-model", toolTurn, 65536)).toBe(requestSet);
+    expect(await qoderRequestSetId(sessionId, "qoder-model", nextTask, 65536)).not.toBe(requestSet);
+    expect(await qoderRequestSetId(sessionId, "qoder-model", initial, 131072)).not.toBe(requestSet);
+
+    const record = await qoderChatRecordId(sessionId, "qoder-model", toolTurn, tools, 4096, "high", 65536);
+    expect(await qoderChatRecordId(sessionId, "qoder-model", initial, tools, 4096, "high", 65536)).not.toBe(record);
+    expect(await qoderChatRecordId(sessionId, "qoder-model", toolTurn, tools, 4096, "low", 65536)).not.toBe(record);
+    expect(await qoderChatRecordId(sessionId, "qoder-model", toolTurn, tools, 4096, "high", 131072)).not.toBe(record);
   });
 });
