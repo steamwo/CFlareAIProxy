@@ -5,7 +5,10 @@ const MAX_ENTRIES = 256;
 
 export function rememberQoderToolRoutes(requestId: string, routes: Map<string, QoderToolRoute>): void {
   if (!routes.size) return;
-  if (routesByRequest.size >= MAX_ENTRIES) routesByRequest.delete(routesByRequest.keys().next().value as string | undefined);
+  if (routesByRequest.size >= MAX_ENTRIES) {
+    const oldest = routesByRequest.keys().next().value;
+    if (typeof oldest === "string") routesByRequest.delete(oldest);
+  }
   routesByRequest.set(requestId, new Map(routes));
 }
 
