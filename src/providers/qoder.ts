@@ -3,7 +3,8 @@ import { GatewayError } from "../errors";
 import { normalizeBaseUrl, parseJson, truncate } from "../utils";
 import { buildQoderHeaders } from "./qoder-crypto";
 import { qoderChatRecordId, qoderRequestSetId, qoderSessionId } from "./qoder-identity";
-import { normalizeQoderRequest, qoderEncodeBody, qoderEncodedUrl } from "./qoder-protocol";
+import { normalizeQoderRequest, qoderEncodeBody, qoderEncodedUrl, qoderResponseToolRoutes } from "./qoder-protocol";
+import { rememberQoderToolRoutes } from "./qoder-tool-routes";
 import { providerFetch } from "../upstream-fetch";
 
 const encoder = new TextEncoder();
@@ -96,6 +97,9 @@ export async function buildQoderRequest(context: ProxyRequestContext, env: Env):
   const credentials = credentialFields(context);
   const modelConfig = await loadModelConfig(env, context, credentials);
   const normalized = await normalizeQoderRequest(context, modelConfig);
+  if (context.endpoint === "responses") {
+    rememberQoderToolRoutes(context.requestId, await qoderResponseToolRoutes(context.body));
+  }
   const sessionId = await qoderSessionId(context.originalRequest, context.body, context.upstreamModel);
   const requestSetId = await qoderRequestSetId(sessionId, context.upstreamModel, normalized.messages, normalized.contextWindow);
   const chatRecordId = await qoderChatRecordId(
