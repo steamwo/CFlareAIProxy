@@ -232,6 +232,12 @@ function argumentsText(value: unknown): string {
   try { return JSON.stringify(value); } catch { return "{}"; }
 }
 
+function valueText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  try { return JSON.stringify(value); } catch { return ""; }
+}
+
 function canonicalToolCallMessage(callId: string, name: string, args: unknown): Record<string, unknown> {
   return {
     role: "assistant",
@@ -359,7 +365,7 @@ async function responsesRequest(body: Record<string, unknown>, modelConfig: Reco
         continue;
       }
       if (type === "function_call_output") {
-        rawMessages.push({ role: "tool", tool_call_id: stringValue(item.call_id), content: contentToText(item.output) });
+        rawMessages.push({ role: "tool", tool_call_id: stringValue(item.call_id), content: valueText(item.output) });
         continue;
       }
       if (type === "tool_search_call") {
@@ -367,7 +373,7 @@ async function responsesRequest(body: Record<string, unknown>, modelConfig: Reco
         continue;
       }
       if (type === "tool_search_output") {
-        rawMessages.push({ role: "tool", tool_call_id: stringValue(item.call_id), content: contentToText(item.tools) });
+        rawMessages.push({ role: "tool", tool_call_id: stringValue(item.call_id), content: valueText(item.tools) });
         continue;
       }
       if (type === "additional_tools") continue;
