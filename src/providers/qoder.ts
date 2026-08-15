@@ -1,7 +1,8 @@
 import type { Env, ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { GatewayError } from "../errors";
-import { normalizeBaseUrl, parseJson, sha256Hex, truncate } from "../utils";
+import { normalizeBaseUrl, parseJson, truncate } from "../utils";
 import { buildQoderHeaders } from "./qoder-crypto";
+import { qoderChatRecordId, qoderRequestSetId, qoderSessionId } from "./qoder-identity";
 import { providerFetch } from "../upstream-fetch";
 
 const encoder = new TextEncoder();
@@ -46,10 +47,6 @@ function normalizeMessages(messages: unknown): {
     output.push(normalized);
   }
   return { messages: output, system: systemParts.join("\n\n"), lastUser };
-}
-
-async function stableHash(...parts: unknown[]): Promise<string> {
-  return sha256Hex(JSON.stringify(parts));
 }
 
 function credentialFields(context: ProxyRequestContext): {
@@ -148,12 +145,14 @@ export async function buildQoderRequest(context: ProxyRequestContext, env: Env):
       ? context.body.max_tokens
       : maxOutput;
   const maxTokens = Math.max(1, Math.min(maxOutput, requested));
-  const sessionId = await stableHash("qoder-session", credentials.userId, context.upstreamModel);
-  const recordId = await stableHash("qoder-record", context.upstreamModel, normalized.messages, context.body.tools ?? [], maxTokens);
+  const tools = Array.isArray(context.body.tools) ? context.body.tools : [];
+  const sessionId = await qoderSessionId(context.originalRequest, context.body, context.upstreamModel);
+  const requestSetId = await qoderRequestSetId(sessionId, context.upstreamModel, normalized.messages);
+  const chatRecordId = await qoderChatRecordId(sessionId, context.upstreamModel, normalized.messages, tools, maxTokens);
   const body: Record<string, unknown> = {
     request_id: crypto.randomUUID(),
-    request_set_id: recordId,
-    chat_record_id: recordId,
+    request_set_id: requestSetId,
+    chat_record_id: chatRecordId,
     session_id: sessionId,
     stream: true,
     chat_task: "FREE_INPUT",
@@ -170,7 +169,7 @@ export async function buildQoderRequest(context: ProxyRequestContext, env: Env):
     aliyun_user_type: "",
     system: normalized.system,
     messages: normalized.messages,
-    tools: Array.isArray(context.body.tools) ? context.body.tools : [],
+    tools,
     parameters: { max_tokens: maxTokens },
     chat_context: {
       chatPrompt: "",
