@@ -24,6 +24,7 @@ BEGIN
     '$.reasoningLevels', (
       SELECT CASE
         WHEN json_type(NEW.raw_json, '$.thinking_config.disabled') IS NOT NULL
+          AND json_type(NEW.raw_json, '$.thinking_config.disabled') <> 'null'
           THEN json_insert(COALESCE(json_group_array(key), json('[]')), '$[#]', 'none')
         ELSE COALESCE(json_group_array(key), json('[]'))
       END
@@ -76,6 +77,7 @@ SET capabilities_json = json_set(
   '$.reasoningLevels', (
     SELECT CASE
       WHEN json_type(discovered_models.raw_json, '$.thinking_config.disabled') IS NOT NULL
+        AND json_type(discovered_models.raw_json, '$.thinking_config.disabled') <> 'null'
         THEN json_insert(COALESCE(json_group_array(key), json('[]')), '$[#]', 'none')
       ELSE COALESCE(json_group_array(key), json('[]'))
     END
