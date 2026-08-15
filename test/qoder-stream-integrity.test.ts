@@ -50,7 +50,10 @@ describe("Qoder stream integrity", () => {
     const response = await prepareQoderResponse(context(upstream(source), false));
     const payload = await response.json() as Record<string, unknown>;
     const choices = payload.choices as Array<Record<string, unknown>>;
-    const message = choices[0].message as Record<string, unknown>;
+    expect(choices).toHaveLength(1);
+    const firstChoice = choices[0];
+    expect(firstChoice).toBeDefined();
+    const message = firstChoice?.message as Record<string, unknown>;
     expect(message.content).toBe("prefix suffix");
     expect(payload.usage).toEqual({
       prompt_tokens: 3,
