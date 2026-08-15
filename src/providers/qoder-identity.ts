@@ -46,8 +46,9 @@ export function qoderRequestSetId(
   sessionId: string,
   upstreamModel: string,
   messages: readonly Record<string, unknown>[],
+  contextWindow = 0,
 ): Promise<string> {
-  return stableHash("qoder-request-set", sessionId, upstreamModel, qoderRequestSetMessagePrefix(messages));
+  return stableHash("qoder-request-set", sessionId, upstreamModel, contextWindow, qoderRequestSetMessagePrefix(messages));
 }
 
 export function qoderChatRecordId(
@@ -56,6 +57,8 @@ export function qoderChatRecordId(
   messages: readonly Record<string, unknown>[],
   tools: readonly unknown[],
   maxTokens: number,
+  reasoningEffort = "",
+  contextWindow = 0,
 ): Promise<string> {
-  return stableHash("qoder-chat-record", sessionId, upstreamModel, messages, tools, maxTokens);
+  return stableHash("qoder-chat-record", sessionId, upstreamModel, messages, tools, maxTokens, reasoningEffort, contextWindow);
 }
