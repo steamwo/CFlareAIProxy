@@ -87,12 +87,15 @@ describe("Qoder live model options", () => {
   });
 
   it("normalizes Responses namespaces, ToolSearch and tool history", async () => {
+    const discovered = [{ type: "function", name: "git_status", parameters: { type: "object" } }];
     const body = {
       model: "Qoder Test",
       input: [
         { type: "message", role: "user", content: [{ type: "input_text", text: "read it" }] },
         { type: "function_call", call_id: "call-1", namespace: "mcp", name: "read", arguments: "{\"path\":\"README.md\"}" },
-        { type: "function_call_output", call_id: "call-1", output: "done" },
+        { type: "function_call_output", call_id: "call-1", output: { ok: true, files: ["README.md"] } },
+        { type: "tool_search_call", call_id: "search-1", arguments: { query: "git" } },
+        { type: "tool_search_output", call_id: "search-1", tools: discovered },
       ],
       tools: [
         { type: "tool_search", description: "discover tools" },
@@ -107,12 +110,14 @@ describe("Qoder live model options", () => {
     expect(normalized.reasoningEffort).toBe("medium");
     expect(normalized.contextWindow).toBe(65536);
     expect(normalized.maxTokens).toBe(4096);
-    expect(normalized.tools).toHaveLength(2);
+    expect(normalized.tools).toHaveLength(3);
     expect(routes.get("tool_search")).toEqual({ kind: "tool_search", name: "tool_search" });
     expect(routes.get("mcp__read")).toEqual({ kind: "function", name: "read", namespace: "mcp" });
+    expect(routes.get("git_status")).toEqual({ kind: "function", name: "git_status" });
     expect(normalized.messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ role: "assistant", tool_calls: [expect.objectContaining({ function: expect.objectContaining({ name: "mcp__read" }) })] }),
-      expect.objectContaining({ role: "tool", tool_call_id: "call-1", content: "done" }),
+      expect.objectContaining({ role: "tool", tool_call_id: "call-1", content: JSON.stringify({ ok: true, files: ["README.md"] }) }),
+      expect.objectContaining({ role: "tool", tool_call_id: "search-1", content: JSON.stringify(discovered) }),
     ]));
   });
 
