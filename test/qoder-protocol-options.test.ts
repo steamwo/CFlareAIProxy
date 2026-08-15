@@ -81,6 +81,8 @@ describe("Qoder live model options", () => {
     expect(normalizeQoderReasoningEffort(modelConfig(), "HIGH")).toBe("high");
     expect(normalizeQoderReasoningEffort(modelConfig(), "auto")).toBe("");
     expect(() => normalizeQoderReasoningEffort(modelConfig(), "ultra")).toThrow(/supported efforts/i);
+    const withoutDisabled = { ...modelConfig(), thinking_config: { enabled: { efforts: { low: {}, high: {} } }, disabled: null } };
+    expect(() => normalizeQoderReasoningEffort(withoutDisabled, "none")).toThrow(/does not support disabling/i);
     expect(qoderContextWindows(modelConfig()).map((entry) => entry.tokenCount)).toEqual([65536, 131072]);
     expect(normalizeQoderContextWindow(modelConfig(), 131072)).toBe(131072);
     expect(() => normalizeQoderContextWindow(modelConfig(), 100000)).toThrow(/supported/i);
