@@ -177,10 +177,12 @@ export async function buildQoderRequest(context: ProxyRequestContext, env: Env):
   headers.set("accept-encoding", "identity");
   headers.set("x-model-key", context.upstreamModel);
   headers.set("x-model-source", typeof modelConfig.source === "string" ? modelConfig.source : "system");
+  const requestBody = new Uint8Array(bytes.byteLength);
+  requestBody.set(bytes);
 
   return {
     url,
-    init: { method: "POST", headers, body: bytes, redirect: "manual" },
+    init: { method: "POST", headers, body: requestBody.buffer, redirect: "manual" },
     responseMode: "qoder-chat",
   };
 }
