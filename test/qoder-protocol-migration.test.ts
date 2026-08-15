@@ -31,7 +31,7 @@ function createDatabase(seedBeforeMigration = false): DatabaseSync {
   return db;
 }
 
-function rawModel(): string {
+function rawModel(disabled: unknown = {}): string {
   return JSON.stringify({
     is_vl: true,
     max_input_tokens: 131072,
@@ -41,18 +41,18 @@ function rawModel(): string {
     },
     thinking_config: {
       enabled: { efforts: { low: {}, high: {} } },
-      disabled: {},
+      disabled,
     },
   });
 }
 
-function insertQoder(db: DatabaseSync, id: string): void {
+function insertQoder(db: DatabaseSync, id: string, disabled: unknown = {}): void {
   db.prepare(`
     INSERT INTO discovered_models(
       provider_id,credential_id,model_id,display_name,endpoint,owned_by,
       capabilities_json,raw_json,enabled,discovered_at
     ) VALUES('qoder','credential-1',?,?, 'chat','qoder','{}',?,1,1)
-  `).run(id, `Qoder ${id}`, rawModel());
+  `).run(id, `Qoder ${id}`, rawModel(disabled));
 }
 
 afterEach(() => {
@@ -75,6 +75,17 @@ describe("Qoder protocol endpoint migration", () => {
       expect(capabilities.inputModalities).toEqual(["text", "image"]);
       expect(capabilities.reasoningLevels).toEqual(expect.arrayContaining(["low", "high", "none"]));
     }
+  });
+
+  it("does not advertise reasoning=none when Qoder reports disabled as null", () => {
+    database = createDatabase();
+    insertQoder(database, "no-disable", null);
+    const row = database.prepare(
+      "SELECT capabilities_json FROM discovered_models WHERE provider_id='qoder' AND model_id='no-disable' AND endpoint='chat'",
+    ).get() as { capabilities_json: string };
+    const capabilities = JSON.parse(row.capabilities_json) as { reasoningLevels?: string[] };
+    expect(capabilities.reasoningLevels).toEqual(expect.arrayContaining(["low", "high"]));
+    expect(capabilities.reasoningLevels).not.toContain("none");
   });
 
   it("mirrors future Qoder chat discoveries without touching non-Qoder rows", () => {
