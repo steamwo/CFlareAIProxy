@@ -363,7 +363,7 @@ async function firstQoderData(response: Response, maxBytes = 128 * 1024): Promis
     }
     return pending.length ? pending.join("\n") : undefined;
   } finally {
-    await reader.cancel("qoder queue inspection complete").catch(() => undefined);
+    void reader.cancel("qoder queue inspection complete").catch(() => undefined);
   }
 }
 
