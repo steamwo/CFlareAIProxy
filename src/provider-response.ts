@@ -2,7 +2,7 @@ import { restoreCodexMultiAgentResponse } from "./codex-multi-agent-response";
 import { prepareCodexCustomToolResponse } from "./codex-custom-response";
 import { prepareKimiResponse } from "./kimi-response";
 import { stopOpenAiCompatibleSseAfterDone } from "./openai-compatible-response";
-import { prepareQoderResponse } from "./qoder-response";
+import { prepareQoderResponse } from "./qoder-response-compat";
 import { rewriteResponseModels } from "./response-utils";
 import { prepareDownstreamResponse } from "./stream";
 import type { GatewayEndpoint, ProviderKind, UpstreamResponseMode } from "./types";

@@ -61,7 +61,7 @@ afterEach(() => {
 });
 
 describe("Qoder protocol endpoint migration", () => {
-  it("backfills Responses and Messages rows and normalizes live capabilities", () => {
+  it("backfills Responses and Messages rows and normalizes live protocol capabilities", () => {
     database = createDatabase(true);
     const rows = database.prepare(
       "SELECT endpoint,capabilities_json FROM discovered_models WHERE model_id='before' ORDER BY endpoint",
@@ -71,8 +71,8 @@ describe("Qoder protocol endpoint migration", () => {
       const capabilities = JSON.parse(row.capabilities_json) as Record<string, unknown>;
       expect(capabilities.contextWindow).toBe(131072);
       expect(capabilities.supportsTools).toBe(true);
-      expect(capabilities.supportsImages).toBe(true);
-      expect(capabilities.inputModalities).toEqual(["text", "image"]);
+      expect(capabilities.supportsImages).toBe(false);
+      expect(capabilities.inputModalities).toEqual(["text"]);
       expect(capabilities.reasoningLevels).toEqual(expect.arrayContaining(["low", "high", "none"]));
     }
   });

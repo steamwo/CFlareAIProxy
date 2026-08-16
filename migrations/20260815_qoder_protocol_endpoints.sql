@@ -5,6 +5,8 @@ PRAGMA foreign_keys = ON;
 -- the upstream catalogue, then mirror every Qoder chat discovery row into the
 -- two compatibility endpoints at the D1 boundary. The trigger also normalizes
 -- Qoder-specific live model metadata into CFlare's generic capability shape.
+-- The current qoder-proxy protocol adapters are text-only even when Qoder marks
+-- a model as VL, so do not advertise image input until those adapters forward it.
 CREATE TRIGGER IF NOT EXISTS trg_qoder_discovered_protocols
 AFTER INSERT ON discovered_models
 WHEN NEW.provider_id = 'qoder' AND NEW.endpoint = 'chat'
@@ -18,8 +20,8 @@ BEGIN
       CAST(json_extract(NEW.raw_json, '$.max_input_tokens') AS INTEGER)
     ),
     '$.supportsTools', json('true'),
-    '$.supportsImages', CASE WHEN json_extract(NEW.raw_json, '$.is_vl') = 1 THEN json('true') ELSE json('false') END,
-    '$.inputModalities', CASE WHEN json_extract(NEW.raw_json, '$.is_vl') = 1 THEN json('["text","image"]') ELSE json('["text"]') END,
+    '$.supportsImages', json('false'),
+    '$.inputModalities', json('["text"]'),
     '$.outputModalities', json('["text"]'),
     '$.reasoningLevels', (
       SELECT CASE
@@ -71,8 +73,8 @@ SET capabilities_json = json_set(
     CAST(json_extract(raw_json, '$.max_input_tokens') AS INTEGER)
   ),
   '$.supportsTools', json('true'),
-  '$.supportsImages', CASE WHEN json_extract(raw_json, '$.is_vl') = 1 THEN json('true') ELSE json('false') END,
-  '$.inputModalities', CASE WHEN json_extract(raw_json, '$.is_vl') = 1 THEN json('["text","image"]') ELSE json('["text"]') END,
+  '$.supportsImages', json('false'),
+  '$.inputModalities', json('["text"]'),
   '$.outputModalities', json('["text"]'),
   '$.reasoningLevels', (
     SELECT CASE
