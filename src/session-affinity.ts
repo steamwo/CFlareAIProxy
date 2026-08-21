@@ -81,6 +81,7 @@ function codexSessionSignal(request: Request): SessionSignal | undefined {
   const metadata = parseCodexTurnMetadata(headers.get("x-codex-turn-metadata"));
   return [
     headerSignal(headers, "thread-id", "codex-thread"),
+    headerSignal(headers, "thread_id", "codex-thread"),
     metadata.threadId ? { source: "codex-thread", value: metadata.threadId } : undefined,
     headerSignal(headers, "x-codex-window-id", "codex-window"),
     headerSignal(headers, "session-id", "codex-session"),
