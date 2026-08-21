@@ -1,11 +1,33 @@
 import type { ProviderResponseContext } from "./provider-response";
+import { takeQoderDiscoveryPriorUsage } from "./providers/qoder-discovery";
 import { prepareQoderResponse as prepareBaseQoderResponse } from "./qoder-response";
+import type { Usage } from "./types";
 
 const encoder = new TextEncoder();
 type JsonRecord = Record<string, unknown>;
 
 function record(value: unknown): JsonRecord | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : undefined;
+}
+
+function numeric(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function hasUsage(usage: Usage | undefined): usage is Usage {
+  return !!usage && (usage.promptTokens > 0 || usage.completionTokens > 0 || usage.cachedTokens > 0 || usage.totalTokens > 0);
+}
+
+function addPriorResponsesUsage(usage: JsonRecord, prior: Usage): void {
+  const inputTokens = numeric(usage.input_tokens);
+  const outputTokens = numeric(usage.output_tokens);
+  const totalTokens = numeric(usage.total_tokens) || inputTokens + outputTokens;
+  usage.input_tokens = inputTokens + prior.promptTokens;
+  usage.output_tokens = outputTokens + prior.completionTokens;
+  usage.total_tokens = totalTokens + prior.totalTokens;
+  const details = record(usage.input_tokens_details) ?? {};
+  details.cached_tokens = numeric(details.cached_tokens) + prior.cachedTokens;
+  usage.input_tokens_details = details;
 }
 
 function isCompleteSseData(value: string): boolean {
@@ -143,41 +165,13 @@ function eventPayload(block: string): { event: string; payload: JsonRecord } | u
   }
 }
 
-/** Match qoder-proxy's responseState: one text output item keeps the same ID for
- * its added/delta/done lifecycle and the final response.completed snapshot. */
-function stabilizeResponsesTextId(response: Response): Response {
-  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) return response;
+function transformSseBlocks(
+  response: Response,
+  rewriteBlock: (block: string) => string,
+): Response {
+  if (!response.body) return response;
   const decoder = new TextDecoder();
   let buffer = "";
-  let textItemId = "";
-
-  const rewriteBlock = (block: string): string => {
-    const parsed = eventPayload(block);
-    if (!parsed) return block;
-    const { event, payload } = parsed;
-    if (event === "response.output_item.added" || event === "response.output_item.done") {
-      const item = record(payload.item);
-      if (item?.type === "message" && typeof item.id === "string" && item.id) textItemId = item.id;
-    } else if (
-      event === "response.output_text.delta"
-      || event === "response.output_text.done"
-      || event === "response.content_part.added"
-      || event === "response.content_part.done"
-    ) {
-      if (!textItemId && typeof payload.item_id === "string" && payload.item_id) textItemId = payload.item_id;
-    } else if (event === "response.completed" && textItemId) {
-      const completed = record(payload.response);
-      if (completed && Array.isArray(completed.output)) {
-        for (const rawItem of completed.output) {
-          const item = record(rawItem);
-          if (item?.type === "message") item.id = textItemId;
-        }
-        return `event: ${event}\ndata: ${JSON.stringify(payload)}`;
-      }
-    }
-    return block;
-  };
-
   const transformed = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
@@ -204,9 +198,73 @@ function stabilizeResponsesTextId(response: Response): Response {
   });
 }
 
+async function includePriorResponsesUsage(response: Response, prior: Usage): Promise<Response> {
+  if (!hasUsage(prior)) return response;
+  if (response.headers.get("content-type")?.includes("text/event-stream")) {
+    return transformSseBlocks(response, (block) => {
+      const parsed = eventPayload(block);
+      if (!parsed || parsed.event !== "response.completed") return block;
+      const completed = record(parsed.payload.response);
+      const usage = completed ? record(completed.usage) : undefined;
+      if (!usage) return block;
+      addPriorResponsesUsage(usage, prior);
+      return `event: ${parsed.event}\ndata: ${JSON.stringify(parsed.payload)}`;
+    });
+  }
+
+  const text = await response.text();
+  let payload: JsonRecord | undefined;
+  try { payload = record(JSON.parse(text)); } catch { /* preserve non-JSON body */ }
+  const usage = payload ? record(payload.usage) : undefined;
+  if (usage) addPriorResponsesUsage(usage, prior);
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  headers.delete("transfer-encoding");
+  return new Response(payload ? JSON.stringify(payload) : text, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/** Match qoder-proxy's responseState: one text output item keeps the same ID for
+ * its added/delta/done lifecycle and the final response.completed snapshot. */
+function stabilizeResponsesTextId(response: Response): Response {
+  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) return response;
+  let textItemId = "";
+  return transformSseBlocks(response, (block) => {
+    const parsed = eventPayload(block);
+    if (!parsed) return block;
+    const { event, payload } = parsed;
+    if (event === "response.output_item.added" || event === "response.output_item.done") {
+      const item = record(payload.item);
+      if (item?.type === "message" && typeof item.id === "string" && item.id) textItemId = item.id;
+    } else if (
+      event === "response.output_text.delta"
+      || event === "response.output_text.done"
+      || event === "response.content_part.added"
+      || event === "response.content_part.done"
+    ) {
+      if (!textItemId && typeof payload.item_id === "string" && payload.item_id) textItemId = payload.item_id;
+    } else if (event === "response.completed" && textItemId) {
+      const completed = record(payload.response);
+      if (completed && Array.isArray(completed.output)) {
+        for (const rawItem of completed.output) {
+          const item = record(rawItem);
+          if (item?.type === "message") item.id = textItemId;
+        }
+        return `event: ${event}\ndata: ${JSON.stringify(payload)}`;
+      }
+    }
+    return block;
+  });
+}
+
 export async function prepareQoderResponse(context: ProviderResponseContext): Promise<Response> {
+  const priorUsage = context.endpoint === "responses" ? takeQoderDiscoveryPriorUsage(context.requestId) : undefined;
   const upstream = withQoderErrorParity(context.upstream);
   let response = await prepareBaseQoderResponse({ ...context, upstream });
+  if (context.endpoint === "responses" && hasUsage(priorUsage)) response = await includePriorResponsesUsage(response, priorUsage);
   if (context.endpoint === "responses" && context.requestedStream) response = stabilizeResponsesTextId(response);
   return response;
 }
