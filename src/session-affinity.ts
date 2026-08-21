@@ -155,8 +155,8 @@ export function extractClientTurnKey(request: Request): string | undefined {
 /**
  * Produce the canonical downstream conversation key used only for Qoder's
  * upstream session identity. This mirrors qoder-proxy's protocol-specific
- * namespaces while leaving CFlare's existing account-pool affinity aliases
- * backwards-compatible.
+ * namespaces while leaving CFlare's existing account-pool affinity precedence
+ * and aliases backwards-compatible.
  */
 export function qoderClientSessionKey(request: Request, body: Record<string, unknown>): string | undefined {
   const headers = request.headers;
@@ -202,19 +202,14 @@ export function qoderClientSessionKey(request: Request, body: Record<string, unk
 export function extractSessionAffinitySignals(request: Request, body: Record<string, unknown>): SessionSignal[] {
   const headers = request.headers;
   const claude = claudeSessionSignal(request, body);
-
-  // On OpenAI generation endpoints, current Codex thread/session identity is
-  // more specific than a stray compatibility header. Keep the older Claude
-  // signal as a fallback so existing non-Codex OpenAI clients remain sticky.
-  if (!isOpenAiGenerationPath(request)) {
-    const aliases = claudeSignalAliases(request, claude);
-    if (aliases.length) return aliases;
-  }
+  const claudeAliases = claudeSignalAliases(request, claude);
+  // Preserve the deployed CFlare precedence: a native Claude session signal
+  // wins account-pool affinity even on OpenAI-shaped compatibility requests.
+  // Qoder provider session identity is canonicalized separately above.
+  if (claudeAliases.length) return claudeAliases;
 
   const codex = codexSessionSignal(request);
   if (codex) return codexSignalAliases(codex);
-
-  if (claude) return claudeSignalAliases(request, claude);
 
   const explicit = [
     headerSignal(headers, "session-id", "codex"),
@@ -231,24 +226,28 @@ export function extractSessionAffinitySignals(request: Request, body: Record<str
   }
 
   const promptCacheKey = normalizeExplicitId(body.prompt_cache_key);
+  const responsesConversation = conversationId(body);
+  const clientRequest = headerSignal(headers, "x-client-request-id", "client-request");
+  if (clientRequest) {
+    // Preserve x-client-request-id as the primary legacy affinity key, but add
+    // stable Responses aliases when available so changing request IDs can still
+    // find the same selected credential after a restart/turn boundary.
+    const aliases: SessionSignal[] = [clientRequest];
+    if (promptCacheKey) aliases.push({ source: "prompt-cache", value: promptCacheKey });
+    if (responsesConversation) aliases.push({ source: "conversation", value: responsesConversation });
+    return aliases;
+  }
+
   if (promptCacheKey) {
     const signals: SessionSignal[] = [{ source: "prompt-cache", value: promptCacheKey }];
-    const responsesConversation = conversationId(body);
     if (responsesConversation) signals.push({ source: "conversation", value: responsesConversation });
     return signals;
   }
 
-  const responsesConversation = conversationId(body);
   if (responsesConversation) return [{ source: "conversation", value: responsesConversation }];
 
   const metadataUser = normalizeExplicitId(record(body.metadata).user_id);
   if (metadataUser) return [{ source: "metadata-user", value: metadataUser }];
-
-  // x-client-request-id is request-scoped for Codex. Keep it as a legacy
-  // fallback, but never let it override a stable Responses prompt cache key or
-  // conversation identifier.
-  const clientRequest = headerSignal(headers, "x-client-request-id", "client-request");
-  if (clientRequest) return [clientRequest];
 
   const legacyConversation = normalizeExplicitId(body.conversation_id);
   if (legacyConversation) return [{ source: "conversation", value: legacyConversation }];
