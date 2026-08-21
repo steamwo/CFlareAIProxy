@@ -211,31 +211,31 @@ export function extractSessionAffinitySignals(request: Request, body: Record<str
   const codex = codexSessionSignal(request);
   if (codex) return codexSignalAliases(codex);
 
+  const promptCacheKey = normalizeExplicitId(body.prompt_cache_key);
+  const responsesConversation = conversationId(body);
+  const clientRequest = headerSignal(headers, "x-client-request-id", "client-request");
   const explicit = [
     headerSignal(headers, "session-id", "codex"),
     headerSignal(headers, "session_id", "codex"),
     headerSignal(headers, "x-session-id", "session-header", true),
     headerSignal(headers, "x-conversation-id", "conversation-header", true),
     headerSignal(headers, "x-session-affinity", "opencode"),
+    clientRequest,
   ].find((entry): entry is SessionSignal => entry !== undefined);
-  if (explicit) return [explicit];
+  if (explicit) {
+    if (explicit.source !== "client-request") return [explicit];
+    // Preserve x-client-request-id as the primary legacy affinity key, but add
+    // stable Responses aliases when available so changing request IDs can still
+    // find the same selected credential after a restart/turn boundary.
+    const aliases: SessionSignal[] = [explicit];
+    if (promptCacheKey) aliases.push({ source: "prompt-cache", value: promptCacheKey });
+    if (responsesConversation) aliases.push({ source: "conversation", value: responsesConversation });
+    return aliases;
+  }
 
   for (const [field, source] of [["session_id", "session"], ["sessionId", "session"]] as const) {
     const value = normalizeExplicitId(body[field]);
     if (value) return [{ source, value }];
-  }
-
-  const promptCacheKey = normalizeExplicitId(body.prompt_cache_key);
-  const responsesConversation = conversationId(body);
-  const clientRequest = headerSignal(headers, "x-client-request-id", "client-request");
-  if (clientRequest) {
-    // Preserve x-client-request-id as the primary legacy affinity key, but add
-    // stable Responses aliases when available so changing request IDs can still
-    // find the same selected credential after a restart/turn boundary.
-    const aliases: SessionSignal[] = [clientRequest];
-    if (promptCacheKey) aliases.push({ source: "prompt-cache", value: promptCacheKey });
-    if (responsesConversation) aliases.push({ source: "conversation", value: responsesConversation });
-    return aliases;
   }
 
   if (promptCacheKey) {
