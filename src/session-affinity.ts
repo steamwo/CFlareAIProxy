@@ -1,10 +1,17 @@
 const MAX_EXPLICIT_ID_LENGTH = 256;
+const MAX_CODEX_TURN_METADATA_LENGTH = 8 << 10;
 const CONTROL_CHARACTER = /\p{Cc}/u;
 
 export interface SessionSignal {
   source: string;
   value: string;
   legacy?: boolean;
+}
+
+export interface CodexTurnMetadata {
+  sessionId?: string;
+  threadId?: string;
+  turnId?: string;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -21,6 +28,15 @@ function normalizeExplicitId(value: unknown): string | undefined {
 function headerSignal(headers: Headers, name: string, source: string, legacy = false): SessionSignal | undefined {
   const value = normalizeExplicitId(headers.get(name));
   return value ? { source, value, ...(legacy ? { legacy: true } : {}) } : undefined;
+}
+
+function requestPath(request: Request): string {
+  try { return new URL(request.url).pathname; } catch { return ""; }
+}
+
+function isOpenAiGenerationPath(request: Request): boolean {
+  const path = requestPath(request);
+  return path === "/v1/responses" || path === "/v1/chat/completions";
 }
 
 function claudeMetadataSessionId(body: Record<string, unknown>): string | undefined {
@@ -44,14 +60,57 @@ function conversationId(body: Record<string, unknown>): string | undefined {
   return normalizeExplicitId(record(conversation).id);
 }
 
+export function parseCodexTurnMetadata(raw: string | null | undefined): CodexTurnMetadata {
+  const value = raw?.trim() ?? "";
+  if (!value || value.length > MAX_CODEX_TURN_METADATA_LENGTH) return {};
+  try {
+    const metadata = record(JSON.parse(value));
+    return {
+      sessionId: normalizeExplicitId(metadata.session_id),
+      threadId: normalizeExplicitId(metadata.thread_id),
+      turnId: normalizeExplicitId(metadata.turn_id),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function codexSessionSignal(request: Request): SessionSignal | undefined {
+  if (!isOpenAiGenerationPath(request)) return undefined;
+  const headers = request.headers;
+  const metadata = parseCodexTurnMetadata(headers.get("x-codex-turn-metadata"));
+  return [
+    headerSignal(headers, "thread-id", "codex-thread"),
+    metadata.threadId ? { source: "codex-thread", value: metadata.threadId } : undefined,
+    headerSignal(headers, "x-codex-window-id", "codex-window"),
+    headerSignal(headers, "session-id", "codex-session"),
+    headerSignal(headers, "session_id", "codex-session"),
+    headerSignal(headers, "x-session-id", "openai-session"),
+    metadata.sessionId ? { source: "codex-session", value: metadata.sessionId } : undefined,
+  ].find((entry): entry is SessionSignal => entry !== undefined);
+}
+
+export function extractClientTurnKey(request: Request): string | undefined {
+  if (!isOpenAiGenerationPath(request)) return undefined;
+  const turnId = parseCodexTurnMetadata(request.headers.get("x-codex-turn-metadata")).turnId;
+  return turnId ? `codex/turn/${turnId}` : undefined;
+}
+
 export function extractSessionAffinitySignals(request: Request, body: Record<string, unknown>): SessionSignal[] {
   const headers = request.headers;
-  const explicit = [
+  const claude = [
     headerSignal(headers, "x-claude-code-session-id", "claude"),
     (() => {
       const value = claudeMetadataSessionId(body);
       return value ? { source: "claude", value } : undefined;
     })(),
+  ].find((entry): entry is SessionSignal => entry !== undefined);
+  if (claude) return [claude];
+
+  const codex = codexSessionSignal(request);
+  if (codex) return [codex];
+
+  const explicit = [
     headerSignal(headers, "session-id", "codex"),
     headerSignal(headers, "session_id", "codex"),
     headerSignal(headers, "x-session-id", "session-header", true),
