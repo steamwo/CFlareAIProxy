@@ -29,10 +29,22 @@ describe("Claude Code Anthropic request compatibility", () => {
     ]);
   });
 
-  it("forwards a Claude Code request through the cached internal JSON body path", async () => {
+  it("forwards a Claude Code fallback request through the cached internal JSON body path", async () => {
     let forwarded: Request | undefined;
     let forwardedBody: Record<string, unknown> | undefined;
-    const worker = {
+    const native = {
+      async fetch(request: Request) {
+        await readJsonBody(request, 1024 * 1024);
+        return Response.json({
+          error: {
+            code: "MODEL_NOT_FOUND",
+            type: "invalid_request_error",
+            message: "No route is configured for model public-model",
+          },
+        }, { status: 404 });
+      },
+    };
+    const chat = {
       async fetch(request: Request) {
         forwarded = request;
         forwardedBody = await readJsonBody(request, 1024 * 1024);
@@ -60,7 +72,8 @@ describe("Claude Code Anthropic request compatibility", () => {
       request,
       { MAX_BODY_BYTES: "1048576" } as Env,
       {} as ExecutionContext,
-      worker,
+      native,
+      chat,
     );
 
     expect(response?.status).toBe(200);
