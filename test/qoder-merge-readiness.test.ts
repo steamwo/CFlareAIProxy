@@ -77,17 +77,23 @@ describe("Qoder merge-readiness identity parity", () => {
     expect([...left].some((key) => key !== undefined && right.has(key))).toBe(true);
   });
 
-  it("prefers stable Codex thread and prompt-cache identity over request-scoped compatibility headers", async () => {
+  it("keeps CFlare pool precedence while Qoder uses stable Codex/prompt-cache identity", async () => {
     const withThread = responseRequest({
       "thread-id": "thread-current",
       "x-claude-code-session-id": "stray-compat-session",
     });
-    expect(extractSessionAffinitySignal(withThread, {})).toEqual({ source: "codex-thread", value: "thread-current" });
+    // Existing account-pool behavior remains Claude-first for compatibility.
+    expect(extractSessionAffinitySignal(withThread, {})).toEqual({ source: "claude", value: "stray-compat-session" });
+    // Qoder itself uses the protocol-specific current Codex thread.
+    expect(await qoderSessionId(withThread, {}, "lite"))
+      .toBe(await qoderSessionId(responseRequest({ "thread-id": "thread-current" }), {}, "pro"));
 
     const first = responseRequest({ "x-client-request-id": "request-1" });
     const second = responseRequest({ "x-client-request-id": "request-2" });
     const body = { model: "qoder", input: "continue", prompt_cache_key: "cache-thread" };
-    expect(extractSessionAffinitySignal(first, body)).toEqual({ source: "prompt-cache", value: "cache-thread" });
+    // x-client-request-id remains the primary legacy pool key, while the stable
+    // prompt-cache key is carried as an alias and drives Qoder's provider session.
+    expect(extractSessionAffinitySignal(first, body)).toEqual({ source: "client-request", value: "request-1" });
     expect(await qoderSessionId(first, body, "lite")).toBe(await qoderSessionId(second, body, "pro"));
   });
 });
