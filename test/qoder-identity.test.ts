@@ -19,6 +19,15 @@ describe("Qoder request identity", () => {
     expect(await qoderSessionId(different, body, "qoder-model")).not.toBe(firstId);
   });
 
+  it("keeps one downstream conversation in one Qoder session across model switches", async () => {
+    const request = new Request("https://gateway.test/v1/responses", {
+      headers: { "thread-id": "thread-123" },
+    });
+    const body = { model: "test", input: "hello" };
+    expect(await qoderSessionId(request, body, "model-a"))
+      .toBe(await qoderSessionId(request, body, "model-b"));
+  });
+
   it("isolates requests when no client session signal exists", async () => {
     const request = new Request("https://gateway.test/v1/chat/completions");
     const body = { model: "test", messages: [{ role: "user", content: "hello" }] };
@@ -46,5 +55,18 @@ describe("Qoder request identity", () => {
     expect(await qoderChatRecordId(sessionId, "qoder-model", initial, tools, 4096, "high", 65536)).not.toBe(record);
     expect(await qoderChatRecordId(sessionId, "qoder-model", toolTurn, tools, 4096, "low", 65536)).not.toBe(record);
     expect(await qoderChatRecordId(sessionId, "qoder-model", toolTurn, tools, 4096, "high", 131072)).not.toBe(record);
+  });
+
+  it("uses downstream turn identity before model, context, or tool-history fallbacks", async () => {
+    const sessionId = "session";
+    const initial = [{ role: "user", content: "fix it" }];
+    const continued = [
+      ...initial,
+      { role: "assistant", content: "", tool_calls: [{ id: "call-1", type: "function", function: { name: "bash", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "call-1", content: "done" },
+    ];
+    const first = await qoderRequestSetId(sessionId, "model-a", initial, 65536, "codex/turn/turn-42");
+    expect(await qoderRequestSetId(sessionId, "model-b", continued, 131072, "codex/turn/turn-42")).toBe(first);
+    expect(await qoderRequestSetId(sessionId, "model-a", initial, 65536, "codex/turn/turn-43")).not.toBe(first);
   });
 });
