@@ -1,56 +1,28 @@
 import type { Env, ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { GatewayError } from "../errors";
-import { normalizeBaseUrl, parseJson, sha256Hex, truncate } from "../utils";
+import { extractClientTurnKey } from "../session-affinity";
+import { normalizeBaseUrl, parseJson, truncate } from "../utils";
 import { buildQoderHeaders } from "./qoder-crypto";
+import {
+  QODER_DISCOVERY_HEADER,
+  registerQoderResponsesDiscovery,
+  type QoderDiscoveryAttempt,
+} from "./qoder-discovery";
+import { qoderChatRecordId, qoderRequestSetId, qoderSessionId } from "./qoder-identity";
+import {
+  normalizeQoderRequest,
+  qoderEncodeBody,
+  qoderEncodedUrl,
+  qoderResponseToolRoutes,
+  type QoderToolRoute,
+} from "./qoder-protocol";
+import { projectQoderResponsesBody } from "./qoder-tool-virtualization";
+import { rememberQoderToolRoutes } from "./qoder-tool-routes";
 import { providerFetch } from "../upstream-fetch";
 
 const encoder = new TextEncoder();
 
-function contentToText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (typeof part === "string") return part;
-      if (!part || typeof part !== "object") return "";
-      const record = part as Record<string, unknown>;
-      if (typeof record.text === "string") return record.text;
-      if (typeof record.content === "string") return record.content;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function normalizeMessages(messages: unknown): {
-  messages: Array<Record<string, unknown>>;
-  system: string;
-  lastUser: string;
-} {
-  if (!Array.isArray(messages)) return { messages: [], system: "", lastUser: "" };
-  const output: Array<Record<string, unknown>> = [];
-  const systemParts: string[] = [];
-  let lastUser = "";
-
-  for (const raw of messages) {
-    if (!raw || typeof raw !== "object") continue;
-    const message = raw as Record<string, unknown>;
-    const role = typeof message.role === "string" ? message.role : "user";
-    const text = contentToText(message.content);
-    if (role === "system" || role === "developer") {
-      if (text) systemParts.push(text);
-      continue;
-    }
-    if (role === "user" && text) lastUser = text;
-    const normalized: Record<string, unknown> = { ...message, role, content: text };
-    output.push(normalized);
-  }
-  return { messages: output, system: systemParts.join("\n\n"), lastUser };
-}
-
-async function stableHash(...parts: unknown[]): Promise<string> {
-  return sha256Hex(JSON.stringify(parts));
-}
+type QoderCredentials = ReturnType<typeof credentialFields>;
 
 function credentialFields(context: ProxyRequestContext): {
   userId: string;
@@ -88,7 +60,7 @@ function fallbackModelConfig(model: string): Record<string, unknown> {
 async function loadModelConfig(
   env: Env,
   context: ProxyRequestContext,
-  credentials: ReturnType<typeof credentialFields>,
+  credentials: QoderCredentials,
 ): Promise<Record<string, unknown>> {
   const cacheKey = `qoder:model-config:${context.credential.id}:${context.upstreamModel}`;
   const cached = await env.CONFIG_CACHE.get(cacheKey);
@@ -97,8 +69,7 @@ async function loadModelConfig(
   const baseUrl = normalizeBaseUrl(context.provider.base_url);
   const endpoint = context.provider.endpoints.models ?? "/algo/api/v2/model/list";
   const url = endpoint.startsWith("http") ? normalizeBaseUrl(endpoint) : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
-  const body = encoder.encode("");
-  const signed = await buildQoderHeaders(body, url, credentials);
+  const signed = await buildQoderHeaders(new Uint8Array(), url, credentials);
   const headers = new Headers(signed);
   headers.set("accept", "application/json");
   headers.set("content-type", "application/json");
@@ -134,26 +105,46 @@ async function loadModelConfig(
   return fallbackModelConfig(context.upstreamModel);
 }
 
-export async function buildQoderRequest(context: ProxyRequestContext, env: Env): Promise<UpstreamBuildResult> {
-  if (context.endpoint !== "chat") {
-    throw new GatewayError(400, "QODER_ENDPOINT_UNSUPPORTED", "Qoder adapter currently supports /v1/chat/completions", "invalid_request_error");
+async function buildQoderAttempt(
+  context: ProxyRequestContext,
+  modelConfig: Record<string, unknown>,
+  credentials: QoderCredentials,
+  sessionId: string,
+  clientTurnKey: string,
+): Promise<QoderDiscoveryAttempt> {
+  const normalized = await normalizeQoderRequest(context, modelConfig);
+  let routes = new Map<string, QoderToolRoute>();
+  if (context.endpoint === "responses") {
+    routes = await qoderResponseToolRoutes(context.body);
+    rememberQoderToolRoutes(context.requestId, routes);
   }
-  const credentials = credentialFields(context);
-  const normalized = normalizeMessages(context.body.messages);
-  const modelConfig = await loadModelConfig(env, context, credentials);
-  const maxOutput = typeof modelConfig.max_output_tokens === "number" ? modelConfig.max_output_tokens : 32768;
-  const requested = typeof context.body.max_completion_tokens === "number"
-    ? context.body.max_completion_tokens
-    : typeof context.body.max_tokens === "number"
-      ? context.body.max_tokens
-      : maxOutput;
-  const maxTokens = Math.max(1, Math.min(maxOutput, requested));
-  const sessionId = await stableHash("qoder-session", credentials.userId, context.upstreamModel);
-  const recordId = await stableHash("qoder-record", context.upstreamModel, normalized.messages, context.body.tools ?? [], maxTokens);
+  const requestSetId = await qoderRequestSetId(
+    sessionId,
+    context.upstreamModel,
+    normalized.messages,
+    normalized.contextWindow,
+    clientTurnKey,
+  );
+  const chatRecordId = await qoderChatRecordId(
+    sessionId,
+    context.upstreamModel,
+    normalized.messages,
+    normalized.tools,
+    normalized.maxTokens,
+    normalized.reasoningEffort,
+    normalized.contextWindow,
+  );
+  const parameters: Record<string, unknown> = { max_tokens: normalized.maxTokens };
+  if (normalized.reasoningEffort) parameters.reasoningEffort = normalized.reasoningEffort;
+  if (normalized.contextWindow > 0) parameters.contextWindow = normalized.contextWindow;
+  let isReasoning = modelConfig.is_reasoning === true;
+  if (normalized.reasoningEffort === "none") isReasoning = false;
+  else if (normalized.reasoningEffort) isReasoning = true;
+
   const body: Record<string, unknown> = {
     request_id: crypto.randomUUID(),
-    request_set_id: recordId,
-    chat_record_id: recordId,
+    request_set_id: requestSetId,
+    chat_record_id: chatRecordId,
     session_id: sessionId,
     stream: true,
     chat_task: "FREE_INPUT",
@@ -170,17 +161,14 @@ export async function buildQoderRequest(context: ProxyRequestContext, env: Env):
     aliyun_user_type: "",
     system: normalized.system,
     messages: normalized.messages,
-    tools: Array.isArray(context.body.tools) ? context.body.tools : [],
-    parameters: { max_tokens: maxTokens },
+    tools: normalized.tools,
+    parameters,
     chat_context: {
       chatPrompt: "",
       imageUrls: null,
       extra: {
         context: [],
-        modelConfig: {
-          key: context.upstreamModel,
-          is_reasoning: modelConfig.is_reasoning === true,
-        },
+        modelConfig: { key: context.upstreamModel, is_reasoning: isReasoning },
         originalContent: normalized.lastUser,
       },
       features: [],
@@ -200,8 +188,10 @@ export async function buildQoderRequest(context: ProxyRequestContext, env: Env):
 
   const baseUrl = normalizeBaseUrl(context.provider.base_url);
   const endpoint = context.provider.endpoints.chat ?? "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common";
-  const url = endpoint.startsWith("http") ? normalizeBaseUrl(endpoint) : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
-  const bytes = encoder.encode(JSON.stringify(body));
+  const rawUrl = endpoint.startsWith("http") ? endpoint : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
+  const url = qoderEncodedUrl(rawUrl);
+  const plainBody = encoder.encode(JSON.stringify(body));
+  const bytes = qoderEncodeBody(plainBody);
   const signed = await buildQoderHeaders(bytes, url, credentials);
   const headers = new Headers(signed);
   headers.set("content-type", "application/json");
@@ -210,10 +200,57 @@ export async function buildQoderRequest(context: ProxyRequestContext, env: Env):
   headers.set("accept-encoding", "identity");
   headers.set("x-model-key", context.upstreamModel);
   headers.set("x-model-source", typeof modelConfig.source === "string" ? modelConfig.source : "system");
+  const requestBody = new Uint8Array(bytes.byteLength);
+  requestBody.set(bytes);
 
   return {
-    url,
-    init: { method: "POST", headers, body: bytes, redirect: "manual" },
-    responseMode: "qoder-chat",
+    request: {
+      url,
+      init: { method: "POST", headers, body: requestBody.buffer, redirect: "manual" },
+      responseMode: "qoder-chat",
+    },
+    routes,
   };
+}
+
+export async function buildQoderRequest(context: ProxyRequestContext, env: Env): Promise<UpstreamBuildResult> {
+  if (context.endpoint === "completions") {
+    throw new GatewayError(400, "QODER_ENDPOINT_UNSUPPORTED", "Qoder does not support legacy /v1/completions", "invalid_request_error");
+  }
+  const credentials = credentialFields(context);
+  const modelConfig = await loadModelConfig(env, context, credentials);
+  const sessionId = await qoderSessionId(context.originalRequest, context.body, context.upstreamModel);
+  const clientTurnKey = extractClientTurnKey(context.originalRequest) ?? "";
+  const projection = context.endpoint === "responses"
+    ? projectQoderResponsesBody(context.body)
+    : { body: context.body, proxyManaged: false, functionLeaves: 0, visibleFunctions: 0 };
+
+  const buildAttempt = (body: Record<string, unknown>): Promise<QoderDiscoveryAttempt> => buildQoderAttempt(
+    { ...context, body },
+    modelConfig,
+    credentials,
+    sessionId,
+    clientTurnKey,
+  );
+  const initial = await buildAttempt(projection.body);
+
+  if (context.endpoint === "responses" && projection.proxyManaged) {
+    registerQoderResponsesDiscovery(context.requestId, {
+      originalBody: context.body,
+      currentBody: projection.body,
+      currentRoutes: initial.routes,
+      buildAttempt,
+    });
+    const headers = new Headers(initial.request.init.headers);
+    headers.set(QODER_DISCOVERY_HEADER, context.requestId);
+    initial.request.init = { ...initial.request.init, headers };
+    console.info(JSON.stringify({
+      event: "qoder_responses_tool_virtualization",
+      function_tools_received: projection.functionLeaves,
+      core_tools_visible: projection.visibleFunctions,
+      tool_search_proxy_managed: true,
+    }));
+  }
+
+  return initial.request;
 }

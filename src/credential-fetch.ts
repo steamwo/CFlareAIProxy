@@ -1,5 +1,6 @@
 import { GatewayError } from "./errors";
 import { idleTimeoutFor, proxyRequest, validateProxyUrl, type ProxyDialect } from "./proxy-transport";
+import { QODER_DISCOVERY_HEADER, runRegisteredQoderResponsesDiscovery } from "./providers/qoder-discovery";
 import type { Credential, Env, ProviderConfig } from "./types";
 import { providerFetch, type ProviderFetchOptions } from "./upstream-fetch";
 
@@ -56,7 +57,7 @@ async function credentialProxyFetch(proxyValue: string, target: URL, init: Reque
   }
 }
 
-export async function providerFetchForCredential(
+async function baseProviderFetchForCredential(
   env: Env,
   provider: ProviderConfig,
   credential: Credential,
@@ -72,4 +73,26 @@ export async function providerFetchForCredential(
     return fetch(url.toString(), { ...init, signal: init.signal ?? AbortSignal.timeout(timeoutMs) });
   }
   return credentialProxyFetch(override, url, init, timeoutMs);
+}
+
+export async function providerFetchForCredential(
+  env: Env,
+  provider: ProviderConfig,
+  credential: Credential,
+  target: string | URL,
+  init: RequestInit = {},
+  options: ProviderFetchOptions = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const discoveryRequestId = provider.kind === "qoder" ? headers.get(QODER_DISCOVERY_HEADER)?.trim() : undefined;
+  if (!discoveryRequestId) return baseProviderFetchForCredential(env, provider, credential, target, init, options);
+
+  headers.delete(QODER_DISCOVERY_HEADER);
+  const cleanInit: RequestInit = { ...init, headers };
+  return runRegisteredQoderResponsesDiscovery(
+    discoveryRequestId,
+    target,
+    cleanInit,
+    (nextTarget, nextInit) => baseProviderFetchForCredential(env, provider, credential, nextTarget, nextInit, options),
+  );
 }
