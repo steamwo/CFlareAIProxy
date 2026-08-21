@@ -28,6 +28,13 @@ describe("Qoder downstream session affinity", () => {
     expect(extractSessionAffinitySignal(request, {})).toEqual({ source: "codex-thread", value: "header-thread" });
   });
 
+  it("accepts Codex Thread_id as the current thread alias", () => {
+    const request = new Request("https://gateway.test/v1/chat/completions", {
+      headers: { "thread_id": "underscore-thread" },
+    });
+    expect(extractSessionAffinitySignal(request, {})).toEqual({ source: "codex-thread", value: "underscore-thread" });
+  });
+
   it("uses prompt_cache_key as a restart-safe Responses fallback", () => {
     const request = new Request("https://gateway.test/v1/responses");
     expect(extractSessionAffinitySignal(request, { prompt_cache_key: "  cache-thread-123  " }))
