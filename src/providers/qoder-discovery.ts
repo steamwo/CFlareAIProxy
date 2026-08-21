@@ -315,6 +315,14 @@ function searchArguments(call: ProxySearchCall): unknown {
   try { return JSON.parse(call.args); } catch { return { query: call.query }; }
 }
 
+function compactSearchResult(query: string, matches: ReturnType<typeof searchDeferredQoderResponsesTools>): JsonRecord {
+  return {
+    query,
+    count: matches.length,
+    matched_tools: matches.map((candidate) => ({ name: qoderCandidateDisplayName(candidate) })),
+  };
+}
+
 function appendSearchResults(
   currentBody: JsonRecord,
   originalTools: unknown,
@@ -331,7 +339,11 @@ function appendSearchResults(
     const tools = qoderSearchResultTools(matches);
     input.push(
       { type: "tool_search_call", call_id: call.callId, arguments: searchArguments(call) },
-      { type: "tool_search_output", call_id: call.callId, tools },
+      // Keep the hidden tool-result payload compact, matching qoder-proxy. Full
+      // schemas are promoted separately through additional_tools so the model
+      // can call them without serializing every schema into the tool message.
+      { type: "tool_search_output", call_id: call.callId, tools: compactSearchResult(call.query, matches) },
+      { type: "additional_tools", tools },
     );
     console.info(JSON.stringify({
       event: "qoder_responses_proxy_tool_search",
