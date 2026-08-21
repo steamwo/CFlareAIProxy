@@ -1,4 +1,4 @@
-import { extractSessionAffinitySignal } from "../session-affinity";
+import { qoderClientSessionKey } from "../session-affinity";
 import { sha256Hex } from "../utils";
 
 async function stableHash(...parts: unknown[]): Promise<string> {
@@ -29,17 +29,18 @@ export function qoderRequestSetMessagePrefix(
 
 /**
  * Preserve one trustworthy downstream conversation across turns and model
- * switches while keeping Qoder's upstream session identifier opaque. Requests
- * without a trustworthy client/session signal remain isolated.
+ * switches while keeping Qoder's upstream session identifier opaque. Protocol
+ * aliases are canonicalized first so equivalent Codex headers and Claude Code
+ * subagent identities converge on the same provider session.
  */
 export async function qoderSessionId(
   request: Request,
   body: Record<string, unknown>,
   _upstreamModel?: string,
 ): Promise<string> {
-  const signal = extractSessionAffinitySignal(request, body);
-  if (!signal) return crypto.randomUUID();
-  return stableHash("qoder-client-session", signal.source, signal.value);
+  const key = qoderClientSessionKey(request, body);
+  if (!key) return crypto.randomUUID();
+  return stableHash("qoder-client-session", key);
 }
 
 export function qoderRequestSetId(
