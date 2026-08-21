@@ -26,7 +26,7 @@ qoderMessages.use("/v1/messages", cors({
 qoderMessages.post("/v1/messages", (c) => proxyGeneration(c, "messages"));
 
 const nativeMessagesWorker = {
-  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     return qoderMessages.fetch(request, env, ctx);
   },
 };
