@@ -28,18 +28,18 @@ export function qoderRequestSetMessagePrefix(
 }
 
 /**
- * Bind Qoder to an explicit downstream conversation when one exists. Without a
- * trustworthy client/session signal, isolate the request instead of deriving
- * linkable identity from prompt content.
+ * Preserve one trustworthy downstream conversation across turns and model
+ * switches while keeping Qoder's upstream session identifier opaque. Requests
+ * without a trustworthy client/session signal remain isolated.
  */
 export async function qoderSessionId(
   request: Request,
   body: Record<string, unknown>,
-  upstreamModel: string,
+  _upstreamModel?: string,
 ): Promise<string> {
   const signal = extractSessionAffinitySignal(request, body);
   if (!signal) return crypto.randomUUID();
-  return stableHash("qoder-client-session", upstreamModel, signal.source, signal.value);
+  return stableHash("qoder-client-session", signal.source, signal.value);
 }
 
 export function qoderRequestSetId(
@@ -47,7 +47,10 @@ export function qoderRequestSetId(
   upstreamModel: string,
   messages: readonly Record<string, unknown>[],
   contextWindow = 0,
+  clientTurnKey = "",
 ): Promise<string> {
+  const turnKey = clientTurnKey.trim();
+  if (turnKey) return stableHash("qoder-client-turn", sessionId, turnKey);
   return stableHash("qoder-request-set", sessionId, upstreamModel, contextWindow, qoderRequestSetMessagePrefix(messages));
 }
 
