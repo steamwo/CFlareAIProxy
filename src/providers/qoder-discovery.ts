@@ -319,7 +319,10 @@ function compactSearchResult(query: string, matches: ReturnType<typeof searchDef
   return {
     query,
     count: matches.length,
-    matched_tools: matches.map((candidate) => ({ name: qoderCandidateDisplayName(candidate) })),
+    matched_tools: matches.map((candidate) => {
+      const name = stringValue(candidate.tool.name).trim();
+      return candidate.namespace ? { name, namespace: candidate.namespace } : { name };
+    }),
   };
 }
 
