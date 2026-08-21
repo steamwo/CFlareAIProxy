@@ -7,6 +7,7 @@ import {
 } from "../src/providers/qoder-discovery";
 import type { QoderToolRoute } from "../src/providers/qoder-protocol";
 import { projectQoderResponsesBody, qoderResponsesFunctionCandidates } from "../src/providers/qoder-tool-virtualization";
+import { prepareQoderResponse } from "../src/qoder-response-compat";
 
 function functionTool(name: string, description = "test tool"): Record<string, unknown> {
   return { type: "function", name, description, parameters: { type: "object", properties: {} } };
@@ -169,5 +170,39 @@ describe("Qoder proxy-managed Responses discovery", () => {
       cachedTokens: 0,
       totalTokens: 18,
     });
+  });
+
+  it("adds hidden discovery tokens to the final buffered Responses usage", async () => {
+    const requestId = "discovery-usage";
+    const tools = largeTools();
+    const originalBody = { model: "Lite", input: "query the database", tools };
+    const projected = projectQoderResponsesBody(originalBody);
+    const builtBodies: Array<Record<string, unknown>> = [];
+    registration(requestId, originalBody, projected.body, routes(), builtBodies);
+
+    const replies = [response(searchFrame("database")), response(finalTextFrame("database ready"))];
+    let fetches = 0;
+    const upstream = await runRegisteredQoderResponsesDiscovery(
+      requestId,
+      "https://qoder.test/agent",
+      { method: "POST" },
+      async () => replies[fetches++]!,
+    );
+    const downstream = await prepareQoderResponse({
+      upstream,
+      mode: "qoder-chat",
+      requestedStream: false,
+      model: "Lite",
+      requestId,
+      providerKind: "qoder",
+      endpoint: "responses",
+    });
+    const payload = await downstream.json() as Record<string, unknown>;
+    expect(payload.usage).toMatchObject({
+      input_tokens: 13,
+      output_tokens: 3,
+      total_tokens: 16,
+    });
+    expect(takeQoderDiscoveryPriorUsage(requestId)).toBeUndefined();
   });
 });
