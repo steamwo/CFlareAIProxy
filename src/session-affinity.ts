@@ -84,9 +84,12 @@ function codexSessionSignal(request: Request): SessionSignal | undefined {
     headerSignal(headers, "thread_id", "codex-thread"),
     metadata.threadId ? { source: "codex-thread", value: metadata.threadId } : undefined,
     headerSignal(headers, "x-codex-window-id", "codex-window"),
-    headerSignal(headers, "session-id", "codex-session"),
-    headerSignal(headers, "session_id", "codex-session"),
-    headerSignal(headers, "x-session-id", "openai-session"),
+    // Keep existing CFlare signal namespaces for pre-existing headers so the
+    // account-pool affinity key remains stable while Qoder gains richer Codex
+    // thread/turn inputs.
+    headerSignal(headers, "session-id", "codex"),
+    headerSignal(headers, "session_id", "codex"),
+    headerSignal(headers, "x-session-id", "session-header", true),
     metadata.sessionId ? { source: "codex-session", value: metadata.sessionId } : undefined,
   ].find((entry): entry is SessionSignal => entry !== undefined);
 }
