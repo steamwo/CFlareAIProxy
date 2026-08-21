@@ -1,13 +1,28 @@
 import type { Env, ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { GatewayError } from "../errors";
+import { extractClientTurnKey } from "../session-affinity";
 import { normalizeBaseUrl, parseJson, truncate } from "../utils";
 import { buildQoderHeaders } from "./qoder-crypto";
+import {
+  QODER_DISCOVERY_HEADER,
+  registerQoderResponsesDiscovery,
+  type QoderDiscoveryAttempt,
+} from "./qoder-discovery";
 import { qoderChatRecordId, qoderRequestSetId, qoderSessionId } from "./qoder-identity";
-import { normalizeQoderRequest, qoderEncodeBody, qoderEncodedUrl, qoderResponseToolRoutes } from "./qoder-protocol";
+import {
+  normalizeQoderRequest,
+  qoderEncodeBody,
+  qoderEncodedUrl,
+  qoderResponseToolRoutes,
+  type QoderToolRoute,
+} from "./qoder-protocol";
+import { projectQoderResponsesBody } from "./qoder-tool-virtualization";
 import { rememberQoderToolRoutes } from "./qoder-tool-routes";
 import { providerFetch } from "../upstream-fetch";
 
 const encoder = new TextEncoder();
+
+type QoderCredentials = ReturnType<typeof credentialFields>;
 
 function credentialFields(context: ProxyRequestContext): {
   userId: string;
@@ -45,7 +60,7 @@ function fallbackModelConfig(model: string): Record<string, unknown> {
 async function loadModelConfig(
   env: Env,
   context: ProxyRequestContext,
-  credentials: ReturnType<typeof credentialFields>,
+  credentials: QoderCredentials,
 ): Promise<Record<string, unknown>> {
   const cacheKey = `qoder:model-config:${context.credential.id}:${context.upstreamModel}`;
   const cached = await env.CONFIG_CACHE.get(cacheKey);
@@ -90,18 +105,26 @@ async function loadModelConfig(
   return fallbackModelConfig(context.upstreamModel);
 }
 
-export async function buildQoderRequest(context: ProxyRequestContext, env: Env): Promise<UpstreamBuildResult> {
-  if (context.endpoint === "completions") {
-    throw new GatewayError(400, "QODER_ENDPOINT_UNSUPPORTED", "Qoder does not support legacy /v1/completions", "invalid_request_error");
-  }
-  const credentials = credentialFields(context);
-  const modelConfig = await loadModelConfig(env, context, credentials);
+async function buildQoderAttempt(
+  context: ProxyRequestContext,
+  modelConfig: Record<string, unknown>,
+  credentials: QoderCredentials,
+  sessionId: string,
+  clientTurnKey: string,
+): Promise<QoderDiscoveryAttempt> {
   const normalized = await normalizeQoderRequest(context, modelConfig);
+  let routes = new Map<string, QoderToolRoute>();
   if (context.endpoint === "responses") {
-    rememberQoderToolRoutes(context.requestId, await qoderResponseToolRoutes(context.body));
+    routes = await qoderResponseToolRoutes(context.body);
+    rememberQoderToolRoutes(context.requestId, routes);
   }
-  const sessionId = await qoderSessionId(context.originalRequest, context.body, context.upstreamModel);
-  const requestSetId = await qoderRequestSetId(sessionId, context.upstreamModel, normalized.messages, normalized.contextWindow);
+  const requestSetId = await qoderRequestSetId(
+    sessionId,
+    context.upstreamModel,
+    normalized.messages,
+    normalized.contextWindow,
+    clientTurnKey,
+  );
   const chatRecordId = await qoderChatRecordId(
     sessionId,
     context.upstreamModel,
@@ -181,8 +204,53 @@ export async function buildQoderRequest(context: ProxyRequestContext, env: Env):
   requestBody.set(bytes);
 
   return {
-    url,
-    init: { method: "POST", headers, body: requestBody.buffer, redirect: "manual" },
-    responseMode: "qoder-chat",
+    request: {
+      url,
+      init: { method: "POST", headers, body: requestBody.buffer, redirect: "manual" },
+      responseMode: "qoder-chat",
+    },
+    routes,
   };
+}
+
+export async function buildQoderRequest(context: ProxyRequestContext, env: Env): Promise<UpstreamBuildResult> {
+  if (context.endpoint === "completions") {
+    throw new GatewayError(400, "QODER_ENDPOINT_UNSUPPORTED", "Qoder does not support legacy /v1/completions", "invalid_request_error");
+  }
+  const credentials = credentialFields(context);
+  const modelConfig = await loadModelConfig(env, context, credentials);
+  const sessionId = await qoderSessionId(context.originalRequest, context.body, context.upstreamModel);
+  const clientTurnKey = extractClientTurnKey(context.originalRequest) ?? "";
+  const projection = context.endpoint === "responses"
+    ? projectQoderResponsesBody(context.body)
+    : { body: context.body, proxyManaged: false, functionLeaves: 0, visibleFunctions: 0 };
+
+  const buildAttempt = (body: Record<string, unknown>): Promise<QoderDiscoveryAttempt> => buildQoderAttempt(
+    { ...context, body },
+    modelConfig,
+    credentials,
+    sessionId,
+    clientTurnKey,
+  );
+  const initial = await buildAttempt(projection.body);
+
+  if (context.endpoint === "responses" && projection.proxyManaged) {
+    registerQoderResponsesDiscovery(context.requestId, {
+      originalBody: context.body,
+      currentBody: projection.body,
+      currentRoutes: initial.routes,
+      buildAttempt,
+    });
+    const headers = new Headers(initial.request.init.headers);
+    headers.set(QODER_DISCOVERY_HEADER, context.requestId);
+    initial.request.init = { ...initial.request.init, headers };
+    console.info(JSON.stringify({
+      event: "qoder_responses_tool_virtualization",
+      function_tools_received: projection.functionLeaves,
+      core_tools_visible: projection.visibleFunctions,
+      tool_search_proxy_managed: true,
+    }));
+  }
+
+  return initial.request;
 }
