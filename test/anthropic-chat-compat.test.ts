@@ -75,4 +75,31 @@ describe("Anthropic Chat fallback compatibility", () => {
     expect(text).toContain('"cached_tokens":9');
     expect(text).toContain("data: [DONE]");
   });
+
+  it("keeps UTF-8 decoder state isolated across concurrent SSE responses", async () => {
+    const encoder = new TextEncoder();
+    const responseFor = async (character: string): Promise<Response> => {
+      const frame = `data: ${JSON.stringify({ choices: [{ delta: { content: character }, finish_reason: null }] })}\n\n`;
+      const characterOffset = encoder.encode(frame.slice(0, frame.indexOf(character))).byteLength;
+      const bytes = encoder.encode(frame);
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes.slice(0, characterOffset + 1));
+          queueMicrotask(() => {
+            controller.enqueue(bytes.slice(characterOffset + 1));
+            controller.close();
+          });
+        },
+      });
+      return normalizeChatUsageForAnthropic(new Response(stream, {
+        headers: { "content-type": "text/event-stream" },
+      }));
+    };
+
+    const [left, right] = await Promise.all([(await responseFor("你")).text(), (await responseFor("好")).text()]);
+    expect(left).toContain("你");
+    expect(right).toContain("好");
+    expect(left).not.toContain("�");
+    expect(right).not.toContain("�");
+  });
 });
