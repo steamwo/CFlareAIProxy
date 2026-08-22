@@ -1,15 +1,8 @@
 import { GatewayError } from "./errors";
-import { asInt, readJsonBody } from "./utils";
-import type { Env } from "./types";
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 type JsonObject = Record<string, unknown>;
-
-type BaseWorker = {
-  fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response>;
-};
 
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -33,10 +26,16 @@ function parseJsonObject(value: string): JsonObject {
 }
 
 function normalizedSchema(value: unknown): JsonObject {
-  if (!isObject(value)) return { type: "object", properties: {} };
-  const schema = structuredClone(value) as JsonObject;
-  if (schema.type === "object" && !isObject(schema.properties)) schema.properties = {};
-  return schema;
+  const normalize = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(normalize);
+    if (!isObject(node)) return node;
+    const result: JsonObject = {};
+    for (const [key, child] of Object.entries(node)) result[key] = normalize(child);
+    if (result.type === "object" && !isObject(result.properties)) result.properties = {};
+    return result;
+  };
+  const normalized = normalize(value);
+  return isObject(normalized) ? normalized : { type: "object", properties: {} };
 }
 
 function anthropicText(value: unknown): string {
@@ -52,20 +51,76 @@ function anthropicText(value: unknown): string {
   }).filter(Boolean).join("\n");
 }
 
-function openAIContentPart(part: JsonObject): JsonObject | undefined {
-  if (part.type === "text" && typeof part.text === "string") {
-    return { type: "text", text: part.text };
-  }
+function openAIImagePart(part: JsonObject): JsonObject | undefined {
   if (part.type !== "image" || !isObject(part.source)) return undefined;
   const source = part.source;
-  let url = "";
-  if (source.type === "base64" && typeof source.data === "string") {
-    const mediaType = typeof source.media_type === "string" && source.media_type ? source.media_type : "application/octet-stream";
-    url = `data:${mediaType};base64,${source.data}`;
-  } else if (source.type === "url" && typeof source.url === "string") {
-    url = source.url;
+  if (source.type === "base64" && typeof source.data === "string" && source.data) {
+    const mediaType = typeof source.media_type === "string" && source.media_type
+      ? source.media_type
+      : "application/octet-stream";
+    return { type: "image_url", image_url: { url: `data:${mediaType};base64,${source.data}` } };
   }
-  return url ? { type: "image_url", image_url: { url } } : undefined;
+  if (source.type === "url" && typeof source.url === "string" && source.url) {
+    return { type: "image_url", image_url: { url: source.url } };
+  }
+  return undefined;
+}
+
+function openAIContentPart(part: JsonObject): JsonObject | undefined {
+  if (part.type === "text" && typeof part.text === "string") return { type: "text", text: part.text };
+  return openAIImagePart(part);
+}
+
+function jsonText(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+/**
+ * Keep text-only tool results as strings for broad OpenAI compatibility, while
+ * retaining Anthropic image blocks for providers that support multimodal tool
+ * messages. Other structured blocks are serialized as text instead of dropped.
+ */
+function openAIToolResultContent(value: unknown): unknown {
+  if (typeof value === "string") return value;
+  if (isObject(value)) {
+    const image = openAIImagePart(value);
+    return image ? [image] : jsonText(value);
+  }
+  if (!Array.isArray(value)) return value === undefined ? "" : jsonText(value);
+
+  const parts: JsonObject[] = [];
+  let hasImage = false;
+  for (const rawPart of value) {
+    if (typeof rawPart === "string") {
+      parts.push({ type: "text", text: rawPart });
+      continue;
+    }
+    if (!isObject(rawPart)) {
+      parts.push({ type: "text", text: jsonText(rawPart) });
+      continue;
+    }
+    if (rawPart.type === "text" && typeof rawPart.text === "string") {
+      parts.push({ type: "text", text: rawPart.text });
+      continue;
+    }
+    const image = openAIImagePart(rawPart);
+    if (image) {
+      hasImage = true;
+      parts.push(image);
+      continue;
+    }
+    parts.push({ type: "text", text: jsonText(rawPart) });
+  }
+
+  if (hasImage) return parts;
+  return parts
+    .map((part) => typeof part.text === "string" ? part.text : "")
+    .filter(Boolean)
+    .join("\n");
 }
 
 function reasoningEffort(body: JsonObject): string | undefined {
@@ -103,10 +158,16 @@ function convertMessages(body: JsonObject): JsonObject[] {
       throw new GatewayError(400, "INVALID_REQUEST", "Each message must be an object", "invalid_request_error");
     }
     const role = stringValue(rawMessage.role);
-    if (role !== "user" && role !== "assistant") {
+    if (role !== "user" && role !== "assistant" && role !== "system") {
       throw new GatewayError(400, "INVALID_REQUEST", `Unsupported message role: ${role ?? "unknown"}`, "invalid_request_error");
     }
     const content = rawMessage.content;
+
+    if (role === "system") {
+      const text = anthropicText(content);
+      if (text) result.push({ role: "system", content: text });
+      continue;
+    }
     if (typeof content === "string") {
       result.push({ role, content });
       continue;
@@ -122,36 +183,34 @@ function convertMessages(body: JsonObject): JsonObject[] {
 
     for (const rawPart of content) {
       if (!isObject(rawPart)) continue;
-      const part = rawPart;
-      const converted = openAIContentPart(part);
+      const converted = openAIContentPart(rawPart);
       if (converted) {
         contentParts.push(converted);
         continue;
       }
-      if (part.type === "thinking" && role === "assistant" && typeof part.thinking === "string") {
-        reasoning.push(part.thinking);
+      if (rawPart.type === "thinking" && role === "assistant" && typeof rawPart.thinking === "string") {
+        reasoning.push(rawPart.thinking);
         continue;
       }
-      if (part.type === "tool_use" && role === "assistant") {
-        const id = stringValue(part.id) || `toolu_${crypto.randomUUID()}`;
-        const name = stringValue(part.name) || "unknown";
-        const input = isObject(part.input) ? part.input : {};
+      if (rawPart.type === "redacted_thinking") continue;
+      if (rawPart.type === "tool_use" && role === "assistant") {
+        const id = stringValue(rawPart.id) || `toolu_${crypto.randomUUID()}`;
+        const name = stringValue(rawPart.name) || "unknown";
+        const input = isObject(rawPart.input) ? rawPart.input : {};
         toolCalls.push({ id, type: "function", function: { name, arguments: JSON.stringify(input) } });
         continue;
       }
-      if (part.type === "tool_result" && role === "user") {
-        const id = stringValue(part.tool_use_id);
+      if (rawPart.type === "tool_result" && role === "user") {
+        const id = stringValue(rawPart.tool_use_id);
         if (!id) continue;
-        let toolContent = anthropicText(part.content);
-        if (!toolContent && part.content !== undefined) {
-          try { toolContent = JSON.stringify(part.content); } catch { toolContent = String(part.content); }
-        }
-        toolResults.push({ role: "tool", tool_call_id: id, content: toolContent });
+        toolResults.push({ role: "tool", tool_call_id: id, content: openAIToolResultContent(rawPart.content) });
+        continue;
       }
+      if (role === "user") contentParts.push({ type: "text", text: jsonText(rawPart) });
     }
 
-    // OpenAI-compatible APIs require tool results immediately after the assistant tool_calls
-    // they answer, so emit them before any ordinary user text in the same Anthropic message.
+    // Tool results answer the previous assistant tool_calls and therefore must
+    // remain immediately adjacent to that assistant message in OpenAI formats.
     result.push(...toolResults);
 
     if (role === "assistant") {
@@ -166,7 +225,7 @@ function convertMessages(body: JsonObject): JsonObject[] {
     }
   }
 
-  if (result.length === 0 || (result.length === 1 && result[0]?.role === "system")) {
+  if (result.length === 0 || result.every((message) => message.role === "system")) {
     throw new GatewayError(400, "INVALID_REQUEST", "messages do not contain any usable content", "invalid_request_error");
   }
   return result;
@@ -221,20 +280,62 @@ export function anthropicMessagesToChat(body: JsonObject): JsonObject {
   return out;
 }
 
-function openAIUsage(value: unknown): { input: number; output: number; cached: number } {
-  if (!isObject(value)) return { input: 0, output: 0, cached: 0 };
-  const input = numberValue(value.prompt_tokens) ?? numberValue(value.input_tokens) ?? 0;
+interface NormalizedUsage {
+  input: number;
+  output: number;
+  cached: number;
+  cacheCreation: number;
+}
+
+function openAIUsage(value: unknown): NormalizedUsage {
+  if (!isObject(value)) return { input: 0, output: 0, cached: 0, cacheCreation: 0 };
+  const promptTotal = numberValue(value.prompt_tokens);
+  const inputTotal = numberValue(value.input_tokens);
   const output = numberValue(value.completion_tokens) ?? numberValue(value.output_tokens) ?? 0;
-  const details = isObject(value.prompt_tokens_details) ? value.prompt_tokens_details
-    : isObject(value.input_tokens_details) ? value.input_tokens_details : {};
-  const cached = numberValue(details.cached_tokens) ?? numberValue(value.cache_read_input_tokens) ?? 0;
-  return { input: Math.max(0, Math.floor(input)), output: Math.max(0, Math.floor(output)), cached: Math.max(0, Math.floor(cached)) };
+  const details = isObject(value.prompt_tokens_details)
+    ? value.prompt_tokens_details
+    : isObject(value.input_tokens_details) ? value.input_tokens_details : undefined;
+  const detailCached = numberValue(details?.cached_tokens);
+  const cached = detailCached ?? numberValue(value.cache_read_input_tokens) ?? 0;
+  const detailCreation = numberValue(details?.cache_creation_tokens);
+  const cacheCreation = detailCreation ?? numberValue(value.cache_creation_input_tokens) ?? 0;
+
+  let input = promptTotal ?? inputTotal ?? 0;
+  // OpenAI prompt/input totals include cached tokens. Anthropic reports cache
+  // reads/writes beside input_tokens, so remove those portions when the source
+  // is an OpenAI-shaped total. If an upstream already supplies Anthropic-style
+  // input_tokens + cache_read_input_tokens without details, leave it untouched.
+  if (promptTotal !== undefined) input = Math.max(0, promptTotal - cached - cacheCreation);
+  else if (inputTotal !== undefined && (detailCached !== undefined || detailCreation !== undefined)) {
+    input = Math.max(0, inputTotal - cached - cacheCreation);
+  }
+
+  return {
+    input: Math.max(0, Math.floor(input)),
+    output: Math.max(0, Math.floor(output)),
+    cached: Math.max(0, Math.floor(cached)),
+    cacheCreation: Math.max(0, Math.floor(cacheCreation)),
+  };
+}
+
+function anthropicUsage(value: unknown): JsonObject {
+  const usage = openAIUsage(value);
+  const result: JsonObject = { input_tokens: usage.input, output_tokens: usage.output };
+  if (usage.cached > 0) result.cache_read_input_tokens = usage.cached;
+  if (usage.cacheCreation > 0) result.cache_creation_input_tokens = usage.cacheCreation;
+  return result;
 }
 
 function messageId(value: unknown): string {
   const raw = stringValue(value) || crypto.randomUUID();
   if (raw.startsWith("msg_")) return raw;
   return `msg_${raw.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+function toolUseId(value: unknown): string {
+  const raw = stringValue(value) || `toolu_${crypto.randomUUID()}`;
+  const sanitized = raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 200);
+  return sanitized || `toolu_${crypto.randomUUID()}`;
 }
 
 function parseToolInput(value: unknown): JsonObject {
@@ -288,15 +389,12 @@ export function chatCompletionToAnthropic(payload: JsonObject, fallbackModel?: s
     const fn = isObject(rawCall.function) ? rawCall.function : {};
     content.push({
       type: "tool_use",
-      id: stringValue(rawCall.id) || `toolu_${crypto.randomUUID()}`,
+      id: toolUseId(rawCall.id),
       name: stringValue(fn.name) || "unknown",
       input: parseToolInput(fn.arguments),
     });
   }
 
-  const usage = openAIUsage(payload.usage);
-  const anthropicUsage: JsonObject = { input_tokens: usage.input, output_tokens: usage.output };
-  if (usage.cached > 0) anthropicUsage.cache_read_input_tokens = usage.cached;
   return {
     id: messageId(payload.id),
     type: "message",
@@ -305,7 +403,7 @@ export function chatCompletionToAnthropic(payload: JsonObject, fallbackModel?: s
     content,
     stop_reason: mapStopReason(choice.finish_reason, toolCalls.length > 0),
     stop_sequence: null,
-    usage: anthropicUsage,
+    usage: anthropicUsage(payload.usage),
   };
 }
 
@@ -327,9 +425,12 @@ interface StreamToolCall {
   id: string;
   name: string;
   arguments: string;
+  blockIndex?: number;
+  startEmitted: boolean;
 }
 
 function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: string): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
   let buffer = "";
   let started = false;
   let finished = false;
@@ -341,7 +442,7 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
   let thinkingIndex = -1;
   let thinkingOpen = false;
   let finishReason: unknown = "stop";
-  let usage = { input: 0, output: 0, cached: 0 };
+  let usage: NormalizedUsage = { input: 0, output: 0, cached: 0, cacheCreation: 0 };
   const tools = new Map<number, StreamToolCall>();
 
   const ensureStart = (controller: TransformStreamDefaultController<Uint8Array>) => {
@@ -349,8 +450,13 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
     controller.enqueue(sseEvent("message_start", {
       type: "message_start",
       message: {
-        id: messageId(id), type: "message", role: "assistant", model,
-        content: [], stop_reason: null, stop_sequence: null,
+        id: messageId(id),
+        type: "message",
+        role: "assistant",
+        model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
         usage: { input_tokens: 0, output_tokens: 0 },
       },
     }));
@@ -376,12 +482,16 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
       closeText(controller);
       thinkingIndex = nextBlockIndex++;
       controller.enqueue(sseEvent("content_block_start", {
-        type: "content_block_start", index: thinkingIndex, content_block: { type: "thinking", thinking: "" },
+        type: "content_block_start",
+        index: thinkingIndex,
+        content_block: { type: "thinking", thinking: "" },
       }));
       thinkingOpen = true;
     }
     controller.enqueue(sseEvent("content_block_delta", {
-      type: "content_block_delta", index: thinkingIndex, delta: { type: "thinking_delta", thinking: text },
+      type: "content_block_delta",
+      index: thinkingIndex,
+      delta: { type: "thinking_delta", thinking: text },
     }));
   };
 
@@ -392,13 +502,43 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
       closeThinking(controller);
       textIndex = nextBlockIndex++;
       controller.enqueue(sseEvent("content_block_start", {
-        type: "content_block_start", index: textIndex, content_block: { type: "text", text: "" },
+        type: "content_block_start",
+        index: textIndex,
+        content_block: { type: "text", text: "" },
       }));
       textOpen = true;
     }
     controller.enqueue(sseEvent("content_block_delta", {
-      type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text },
+      type: "content_block_delta",
+      index: textIndex,
+      delta: { type: "text_delta", text },
     }));
+  };
+
+  const ensureToolStart = (
+    controller: TransformStreamDefaultController<Uint8Array>,
+    toolIndex: number,
+    tool: StreamToolCall,
+    force = false,
+  ): boolean => {
+    if (tool.startEmitted) return true;
+    if (!force && (!tool.id || !tool.name)) return false;
+    ensureStart(controller);
+    closeThinking(controller);
+    closeText(controller);
+    tool.blockIndex = nextBlockIndex++;
+    controller.enqueue(sseEvent("content_block_start", {
+      type: "content_block_start",
+      index: tool.blockIndex,
+      content_block: {
+        type: "tool_use",
+        id: toolUseId(tool.id || `toolu_${toolIndex}_${crypto.randomUUID()}`),
+        name: tool.name || "unknown",
+        input: {},
+      },
+    }));
+    tool.startEmitted = true;
+    return true;
   };
 
   const finalize = (controller: TransformStreamDefaultController<Uint8Array>) => {
@@ -406,21 +546,20 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
     ensureStart(controller);
     closeThinking(controller);
     closeText(controller);
-    for (const [toolIndex, tool] of [...tools.entries()].sort(([a], [b]) => a - b)) {
-      const index = nextBlockIndex++;
-      const toolId = tool.id || `toolu_${toolIndex}_${crypto.randomUUID()}`;
-      const name = tool.name || "unknown";
-      controller.enqueue(sseEvent("content_block_start", {
-        type: "content_block_start", index, content_block: { type: "tool_use", id: toolId, name, input: {} },
-      }));
+    for (const [toolIndex, tool] of [...tools.entries()].sort(([left], [right]) => left - right)) {
+      if (!ensureToolStart(controller, toolIndex, tool, true)) continue;
+      const blockIndex = tool.blockIndex!;
       const partialJson = JSON.stringify(parseToolInput(tool.arguments || "{}"));
       controller.enqueue(sseEvent("content_block_delta", {
-        type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: partialJson },
+        type: "content_block_delta",
+        index: blockIndex,
+        delta: { type: "input_json_delta", partial_json: partialJson },
       }));
-      controller.enqueue(sseEvent("content_block_stop", { type: "content_block_stop", index }));
+      controller.enqueue(sseEvent("content_block_stop", { type: "content_block_stop", index: blockIndex }));
     }
     const finalUsage: JsonObject = { input_tokens: usage.input, output_tokens: usage.output };
     if (usage.cached > 0) finalUsage.cache_read_input_tokens = usage.cached;
+    if (usage.cacheCreation > 0) finalUsage.cache_creation_input_tokens = usage.cacheCreation;
     controller.enqueue(sseEvent("message_delta", {
       type: "message_delta",
       delta: { stop_reason: mapStopReason(finishReason, tools.size > 0), stop_sequence: null },
@@ -436,6 +575,7 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
       finalize(controller);
       return;
     }
+
     let payload: JsonObject;
     try {
       const parsed = JSON.parse(data) as unknown;
@@ -474,13 +614,14 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
     if (Array.isArray(delta.tool_calls)) {
       for (const rawCall of delta.tool_calls) {
         if (!isObject(rawCall)) continue;
-        const index = Math.max(0, Math.floor(numberValue(rawCall.index) ?? 0));
-        const current = tools.get(index) ?? { id: "", name: "", arguments: "" };
+        const toolIndex = Math.max(0, Math.floor(numberValue(rawCall.index) ?? 0));
+        const current = tools.get(toolIndex) ?? { id: "", name: "", arguments: "", startEmitted: false };
         if (typeof rawCall.id === "string" && rawCall.id) current.id = rawCall.id;
         const fn = isObject(rawCall.function) ? rawCall.function : {};
-        if (typeof fn.name === "string" && fn.name) current.name = fn.name;
+        if (!current.startEmitted && typeof fn.name === "string" && fn.name) current.name = fn.name;
         if (typeof fn.arguments === "string") current.arguments += fn.arguments;
-        tools.set(index, current);
+        tools.set(toolIndex, current);
+        ensureToolStart(controller, toolIndex, current);
       }
     }
   };
@@ -488,10 +629,11 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
   const transform = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
-      let boundary: number;
-      while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0) {
+      let match: RegExpMatchArray | null;
+      while ((match = buffer.match(/\r?\n\r?\n/)) && match.index !== undefined) {
+        const boundary = match.index;
+        const separator = match[0];
         const frame = buffer.slice(0, boundary);
-        const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0] ?? "\n\n";
         buffer = buffer.slice(boundary + separator.length);
         const data = frame.split(/\r?\n/)
           .filter((line) => line.startsWith("data:"))
@@ -501,6 +643,7 @@ function chatSseToAnthropic(body: ReadableStream<Uint8Array>, fallbackModel: str
       }
     },
     flush(controller) {
+      buffer += decoder.decode();
       const data = buffer.split(/\r?\n/)
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trimStart())
@@ -517,9 +660,12 @@ function anthropicMessageSse(message: JsonObject): string {
   const push = (type: string, payload: unknown) => lines.push(`event: ${type}\ndata: ${JSON.stringify(payload)}\n`);
   const content = Array.isArray(message.content) ? message.content : [];
   const usage = isObject(message.usage) ? message.usage : {};
+  const startUsage: JsonObject = { input_tokens: usage.input_tokens ?? 0, output_tokens: 0 };
+  if (numberValue(usage.cache_read_input_tokens)) startUsage.cache_read_input_tokens = usage.cache_read_input_tokens;
+  if (numberValue(usage.cache_creation_input_tokens)) startUsage.cache_creation_input_tokens = usage.cache_creation_input_tokens;
   push("message_start", {
     type: "message_start",
-    message: { ...message, content: [], stop_reason: null, usage: { input_tokens: usage.input_tokens ?? 0, output_tokens: 0 } },
+    message: { ...message, content: [], stop_reason: null, usage: startUsage },
   });
   content.forEach((rawBlock, index) => {
     if (!isObject(rawBlock)) return;
@@ -531,11 +677,19 @@ function anthropicMessageSse(message: JsonObject): string {
       push("content_block_delta", { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: rawBlock.thinking ?? "" } });
     } else if (rawBlock.type === "tool_use") {
       push("content_block_start", { type: "content_block_start", index, content_block: { ...rawBlock, input: {} } });
-      push("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(isObject(rawBlock.input) ? rawBlock.input : {}) } });
+      push("content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "input_json_delta", partial_json: JSON.stringify(isObject(rawBlock.input) ? rawBlock.input : {}) },
+      });
     }
     push("content_block_stop", { type: "content_block_stop", index });
   });
-  push("message_delta", { type: "message_delta", delta: { stop_reason: message.stop_reason ?? "end_turn", stop_sequence: null }, usage });
+  push("message_delta", {
+    type: "message_delta",
+    delta: { stop_reason: message.stop_reason ?? "end_turn", stop_sequence: null },
+    usage,
+  });
   push("message_stop", { type: "message_stop" });
   return lines.join("\n");
 }
@@ -575,7 +729,12 @@ async function convertErrorResponse(response: Response): Promise<Response> {
   } catch {
     // Keep the generic status-based message.
   }
-  const converted = anthropicJsonError(response.status, message, sourceType, response.headers.get("x-request-id") ?? undefined);
+  const converted = anthropicJsonError(
+    response.status,
+    message,
+    sourceType,
+    response.headers.get("x-request-id") ?? undefined,
+  );
   const headers = new Headers(converted.headers);
   const retryAfter = response.headers.get("retry-after");
   if (retryAfter) headers.set("retry-after", retryAfter);
@@ -599,7 +758,12 @@ export async function chatResponseToAnthropic(response: Response, requestedStrea
     if (!isObject(parsed)) throw new Error("not an object");
     payload = parsed;
   } catch {
-    return anthropicJsonError(502, "Upstream returned an invalid Chat Completions response", "api_error", response.headers.get("x-request-id") ?? undefined);
+    return anthropicJsonError(
+      502,
+      "Upstream returned an invalid Chat Completions response",
+      "api_error",
+      response.headers.get("x-request-id") ?? undefined,
+    );
   }
   const message = chatCompletionToAnthropic(payload, model);
   if (requestedStream) {
@@ -612,96 +776,4 @@ export async function chatResponseToAnthropic(response: Response, requestedStrea
     status: response.status,
     headers: responseHeaders(response.headers, "application/json; charset=utf-8"),
   });
-}
-
-function withGatewayAuthorization(headers: Headers): Headers {
-  const result = new Headers(headers);
-  const authorization = result.get("authorization") ?? "";
-  if (!/^Bearer\s+\S+/i.test(authorization)) {
-    const apiKey = result.get("x-api-key")?.trim();
-    if (apiKey) result.set("authorization", `Bearer ${apiKey}`);
-  }
-  result.delete("x-api-key");
-  result.delete("anthropic-version");
-  result.delete("anthropic-beta");
-  result.delete("content-length");
-  result.set("content-type", "application/json");
-  return result;
-}
-
-function rewrittenRequest(request: Request, path: string, body?: unknown): Request {
-  const url = new URL(request.url);
-  url.pathname = path;
-  url.search = "";
-  const headers = withGatewayAuthorization(request.headers);
-  return new Request(url, {
-    method: body === undefined ? request.method : "POST",
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: request.signal,
-  });
-}
-
-function anthropicCors(request: Request): Response {
-  const origin = request.headers.get("origin") || "*";
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "access-control-allow-origin": origin === "null" ? "*" : origin,
-      "access-control-allow-methods": "POST, OPTIONS",
-      "access-control-allow-headers": "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-request-id, x-session-id, x-conversation-id",
-      "access-control-expose-headers": "x-request-id, request-id",
-      "access-control-max-age": "86400",
-      vary: "Origin",
-    },
-  });
-}
-
-function estimateInputTokens(body: JsonObject): number {
-  const parts: string[] = [];
-  parts.push(anthropicText(body.system));
-  if (Array.isArray(body.messages)) {
-    for (const message of body.messages) {
-      if (isObject(message)) parts.push(anthropicText(message.content));
-    }
-  }
-  if (Array.isArray(body.tools)) {
-    try { parts.push(JSON.stringify(body.tools)); } catch { /* ignore */ }
-  }
-  return Math.max(1, Math.ceil(parts.join("\n").length / 4));
-}
-
-export async function handleAnthropicDownstream(
-  request: Request,
-  env: Env,
-  ctx: ExecutionContext,
-  worker: BaseWorker,
-): Promise<Response | undefined> {
-  const url = new URL(request.url);
-  const isMessages = url.pathname === "/v1/messages" || url.pathname === "/v1/messages/";
-  const isCountTokens = url.pathname === "/v1/messages/count_tokens" || url.pathname === "/v1/messages/count_tokens/";
-  if (!isMessages && !isCountTokens) return undefined;
-  if (request.method === "OPTIONS") return anthropicCors(request);
-  if (request.method !== "POST") return anthropicJsonError(405, "Method not allowed", "invalid_request_error");
-
-  try {
-    const body = await readJsonBody(request, asInt(env.MAX_BODY_BYTES, 8 * 1024 * 1024));
-    if (isCountTokens) {
-      // Reuse the existing gateway authentication path without creating a separate auth implementation.
-      const authCheck = await worker.fetch(rewrittenRequest(request, "/v1/models"), env, ctx);
-      if (!authCheck.ok) return convertErrorResponse(authCheck);
-      return Response.json({ input_tokens: estimateInputTokens(body) }, {
-        headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
-      });
-    }
-
-    const chatBody = anthropicMessagesToChat(body);
-    const model = stringValue(body.model) || "unknown";
-    const upstream = await worker.fetch(rewrittenRequest(request, "/v1/chat/completions", chatBody), env, ctx);
-    return chatResponseToAnthropic(upstream, body.stream === true, model);
-  } catch (error) {
-    if (error instanceof GatewayError) return anthropicJsonError(error.status, error.message, error.type);
-    const message = error instanceof Error ? error.message : "Internal gateway error";
-    return anthropicJsonError(500, message, "api_error");
-  }
 }
