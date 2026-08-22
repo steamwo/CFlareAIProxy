@@ -4,6 +4,41 @@ import type { Env } from "../src/types";
 import { readJsonBody } from "../src/utils";
 
 describe("Anthropic Messages routing on dev", () => {
+  it("rejects a missing API key before resolving model routes", async () => {
+    let routeChecks = 0;
+    let workerCalls = 0;
+    const worker = {
+      async fetch() {
+        workerCalls += 1;
+        throw new Error("worker should not run");
+      },
+    };
+    const request = new Request("https://gateway.example/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "public-model", messages: [{ role: "user", content: "hello" }] }),
+    });
+
+    const response = await handleAnthropicMessages(
+      request,
+      {} as Env,
+      {} as ExecutionContext,
+      worker,
+      worker,
+      async () => {
+        routeChecks += 1;
+        return false;
+      },
+    );
+    expect(response?.status).toBe(401);
+    expect(routeChecks).toBe(0);
+    expect(workerCalls).toBe(0);
+    expect(await response!.json()).toEqual({
+      type: "error",
+      error: { type: "authentication_error", message: "Missing API key" },
+    });
+  });
+
   it("keeps the native messages route when one is available", async () => {
     let nativeBody: Record<string, unknown> | undefined;
     let nativeAuthorization = "";
