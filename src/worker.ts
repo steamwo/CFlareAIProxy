@@ -115,7 +115,7 @@ async function runRetention(env: Env, scheduledTime: number): Promise<void> {
 export default {
   ...handler,
   async fetch(request, env, ctx) {
-    const tokenCount = await handleAnthropicTokenCount(request, env, ctx, handler);
+    const tokenCount = await handleAnthropicTokenCount(request, env, ctx);
     if (tokenCount) return tokenCount;
     const anthropic = await handleAnthropicMessages(request, env, ctx, nativeMessagesWorker, handler);
     return anthropic ?? handler.fetch(request, env, ctx);
