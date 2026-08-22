@@ -25,6 +25,12 @@ function isMessagesPath(pathname: string): boolean {
   return pathname === "/v1/messages" || pathname === "/v1/messages/";
 }
 
+function hasGatewayCredential(request: Request): boolean {
+  const authorization = request.headers.get("authorization") ?? "";
+  if (/^Bearer\s+\S+/i.test(authorization)) return true;
+  return Boolean(request.headers.get("x-api-key")?.trim());
+}
+
 async function defaultNativeMessagesRouteResolver(env: Env, model: string): Promise<boolean> {
   return (await listRoutesForModel(env, model, "messages")).length > 0;
 }
@@ -131,6 +137,10 @@ export async function handleAnthropicMessages(
   if (!isMessagesPath(url.pathname)) return undefined;
   if (request.method === "OPTIONS") return anthropicCors(request);
   if (request.method !== "POST") return anthropicJsonError(405, "Method not allowed", "invalid_request_error");
+  // Match the core gateway's auth-first behavior and avoid a D1 route lookup for
+  // anonymous requests. The actual key validity/model permission check remains in
+  // proxyGeneration so there is still only one authoritative authentication path.
+  if (!hasGatewayCredential(request)) return anthropicJsonError(401, "Missing API key", "authentication_error");
 
   try {
     const parsed = await readJsonBody(request, asInt(env.MAX_BODY_BYTES, 8 * 1024 * 1024));
