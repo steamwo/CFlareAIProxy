@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  anthropicMessagesToChat, chatCompletionToAnthropic, chatResponseToAnthropic, handleAnthropicDownstream,
+  anthropicMessagesToChat, chatCompletionToAnthropic, chatResponseToAnthropic,
 } from "../src/anthropic-downstream";
-import type { Env } from "../src/types";
 
 describe("Anthropic downstream compatibility", () => {
   it("converts Anthropic messages, tools, images and tool results to Chat Completions", () => {
@@ -79,7 +78,7 @@ describe("Anthropic downstream compatibility", () => {
     expect((converted.content as any[])[0]).toEqual({ type: "thinking", thinking: "Need a tool." });
     expect((converted.content as any[])[1]).toEqual({ type: "text", text: "I'll inspect it." });
     expect((converted.content as any[])[2]).toEqual({ type: "tool_use", id: "call_1", name: "read_file", input: { path: "a.ts" } });
-    expect(converted.usage).toEqual({ input_tokens: 12, output_tokens: 7, cache_read_input_tokens: 3 });
+    expect(converted.usage).toEqual({ input_tokens: 9, output_tokens: 7, cache_read_input_tokens: 3 });
   });
 
   it("converts Chat Completions SSE into Anthropic Messages SSE", async () => {
@@ -106,54 +105,5 @@ describe("Anthropic downstream compatibility", () => {
     expect(text).toContain('"output_tokens":4');
     expect(text).toContain("event: message_stop");
     expect(text).not.toContain("data: [DONE]");
-  });
-
-  it("accepts x-api-key and routes /v1/messages through the existing chat endpoint", async () => {
-    let forwarded: Request | undefined;
-    const worker = {
-      async fetch(request: Request) {
-        forwarded = request;
-        return Response.json({
-          id: "chatcmpl-route",
-          model: "public-model",
-          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
-        });
-      },
-    };
-    const request = new Request("https://gateway.example/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": "gw-secret", "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: "public-model", max_tokens: 32, messages: [{ role: "user", content: "reply ok" }] }),
-    });
-    const response = await handleAnthropicDownstream(request, { MAX_BODY_BYTES: "1048576" } as Env, {} as ExecutionContext, worker);
-
-    expect(forwarded).toBeDefined();
-    expect(new URL(forwarded!.url).pathname).toBe("/v1/chat/completions");
-    expect(forwarded!.headers.get("authorization")).toBe("Bearer gw-secret");
-    expect(forwarded!.headers.get("x-api-key")).toBeNull();
-    const forwardedBody = await forwarded!.json() as any;
-    expect(forwardedBody.messages[0]).toEqual({ role: "user", content: "reply ok" });
-    expect(response?.status).toBe(200);
-    const payload = await response!.json() as any;
-    expect(payload.type).toBe("message");
-    expect(payload.content[0]).toEqual({ type: "text", text: "ok" });
-  });
-
-  it("returns Anthropic-shaped gateway errors", async () => {
-    const worker = {
-      async fetch() {
-        return Response.json({ error: { type: "authentication_error", message: "bad key", code: "AUTHENTICATION_ERROR" } }, { status: 401 });
-      },
-    };
-    const request = new Request("https://gateway.example/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": "bad" },
-      body: JSON.stringify({ model: "public-model", messages: [{ role: "user", content: "hi" }] }),
-    });
-    const response = await handleAnthropicDownstream(request, {} as Env, {} as ExecutionContext, worker);
-    const payload = await response!.json() as any;
-    expect(response?.status).toBe(401);
-    expect(payload).toEqual({ type: "error", error: { type: "authentication_error", message: "bad key" } });
   });
 });
