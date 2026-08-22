@@ -1,5 +1,7 @@
+import { prepareAnthropicChatBody, normalizeChatUsageForAnthropic } from "./anthropic-chat-compat";
 import { anthropicJsonError, anthropicMessagesToChat, chatResponseToAnthropic } from "./anthropic-downstream";
 import { normalizeClaudeCodeMessagesBody } from "./anthropic-request-compat";
+import { listRoutesForModel } from "./db";
 import { GatewayError } from "./errors";
 import type { Env } from "./types";
 import { asInt, cacheInternalJsonBody, readJsonBody, releaseInternalJsonBody } from "./utils";
@@ -9,6 +11,8 @@ type JsonObject = Record<string, unknown>;
 type BaseWorker = {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response>;
 };
+
+export type NativeMessagesRouteResolver = (env: Env, model: string) => Promise<boolean>;
 
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -22,6 +26,10 @@ function isMessagesPath(pathname: string): boolean {
   return pathname === "/v1/messages" || pathname === "/v1/messages/";
 }
 
+async function defaultNativeMessagesRouteResolver(env: Env, model: string): Promise<boolean> {
+  return (await listRoutesForModel(env, model, "messages")).length > 0;
+}
+
 function anthropicCors(request: Request): Response {
   const origin = request.headers.get("origin") || "*";
   return new Response(null, {
@@ -29,7 +37,7 @@ function anthropicCors(request: Request): Response {
     headers: {
       "access-control-allow-origin": origin === "null" ? "*" : origin,
       "access-control-allow-methods": "POST, OPTIONS",
-      "access-control-allow-headers": "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-request-id, x-session-id, x-conversation-id",
+      "access-control-allow-headers": "authorization, content-type, x-api-key, anthropic-version, anthropic-beta, x-request-id, x-session-id, x-conversation-id, x-claude-code-session-id, x-claude-code-agent-id",
       "access-control-expose-headers": "x-request-id, request-id, retry-after",
       "access-control-max-age": "86400",
       vary: "Origin",
@@ -80,19 +88,6 @@ async function fetchCached(
   }
 }
 
-async function missingMessagesRoute(response: Response): Promise<boolean> {
-  if (response.status !== 404) return false;
-  try {
-    const payload = await response.clone().json() as unknown;
-    if (!isObject(payload) || !isObject(payload.error)) return false;
-    const code = stringValue(payload.error.code);
-    const message = stringValue(payload.error.message) ?? "";
-    return code === "MODEL_NOT_FOUND" || /No route is configured for model/i.test(message);
-  } catch {
-    return false;
-  }
-}
-
 async function nativeErrorToAnthropic(response: Response): Promise<Response> {
   let sourceType: string | undefined;
   let message = `Request failed with status ${response.status}`;
@@ -120,11 +115,10 @@ async function nativeErrorToAnthropic(response: Response): Promise<Response> {
 /**
  * Anthropic Messages downstream entrypoint for the dev branch.
  *
- * Dev already has a native `messages` gateway endpoint (notably for Qoder). Keep
- * that path first so provider-specific protocol handling is preserved. When the
- * selected model has no native messages route, fall back to the generic
- * Anthropic -> Chat Completions adapter. The client JSON body is parsed once and
- * handed to both internal dispatches through the in-isolate body cache.
+ * Dev already has provider-specific native `messages` routes (notably Qoder).
+ * Resolve route existence before invoking proxyGeneration so a Chat fallback does
+ * not first consume an RPM/rate-limit lease on a guaranteed messages-route 404.
+ * The chosen endpoint then goes through proxyGeneration exactly once.
  */
 export async function handleAnthropicMessages(
   request: Request,
@@ -132,6 +126,7 @@ export async function handleAnthropicMessages(
   ctx: ExecutionContext,
   nativeMessagesWorker: BaseWorker,
   chatWorker: BaseWorker,
+  resolveNativeMessagesRoute: NativeMessagesRouteResolver = defaultNativeMessagesRouteResolver,
 ): Promise<Response | undefined> {
   const url = new URL(request.url);
   if (!isMessagesPath(url.pathname)) return undefined;
@@ -141,16 +136,18 @@ export async function handleAnthropicMessages(
   try {
     const parsed = await readJsonBody(request, asInt(env.MAX_BODY_BYTES, 8 * 1024 * 1024));
     const body = normalizeClaudeCodeMessagesBody(parsed);
-    const model = stringValue(body.model) || "unknown";
+    const model = stringValue(body.model)?.trim();
+    if (!model) throw new GatewayError(400, "INVALID_REQUEST", "The model field is required", "invalid_request_error");
 
-    const native = await fetchCached(nativeMessagesWorker, request, env, ctx, "/v1/messages", body);
-    if (!await missingMessagesRoute(native)) {
+    if (await resolveNativeMessagesRoute(env, model)) {
+      const native = await fetchCached(nativeMessagesWorker, request, env, ctx, "/v1/messages", body);
       return native.ok ? native : nativeErrorToAnthropic(native);
     }
 
-    const chatBody = anthropicMessagesToChat(body);
+    const chatBody = prepareAnthropicChatBody(body, anthropicMessagesToChat(body));
     const chat = await fetchCached(chatWorker, request, env, ctx, "/v1/chat/completions", chatBody);
-    return chatResponseToAnthropic(chat, body.stream === true, model);
+    const normalizedChat = await normalizeChatUsageForAnthropic(chat);
+    return chatResponseToAnthropic(normalizedChat, body.stream === true, model);
   } catch (error) {
     if (error instanceof GatewayError) return anthropicJsonError(error.status, error.message, error.type);
     const message = error instanceof Error ? error.message : "Internal gateway error";
