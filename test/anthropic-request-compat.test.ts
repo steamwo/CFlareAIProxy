@@ -5,7 +5,7 @@ import type { Env } from "../src/types";
 import { readJsonBody } from "../src/utils";
 
 describe("Claude Code Anthropic request compatibility", () => {
-  it("moves messages[].role=system into the top-level system field", () => {
+  it("moves only leading messages[].role=system into the top-level system field", () => {
     const original = {
       model: "public-model",
       system: "base instruction",
@@ -29,19 +29,36 @@ describe("Claude Code Anthropic request compatibility", () => {
     ]);
   });
 
+  it("keeps a mid-conversation system instruction at its original position", () => {
+    const body = normalizeClaudeCodeMessagesBody({
+      model: "public-model",
+      system: "base",
+      messages: [
+        { role: "user", content: "first turn" },
+        { role: "system", content: [{ type: "text", text: "new operator instruction" }] },
+        { role: "assistant", content: "ack" },
+      ],
+    });
+
+    expect(body.system).toEqual([{ type: "text", text: "base" }]);
+    expect(body.messages).toEqual([
+      { role: "user", content: "first turn" },
+      {
+        role: "user",
+        content: [{ type: "text", text: "<system-reminder>\nnew operator instruction\n</system-reminder>" }],
+      },
+      { role: "assistant", content: "ack" },
+    ]);
+  });
+
   it("forwards a Claude Code fallback request through the cached internal JSON body path", async () => {
     let forwarded: Request | undefined;
     let forwardedBody: Record<string, unknown> | undefined;
+    let nativeCalls = 0;
     const native = {
-      async fetch(request: Request) {
-        await readJsonBody(request, 1024 * 1024);
-        return Response.json({
-          error: {
-            code: "MODEL_NOT_FOUND",
-            type: "invalid_request_error",
-            message: "No route is configured for model public-model",
-          },
-        }, { status: 404 });
+      async fetch() {
+        nativeCalls += 1;
+        throw new Error("native route must not be probed for a chat-only model");
       },
     };
     const chat = {
@@ -74,9 +91,11 @@ describe("Claude Code Anthropic request compatibility", () => {
       {} as ExecutionContext,
       native,
       chat,
+      async () => false,
     );
 
     expect(response?.status).toBe(200);
+    expect(nativeCalls).toBe(0);
     expect(forwarded).toBeDefined();
     expect(forwarded!.url).toBe("https://gateway.example/v1/chat/completions");
     expect(forwarded!.headers.get("authorization")).toBe("Bearer secret");
