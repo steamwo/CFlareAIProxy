@@ -42,7 +42,14 @@ describe("Anthropic Messages routing on dev", () => {
       }),
     });
 
-    const response = await handleAnthropicMessages(request, {} as Env, {} as ExecutionContext, native, chat);
+    const response = await handleAnthropicMessages(
+      request,
+      {} as Env,
+      {} as ExecutionContext,
+      native,
+      chat,
+      async () => true,
+    );
     expect(response?.status).toBe(200);
     expect(chatCalls).toBe(0);
     expect(nativeAuthorization).toBe("Bearer secret");
@@ -51,18 +58,13 @@ describe("Anthropic Messages routing on dev", () => {
     expect((await response!.json() as any).content[0]).toEqual({ type: "text", text: "native" });
   });
 
-  it("falls back to Chat Completions only when no native messages route exists", async () => {
+  it("dispatches directly to Chat Completions when no native messages route exists", async () => {
+    let nativeCalls = 0;
     let chatBody: Record<string, unknown> | undefined;
     const native = {
-      async fetch(request: Request) {
-        await readJsonBody(request, 1024 * 1024);
-        return Response.json({
-          error: {
-            code: "MODEL_NOT_FOUND",
-            type: "invalid_request_error",
-            message: "No route is configured for model public-model",
-          },
-        }, { status: 404 });
+      async fetch() {
+        nativeCalls += 1;
+        throw new Error("native messages must not be probed when the route is absent");
       },
     };
     const chat = {
@@ -72,7 +74,12 @@ describe("Anthropic Messages routing on dev", () => {
           id: "chatcmpl-fallback",
           model: "public-model",
           choices: [{ index: 0, message: { role: "assistant", content: "fallback" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+            total_tokens: 11,
+            prompt_tokens_details: { cached_tokens: 8 },
+          },
         });
       },
     };
@@ -86,12 +93,21 @@ describe("Anthropic Messages routing on dev", () => {
       }),
     });
 
-    const response = await handleAnthropicMessages(request, {} as Env, {} as ExecutionContext, native, chat);
+    const response = await handleAnthropicMessages(
+      request,
+      {} as Env,
+      {} as ExecutionContext,
+      native,
+      chat,
+      async () => false,
+    );
     expect(response?.status).toBe(200);
+    expect(nativeCalls).toBe(0);
     expect((chatBody?.messages as any[])[0]).toEqual({ role: "system", content: "be concise" });
     expect((chatBody?.messages as any[])[1]).toEqual({ role: "user", content: "hello" });
     const payload = await response!.json() as any;
     expect(payload.type).toBe("message");
     expect(payload.content[0]).toEqual({ type: "text", text: "fallback" });
+    expect(payload.usage).toEqual({ input_tokens: 2, output_tokens: 1, cache_read_input_tokens: 8 });
   });
 });
