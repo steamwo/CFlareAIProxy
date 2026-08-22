@@ -1,7 +1,5 @@
 type JsonObject = Record<string, unknown>;
 
-const decoder = new TextDecoder();
-
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -193,6 +191,7 @@ function rewriteSseFrame(frame: string): string {
 
 function normalizeSseUsage(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
   let buffer = "";
+  const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
