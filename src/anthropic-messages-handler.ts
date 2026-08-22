@@ -1,4 +1,3 @@
-import { prepareAnthropicChatBody, normalizeChatUsageForAnthropic } from "./anthropic-chat-compat";
 import { anthropicJsonError, anthropicMessagesToChat, chatResponseToAnthropic } from "./anthropic-downstream";
 import { normalizeClaudeCodeMessagesBody } from "./anthropic-request-compat";
 import { listRoutesForModel } from "./db";
@@ -144,10 +143,9 @@ export async function handleAnthropicMessages(
       return native.ok ? native : nativeErrorToAnthropic(native);
     }
 
-    const chatBody = prepareAnthropicChatBody(body, anthropicMessagesToChat(body));
+    const chatBody = anthropicMessagesToChat(body);
     const chat = await fetchCached(chatWorker, request, env, ctx, "/v1/chat/completions", chatBody);
-    const normalizedChat = await normalizeChatUsageForAnthropic(chat);
-    return chatResponseToAnthropic(normalizedChat, body.stream === true, model);
+    return chatResponseToAnthropic(chat, body.stream === true, model);
   } catch (error) {
     if (error instanceof GatewayError) return anthropicJsonError(error.status, error.message, error.type);
     const message = error instanceof Error ? error.message : "Internal gateway error";
