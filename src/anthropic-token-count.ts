@@ -1,76 +1,121 @@
 import { anthropicJsonError } from "./anthropic-downstream";
+import { authenticateGatewayKey, gatewayKeyAllowsModel } from "./db";
+import { GatewayError } from "./errors";
 import type { Env } from "./types";
-import { asInt, readJsonBody } from "./utils";
+import { asInt, parseJson, readJsonBody } from "./utils";
 
-type BaseWorker = {
-  fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response>;
-};
+type JsonObject = Record<string, unknown>;
 
-function isObject(value: unknown): value is Record<string, unknown> {
+export type TokenCountAuthorizer = (request: Request, env: Env, body: JsonObject) => Promise<void>;
+
+function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizedAuthHeaders(source: Headers): Headers {
-  const headers = new Headers(source);
-  const authorization = headers.get("authorization") ?? "";
-  if (!/^Bearer\s+\S+/i.test(authorization)) {
-    const apiKey = headers.get("x-api-key")?.trim();
-    if (apiKey) headers.set("authorization", `Bearer ${apiKey}`);
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function gatewayToken(request: Request): string {
+  const authorization = request.headers.get("authorization") ?? "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  const apiKey = request.headers.get("x-api-key")?.trim();
+  const token = bearer || apiKey;
+  if (!token) throw new GatewayError(401, "AUTHENTICATION_ERROR", "Missing API key", "authentication_error");
+  return token;
+}
+
+async function authorizeTokenCount(request: Request, env: Env, body: JsonObject): Promise<void> {
+  const model = stringValue(body.model)?.trim();
+  if (!model) throw new GatewayError(400, "INVALID_REQUEST", "The model field is required", "invalid_request_error");
+  const gatewayKey = await authenticateGatewayKey(env, gatewayToken(request));
+  const allowedModels = parseJson<string[]>(gatewayKey.allowed_models_json, []);
+  if (!await gatewayKeyAllowsModel(env, model, allowedModels)) {
+    throw new GatewayError(403, "MODEL_NOT_ALLOWED", `API key is not allowed to use model ${model}`, "permission_error");
   }
-  headers.delete("x-api-key");
-  headers.delete("content-length");
-  return headers;
 }
 
-function textFromContent(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return "";
-  return value.map((part) => {
-    if (typeof part === "string") return part;
-    if (!isObject(part)) return "";
-    if (part.type === "text" && typeof part.text === "string") return part.text;
-    if (part.type === "thinking" && typeof part.thinking === "string") return part.thinking;
-    if (part.type === "tool_result") return textFromContent(part.content);
-    if (part.type === "tool_use") {
-      try { return JSON.stringify(part.input ?? {}); } catch { return ""; }
+function estimateTextTokens(text: string): number {
+  let ascii = 0;
+  let nonAscii = 0;
+  for (const char of text) {
+    if (char.codePointAt(0)! <= 0x7f) ascii += 1;
+    else nonAscii += 1;
+  }
+  return Math.ceil(ascii / 4 + nonAscii / 1.5);
+}
+
+function jsonTokens(value: unknown): number {
+  try {
+    return estimateTextTokens(JSON.stringify(value));
+  } catch {
+    return 0;
+  }
+}
+
+function contentTokens(value: unknown): number {
+  if (typeof value === "string") return estimateTextTokens(value);
+  if (!Array.isArray(value)) return isObject(value) ? jsonTokens(value) : 0;
+  let total = 0;
+  for (const rawPart of value) {
+    if (typeof rawPart === "string") {
+      total += estimateTextTokens(rawPart);
+      continue;
     }
-    return "";
-  }).filter(Boolean).join("\n");
+    if (!isObject(rawPart)) continue;
+    if ((rawPart.type === "text" || rawPart.type === "thinking") && typeof rawPart.text === "string") {
+      total += estimateTextTokens(rawPart.text);
+      continue;
+    }
+    if (rawPart.type === "thinking" && typeof rawPart.thinking === "string") {
+      total += estimateTextTokens(rawPart.thinking);
+      continue;
+    }
+    if (rawPart.type === "tool_result") {
+      total += contentTokens(rawPart.content);
+      continue;
+    }
+    if (rawPart.type === "tool_use") {
+      total += estimateTextTokens(stringValue(rawPart.name) ?? "") + jsonTokens(rawPart.input ?? {});
+      continue;
+    }
+    if (rawPart.type === "image") {
+      // Exact vision token counts depend on image dimensions, which are not
+      // available from the base64/url block alone. Use a conservative fixed
+      // contribution instead of counting the base64 bytes as prompt text.
+      total += 1600;
+      continue;
+    }
+    if (rawPart.type === "document") {
+      // Documents may contain text, PDF/image data, or references. Counting the
+      // serialized block is still only an estimate, but unlike the old text-only
+      // path it does not silently treat a document as zero tokens.
+      total += Math.max(256, jsonTokens(rawPart));
+      continue;
+    }
+    total += jsonTokens(rawPart);
+  }
+  return total;
 }
 
-function estimateInputTokens(body: Record<string, unknown>): number {
-  const parts: string[] = [textFromContent(body.system)];
+function estimateInputTokens(body: JsonObject): number {
+  let total = contentTokens(body.system);
   if (Array.isArray(body.messages)) {
     for (const message of body.messages) {
-      if (isObject(message)) parts.push(textFromContent(message.content));
+      if (!isObject(message)) continue;
+      total += 4; // small per-message framing allowance
+      total += contentTokens(message.content);
     }
   }
-  if (Array.isArray(body.tools)) {
-    try { parts.push(JSON.stringify(body.tools)); } catch { /* ignore */ }
-  }
-  return Math.max(1, Math.ceil(parts.join("\n").length / 4));
-}
-
-async function convertedAuthError(response: Response): Promise<Response> {
-  let message = `Request failed with status ${response.status}`;
-  let type: string | undefined;
-  try {
-    const payload = await response.json() as unknown;
-    if (isObject(payload) && isObject(payload.error)) {
-      if (typeof payload.error.message === "string") message = payload.error.message;
-      if (typeof payload.error.type === "string") type = payload.error.type;
-    }
-  } catch {
-    // Keep the status-derived fallback.
-  }
-  return anthropicJsonError(response.status, message, type, response.headers.get("x-request-id") ?? undefined);
+  if (Array.isArray(body.tools)) total += jsonTokens(body.tools);
+  return Math.max(1, Math.ceil(total));
 }
 
 export async function handleAnthropicTokenCount(
   request: Request,
   env: Env,
-  ctx: ExecutionContext,
-  worker: BaseWorker,
+  _ctx: ExecutionContext,
+  authorize: TokenCountAuthorizer = authorizeTokenCount,
 ): Promise<Response | undefined> {
   const path = new URL(request.url).pathname;
   if (path !== "/v1/messages/count_tokens" && path !== "/v1/messages/count_tokens/") return undefined;
@@ -89,22 +134,22 @@ export async function handleAnthropicTokenCount(
 
   try {
     const body = await readJsonBody(request, asInt(env.MAX_BODY_BYTES, 8 * 1024 * 1024));
-    const authUrl = new URL(request.url);
-    authUrl.pathname = "/v1/models";
-    authUrl.search = "";
-    const authResponse = await worker.fetch(new Request(authUrl, {
-      method: "GET",
-      headers: normalizedAuthHeaders(request.headers),
-      signal: request.signal,
-    }), env, ctx);
-    if (!authResponse.ok) return convertedAuthError(authResponse);
+    await authorize(request, env, body);
     return Response.json({ input_tokens: estimateInputTokens(body) }, {
-      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "x-cfap-token-count": "estimated",
+      },
     });
   } catch (error) {
-    const status = isObject(error) && typeof error.status === "number" ? error.status : 400;
+    const status = error instanceof GatewayError
+      ? error.status
+      : isObject(error) && typeof error.status === "number" ? error.status : 400;
     const message = error instanceof Error ? error.message : "Invalid request";
-    const type = isObject(error) && typeof error.type === "string" ? error.type : "invalid_request_error";
+    const type = error instanceof GatewayError
+      ? error.type
+      : isObject(error) && typeof error.type === "string" ? error.type : "invalid_request_error";
     return anthropicJsonError(status, message, type);
   }
 }
