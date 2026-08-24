@@ -35,7 +35,7 @@ export interface DiscoveredModel {
 }
 export interface PublicModel {
   id: string; object?: string; owned_by?: string; display_name?: string; endpoints?: string[];
-  x_cflare_provider?: string; x_cflare_upstream_model?: string;
+  x_cflare_provider?: string; x_cflare_upstream_model?: string; x_cflare_endpoints?: string[];
 }
 export interface QuotaWindow {
   key: string; label: string; limit?: number; remaining?: number; usedPercent?: number;

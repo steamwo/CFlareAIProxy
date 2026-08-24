@@ -16,6 +16,7 @@ const router = createRouter({
         { path: "authorization", name: "authorization", component: () => import("./views/AuthorizationView.vue") },
         { path: "accounts", name: "accounts", component: () => import("./views/AccountsView.vue") },
         { path: "models", name: "models", component: () => import("./views/ModelsView.vue") },
+        { path: "playground", name: "playground", component: () => import("./views/PlaygroundView.vue") },
         { path: "routes", name: "routes", component: () => import("./views/RoutesView.vue") },
         { path: "keys", name: "keys", component: () => import("./views/KeysView.vue") },
         { path: "prices", name: "prices", component: () => import("./views/PricesView.vue") },
