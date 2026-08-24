@@ -55,7 +55,7 @@ function header(init: RequestInit, name: string): string | null {
 
 describe("OpenCode failover", () => {
   it("tries official Zen first for anonymous traffic with the public key", async () => {
-    const fetcher = vi.fn(async () => new Response("ok", { status: 200 }));
+    const fetcher = vi.fn(async (_url: string, _init: RequestInit) => new Response("ok", { status: 200 }));
 
     const result = await fetchOpenCodeWithFailover({
       env,
@@ -77,7 +77,7 @@ describe("OpenCode failover", () => {
   });
 
   it("falls back to public mirrors when anonymous official Zen fails", async () => {
-    const fetcher = vi.fn(async (url: string) => {
+    const fetcher = vi.fn(async (url: string, _init: RequestInit) => {
       if (url.startsWith("https://opencode.ai/")) return new Response("official busy", { status: 503 });
       if (url.includes("ai.cmliussss.net")) return new Response("mirror busy", { status: 503 });
       return new Response("ok", { status: 200 });
@@ -105,7 +105,7 @@ describe("OpenCode failover", () => {
   });
 
   it("falls back to a public mirror after an anonymous official transport error", async () => {
-    const fetcher = vi.fn(async (url: string) => {
+    const fetcher = vi.fn(async (url: string, _init: RequestInit) => {
       if (url.startsWith("https://opencode.ai/")) throw new Error("network down");
       return new Response("ok", { status: 200 });
     });
@@ -154,7 +154,7 @@ describe("OpenCode failover", () => {
   });
 
   it("discovers anonymous models from official Zen with the public key", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [] }), {
+    const fetcher = vi.fn(async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ data: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
