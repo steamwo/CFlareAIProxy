@@ -7,7 +7,7 @@ export const DEFAULT_OPENCODE_MIRRORS = [
   "https://opencode.gcore.cmliussss.net/zen/v1",
 ] as const;
 
-const OPENCODE_USER_AGENT = "opencode/1.17.8 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13";
+const OPENCODE_USER_AGENT = "opencode/1.18.21 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13";
 
 interface StoredFailure {
   status: number;
