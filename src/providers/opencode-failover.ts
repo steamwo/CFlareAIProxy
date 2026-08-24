@@ -7,7 +7,7 @@ export const DEFAULT_OPENCODE_MIRRORS = [
   "https://opencode.gcore.cmliussss.net/zen/v1",
 ] as const;
 
-const OPENCODE_USER_AGENT = "opencode/1.17.8 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13";
+const OPENCODE_USER_AGENT = "opencode/1.18.21 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13";
 
 interface StoredFailure {
   status: number;
@@ -138,21 +138,20 @@ export async function fetchOpenCodeWithFailover(input: OpenCodeFailoverInput): P
   const requestId = createOpenCodeId("msg");
   const sessionId = createOpenCodeId("ses");
   const anonymous = isOpenCodeAnonymousCredential(input.credential.id);
+  const officialApiKey = anonymous ? "public" : input.credential.secret;
   let officialFailure: StoredFailure | undefined;
   let mirrorFailure: StoredFailure | undefined;
   let lastTransportError: unknown;
 
-  if (!anonymous) {
-    try {
-      const response = await input.fetcher(
-        input.target.toString(),
-        requestInit(input.init, input.credential.secret, requestId, sessionId),
-      );
-      if (response.ok) return { response, usedMirror: false };
-      officialFailure = await storeFailure(response);
-    } catch (error) {
-      lastTransportError = error;
-    }
+  try {
+    const response = await input.fetcher(
+      input.target.toString(),
+      requestInit(input.init, officialApiKey, requestId, sessionId),
+    );
+    if (response.ok) return { response, usedMirror: false };
+    officialFailure = await storeFailure(response);
+  } catch (error) {
+    lastTransportError = error;
   }
 
   for (const mirror of orderedMirrors(resolveOpenCodeMirrorUrls(input.env, input.provider), random)) {
