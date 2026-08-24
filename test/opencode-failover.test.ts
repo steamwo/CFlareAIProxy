@@ -54,9 +54,32 @@ function header(init: RequestInit, name: string): string | null {
 }
 
 describe("OpenCode failover", () => {
-  it("sends anonymous traffic directly through public mirrors", async () => {
-    const fetcher = vi.fn(async (url: string, init: RequestInit) => {
-      if (url.includes("ai.cmliussss.net")) return new Response("busy", { status: 503 });
+  it("tries official Zen first for anonymous traffic with the public key", async () => {
+    const fetcher = vi.fn(async () => new Response("ok", { status: 200 }));
+
+    const result = await fetchOpenCodeWithFailover({
+      env,
+      provider: provider(),
+      credential: openCodeAnonymousCredential(),
+      target: "https://opencode.ai/zen/v1/chat/completions",
+      init: { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+      fetcher,
+      random: () => 0,
+    });
+
+    expect(result.usedMirror).toBe(false);
+    expect(await result.response.text()).toBe("ok");
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0]?.[0]).toBe("https://opencode.ai/zen/v1/chat/completions");
+    expect(header(fetcher.mock.calls[0]![1], "authorization")).toBe("Bearer public");
+    expect(header(fetcher.mock.calls[0]![1], "x-opencode-client")).toBe("cli");
+    expect(header(fetcher.mock.calls[0]![1], "x-opencode-session")).toMatch(/^ses_/);
+  });
+
+  it("falls back to public mirrors when anonymous official Zen fails", async () => {
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.startsWith("https://opencode.ai/")) return new Response("official busy", { status: 503 });
+      if (url.includes("ai.cmliussss.net")) return new Response("mirror busy", { status: 503 });
       return new Response("ok", { status: 200 });
     });
 
@@ -72,12 +95,37 @@ describe("OpenCode failover", () => {
 
     expect(result.usedMirror).toBe(true);
     expect(await result.response.text()).toBe("ok");
-    expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(fetcher.mock.calls[0]?.[0]).toBe("https://opencode.ai.cmliussss.net/zen/v1/chat/completions");
-    expect(fetcher.mock.calls[1]?.[0]).toBe("https://opencode.fastly.cmliussss.net/zen/v1/chat/completions");
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("https://opencode.ai/zen/v1/chat/completions");
+    expect(fetcher.mock.calls[1]?.[0]).toBe("https://opencode.ai.cmliussss.net/zen/v1/chat/completions");
+    expect(fetcher.mock.calls[2]?.[0]).toBe("https://opencode.fastly.cmliussss.net/zen/v1/chat/completions");
     expect(header(fetcher.mock.calls[0]![1], "authorization")).toBe("Bearer public");
-    expect(header(fetcher.mock.calls[0]![1], "x-opencode-client")).toBe("cli");
-    expect(header(fetcher.mock.calls[0]![1], "x-opencode-session")).toMatch(/^ses_/);
+    expect(header(fetcher.mock.calls[1]![1], "authorization")).toBe("Bearer public");
+    expect(result.officialFailure).toMatchObject({ status: 503, body: "official busy" });
+  });
+
+  it("falls back to a public mirror after an anonymous official transport error", async () => {
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.startsWith("https://opencode.ai/")) throw new Error("network down");
+      return new Response("ok", { status: 200 });
+    });
+
+    const result = await fetchOpenCodeWithFailover({
+      env,
+      provider: provider(),
+      credential: openCodeAnonymousCredential(),
+      target: "https://opencode.ai/zen/v1/responses",
+      init: { method: "POST", body: "{}" },
+      fetcher,
+      random: () => 0,
+    });
+
+    expect(result.usedMirror).toBe(true);
+    expect(await result.response.text()).toBe("ok");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("https://opencode.ai/zen/v1/responses");
+    expect(fetcher.mock.calls[1]?.[0]).toBe("https://opencode.ai.cmliussss.net/zen/v1/responses");
+    expect(header(fetcher.mock.calls[1]![1], "authorization")).toBe("Bearer public");
   });
 
   it("tries a configured key before falling back to a public mirror", async () => {
@@ -105,8 +153,8 @@ describe("OpenCode failover", () => {
     expect(result.officialFailure).toMatchObject({ status: 401, body: "unauthorized" });
   });
 
-  it("routes anonymous model discovery through mirrors", async () => {
-    const fetcher = vi.fn(async (url: string, init: RequestInit) => new Response(JSON.stringify({ data: [] }), {
+  it("discovers anonymous models from official Zen with the public key", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
@@ -122,10 +170,12 @@ describe("OpenCode failover", () => {
     });
 
     expect(result.response.status).toBe(200);
+    expect(result.usedMirror).toBe(false);
     expect(fetcher).toHaveBeenCalledOnce();
-    expect(fetcher.mock.calls[0]?.[0]).toBe("https://opencode.ai.cmliussss.net/zen/v1/models");
+    expect(fetcher.mock.calls[0]?.[0]).toBe("https://opencode.ai/zen/v1/models");
     expect(fetcher.mock.calls[0]?.[1].method).toBe("GET");
     expect(fetcher.mock.calls[0]?.[1].body).toBeUndefined();
+    expect(header(fetcher.mock.calls[0]![1], "authorization")).toBe("Bearer public");
     expect(openCodeAnonymousCredentialRow().max_concurrency).toBeGreaterThanOrEqual(100);
   });
 
