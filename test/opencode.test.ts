@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { parseOpenCodeAnonymousModelIds } from "../src/models";
 import { buildOpenCodeRequest, classifyOpenCodeModel, openCodeGatewayEndpoints } from "../src/providers/opencode";
-import { isOpenCodeAnonymousModel, openCodeAnonymousCredential } from "../src/providers/opencode-anonymous";
+import { OPENCODE_MODEL_CATALOG_URL, openCodeAnonymousCredential } from "../src/providers/opencode-anonymous";
 import type { Credential, ProviderConfig, ProxyRequestContext } from "../src/types";
 
 const provider: ProviderConfig = {
@@ -70,10 +71,19 @@ function context(model: string, stream = false): ProxyRequestContext {
 }
 
 describe("OpenCode Zen upstream", () => {
-  it("allows only the live anonymous-free model markers", () => {
-    expect(isOpenCodeAnonymousModel("big-pickle")).toBe(true);
-    expect(isOpenCodeAnonymousModel("deepseek-v4-flash-free")).toBe(true);
-    expect(isOpenCodeAnonymousModel("gpt-5.6-sol")).toBe(false);
+  it("derives anonymous models from zero input cost instead of model names", () => {
+    const anonymousModels = parseOpenCodeAnonymousModelIds({
+      opencode: {
+        models: {
+          "free-without-suffix": { cost: { input: 0, output: 0 } },
+          "looks-free-but-paid-free": { cost: { input: 0.1, output: 0.2 } },
+          "big-pickle": { cost: { input: 0, output: 0 } },
+        },
+      },
+    });
+
+    expect([...anonymousModels].sort()).toEqual(["big-pickle", "free-without-suffix"]);
+    expect(OPENCODE_MODEL_CATALOG_URL).toBe("https://models.opencode.ai/api.json");
     const anonymous = openCodeAnonymousCredential();
     expect(anonymous.secret).toBe("");
     expect(anonymous.auth_type).toBe("anonymous");
