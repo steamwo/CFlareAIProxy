@@ -2,7 +2,7 @@ import { decryptSecret, encryptSecret } from "./crypto";
 import { canonicalizeBuiltinRow } from "./builtin-channels";
 import { GatewayError } from "./errors";
 import {
-  isOpenCodeAnonymousCredential, isOpenCodeAnonymousModel, openCodeAnonymousCredential, openCodeAnonymousCredentialRow,
+  isOpenCodeAnonymousCredential, openCodeAnonymousCredential, openCodeAnonymousCredentialRow,
 } from "./providers/opencode-anonymous";
 import { discoveredModelAllowed, normalizeAllowedModelNames, publicDiscoveredModelId, QODER_PROVIDER_ID, sortModelRoutes } from "./qoder-model-routing";
 import type {
@@ -501,29 +501,39 @@ export async function listCredentialAvailabilityForModel(
   upstreamModel: string,
   endpoint: GatewayEndpoint,
 ): Promise<CredentialAvailability[]> {
-  const result = await env.DB.prepare(
-    `SELECT c.*, q.status AS quota_status, q.quota_json, q.fetched_at AS quota_fetched_at, q.expires_at AS quota_expires_at
-     FROM credentials c
-     LEFT JOIN quota_snapshots q ON q.credential_id=c.id
-     WHERE c.provider_id=? AND c.enabled=1
-       AND (
-         NOT EXISTS(
-           SELECT 1 FROM discovered_models any_model
-           WHERE any_model.provider_id=c.provider_id AND any_model.endpoint=? AND any_model.enabled=1
+  const anonymousModelPromise = providerId === "opencode"
+    ? env.DB.prepare(
+        `SELECT 1 AS available FROM discovered_models
+         WHERE provider_id='opencode' AND credential_id='' AND endpoint=? AND model_id=? AND enabled=1
+         LIMIT 1`,
+      ).bind(endpoint, upstreamModel).first<{ available: number }>()
+    : Promise.resolve(null);
+  const [result, anonymousModel] = await Promise.all([
+    env.DB.prepare(
+      `SELECT c.*, q.status AS quota_status, q.quota_json, q.fetched_at AS quota_fetched_at, q.expires_at AS quota_expires_at
+       FROM credentials c
+       LEFT JOIN quota_snapshots q ON q.credential_id=c.id
+       WHERE c.provider_id=? AND c.enabled=1
+         AND (
+           NOT EXISTS(
+             SELECT 1 FROM discovered_models any_model
+             WHERE any_model.provider_id=c.provider_id AND any_model.endpoint=? AND any_model.enabled=1
+           )
+           OR EXISTS(
+             SELECT 1 FROM discovered_models dm
+             WHERE dm.provider_id=c.provider_id AND dm.endpoint=? AND dm.model_id=? AND dm.enabled=1
+               AND (dm.credential_id='' OR dm.credential_id=c.id)
+           )
          )
-         OR EXISTS(
-           SELECT 1 FROM discovered_models dm
-           WHERE dm.provider_id=c.provider_id AND dm.endpoint=? AND dm.model_id=? AND dm.enabled=1
-             AND (dm.credential_id='' OR dm.credential_id=c.id)
-         )
-       )
-     ORDER BY c.priority ASC,c.created_at ASC`,
-  ).bind(providerId, endpoint, endpoint, upstreamModel).all<CredentialRow & {
-    quota_status: QuotaSnapshot["status"] | null;
-    quota_json: string | null;
-    quota_fetched_at: number | null;
-    quota_expires_at: number | null;
-  }>();
+       ORDER BY c.priority ASC,c.created_at ASC`,
+    ).bind(providerId, endpoint, endpoint, upstreamModel).all<CredentialRow & {
+      quota_status: QuotaSnapshot["status"] | null;
+      quota_json: string | null;
+      quota_fetched_at: number | null;
+      quota_expires_at: number | null;
+    }>(),
+    anonymousModelPromise,
+  ]);
   const now = Math.floor(Date.now() / 1000);
   const output = result.results.map((entry) => {
     const { quota_status, quota_json, quota_fetched_at, quota_expires_at, ...row } = entry;
@@ -534,7 +544,7 @@ export async function listCredentialAvailabilityForModel(
       ? { row, available: false, reason: state.reason, retryAt: state.retryAt }
       : { row, available: true };
   });
-  if (providerId === "opencode" && isOpenCodeAnonymousModel(upstreamModel)) {
+  if (anonymousModel) {
     output.push({ row: openCodeAnonymousCredentialRow(), available: true });
   }
   return output;
@@ -696,4 +706,3 @@ export async function createGatewayKey(
     .run();
   return { id, key };
 }
-
