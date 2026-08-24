@@ -7,15 +7,6 @@ export function isOpenCodeAnonymousCredential(id: string): boolean {
   return id === OPENCODE_ANONYMOUS_CREDENTIAL_ID;
 }
 
-/**
- * Legacy name-based fallback kept temporarily for compatibility while callers migrate to
- * the discovered anonymous catalogue. Do not use this to decide whether a model is free.
- */
-export function isOpenCodeAnonymousModel(modelId: string): boolean {
-  const normalized = modelId.trim().toLowerCase();
-  return normalized === "big-pickle" || normalized.endsWith("-free");
-}
-
 export function openCodeAnonymousCredentialRow(): CredentialRow {
   return {
     id: OPENCODE_ANONYMOUS_CREDENTIAL_ID,
