@@ -29,7 +29,7 @@ interface ChatEntry {
   latencyMs?: number;
   raw?: string;
   pending?: boolean;
-  streaming?: boolean;
+  streamed?: boolean;
 }
 
 const endpointLabels: Record<PlaygroundEndpoint, string> = {
@@ -224,7 +224,6 @@ async function consumeResponsesStream(
   if (entry) {
     entry.raw = raw;
     entry.pending = false;
-    entry.streaming = false;
     entry.latencyMs = Math.round(performance.now() - startedAt);
     if (!entry.content) entry.content = "模型返回了空响应";
   }
@@ -258,7 +257,7 @@ async function send() {
     model: currentModel,
     endpoint: currentEndpoint,
     pending: true,
-    streaming: useStream,
+    streamed: useStream,
   });
   testing.value = true;
   await scrollToBottom();
@@ -297,7 +296,6 @@ async function send() {
     const message = errorText(error);
     if (entry?.content) {
       entry.pending = false;
-      entry.streaming = false;
       entry.latencyMs = Math.round(performance.now() - startedAt);
       messages.value.push({
         id: crypto.randomUUID(),
@@ -310,7 +308,6 @@ async function send() {
       entry.role = "error";
       entry.content = message;
       entry.pending = false;
-      entry.streaming = false;
       entry.latencyMs = Math.round(performance.now() - startedAt);
     }
   } finally {
@@ -416,7 +413,7 @@ onMounted(load);
           <div class="message-meta">
             <div class="message-role">
               <strong>{{ entry.role === 'user' ? '你' : entry.role === 'assistant' ? '模型' : '请求失败' }}</strong>
-              <span v-if="entry.streaming && entry.pending" class="streaming-label"><i></i>正在输出</span>
+              <span v-if="entry.streamed && entry.pending" class="streaming-label"><i></i>正在输出</span>
             </div>
             <n-space v-if="entry.role !== 'user'" :size="5" wrap>
               <n-tag v-if="entry.firstTokenMs !== undefined" size="small" :bordered="false">首字 {{ formatDuration(entry.firstTokenMs) }}</n-tag>
@@ -424,13 +421,13 @@ onMounted(load);
               <n-tag v-if="entry.endpoint" size="small" :bordered="false">{{ endpointLabels[entry.endpoint] }}</n-tag>
             </n-space>
           </div>
-          <div class="message-bubble" :class="{ 'message-bubble--streaming': entry.streaming && entry.pending }">
+          <div class="message-bubble" :class="{ 'message-bubble--streaming': entry.streamed && entry.pending }">
             <span v-if="entry.content">{{ entry.content }}</span>
-            <span v-if="entry.streaming && entry.pending && entry.content" class="stream-cursor"></span>
+            <span v-if="entry.streamed && entry.pending && entry.content" class="stream-cursor"></span>
             <span v-if="entry.pending && !entry.content" class="typing"><i></i><i></i><i></i></span>
           </div>
           <details v-if="entry.role === 'assistant' && entry.raw" class="raw-details">
-            <summary>查看原始{{ entry.streaming ? ' SSE' : '响应' }}</summary>
+            <summary>查看原始{{ entry.streamed ? ' SSE' : '响应' }}</summary>
             <pre>{{ entry.raw }}</pre>
           </details>
         </div>
