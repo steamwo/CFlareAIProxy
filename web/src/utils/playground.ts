@@ -7,6 +7,13 @@ export interface PlaygroundConversationMessage {
   content: string;
 }
 
+export interface PlaygroundResponsesStreamUpdate {
+  delta?: string;
+  completedText?: string;
+  done?: boolean;
+  error?: string;
+}
+
 const ENDPOINT_ORDER: PlaygroundEndpoint[] = ["responses", "chat", "completions"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -57,11 +64,12 @@ export function buildPlaygroundRequest(input: {
   temperature?: number | null;
   maxTokens?: number | null;
   advanced?: Record<string, unknown>;
+  stream?: boolean;
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     ...(input.advanced ?? {}),
     model: input.model,
-    stream: false,
+    stream: input.stream === true,
   };
 
   if (typeof input.temperature === "number") payload.temperature = input.temperature;
@@ -123,4 +131,49 @@ export function extractPlaygroundText(payload: unknown): string {
   }
 
   return "";
+}
+
+export function playgroundSseFrameData(frame: string): string {
+  return frame
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
+}
+
+function streamErrorMessage(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!isRecord(value)) return "模型流式响应失败";
+  if (typeof value.message === "string" && value.message) return value.message;
+  if (isRecord(value.error) && typeof value.error.message === "string") return value.error.message;
+  return "模型流式响应失败";
+}
+
+export function parsePlaygroundResponsesStreamData(data: string): PlaygroundResponsesStreamUpdate {
+  const trimmed = data.trim();
+  if (!trimmed) return {};
+  if (trimmed === "[DONE]") return { done: true };
+
+  let event: unknown;
+  try {
+    event = JSON.parse(trimmed) as unknown;
+  } catch {
+    return {};
+  }
+  if (!isRecord(event)) return {};
+
+  const type = typeof event.type === "string" ? event.type : "";
+  if ((type === "response.output_text.delta" || type === "response.refusal.delta") && typeof event.delta === "string") {
+    return { delta: event.delta };
+  }
+  if (type === "response.completed") {
+    return {
+      completedText: extractPlaygroundText(event.response),
+      done: true,
+    };
+  }
+  if (type === "error" || event.error !== undefined) {
+    return { error: streamErrorMessage(event.error ?? event) };
+  }
+  return {};
 }
