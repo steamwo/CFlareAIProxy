@@ -39,6 +39,13 @@ export function playgroundEndpoints(model: PublicModel | undefined): PlaygroundE
   return supported.length ? supported : [...ENDPOINT_ORDER];
 }
 
+export function playgroundModelsForEndpoint(
+  models: readonly PublicModel[],
+  endpoint: PlaygroundEndpoint,
+): PublicModel[] {
+  return models.filter((model) => playgroundEndpoints(model).includes(endpoint));
+}
+
 export function parsePlaygroundAdvancedJson(value: string): Record<string, unknown> {
   if (!value.trim()) return {};
   const parsed: unknown = JSON.parse(value);
