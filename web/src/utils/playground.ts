@@ -1,6 +1,11 @@
 import type { PublicModel } from "../types";
 
 export type PlaygroundEndpoint = "responses" | "chat" | "completions";
+export type PlaygroundConversationRole = "user" | "assistant";
+export interface PlaygroundConversationMessage {
+  role: PlaygroundConversationRole;
+  content: string;
+}
 
 const ENDPOINT_ORDER: PlaygroundEndpoint[] = ["responses", "chat", "completions"];
 
@@ -34,10 +39,20 @@ export function parsePlaygroundAdvancedJson(value: string): Record<string, unkno
   return parsed;
 }
 
+function completionTranscript(messages: readonly PlaygroundConversationMessage[], systemPrompt?: string): string {
+  const sections: string[] = [];
+  if (systemPrompt?.trim()) sections.push(`System: ${systemPrompt.trim()}`);
+  for (const message of messages) {
+    sections.push(`${message.role === "user" ? "User" : "Assistant"}: ${message.content}`);
+  }
+  sections.push("Assistant:");
+  return sections.join("\n\n");
+}
+
 export function buildPlaygroundRequest(input: {
   endpoint: PlaygroundEndpoint;
   model: string;
-  prompt: string;
+  messages: readonly PlaygroundConversationMessage[];
   systemPrompt?: string;
   temperature?: number | null;
   maxTokens?: number | null;
@@ -55,20 +70,20 @@ export function buildPlaygroundRequest(input: {
   }
 
   if (input.endpoint === "responses") {
-    payload.input = input.prompt;
-    if (input.systemPrompt?.trim()) payload.instructions = input.systemPrompt;
+    payload.input = input.messages.map((message) => ({ role: message.role, content: message.content }));
+    if (input.systemPrompt?.trim()) payload.instructions = input.systemPrompt.trim();
     return payload;
   }
 
   if (input.endpoint === "chat") {
-    const messages: Array<Record<string, string>> = [];
-    if (input.systemPrompt?.trim()) messages.push({ role: "system", content: input.systemPrompt });
-    messages.push({ role: "user", content: input.prompt });
+    const messages: Array<{ role: "system" | PlaygroundConversationRole; content: string }> = [];
+    if (input.systemPrompt?.trim()) messages.push({ role: "system", content: input.systemPrompt.trim() });
+    messages.push(...input.messages.map((message) => ({ role: message.role, content: message.content })));
     payload.messages = messages;
     return payload;
   }
 
-  payload.prompt = input.prompt;
+  payload.prompt = completionTranscript(input.messages, input.systemPrompt);
   return payload;
 }
 
