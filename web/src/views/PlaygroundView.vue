@@ -13,6 +13,7 @@ import {
   parsePlaygroundAdvancedJson,
   parsePlaygroundResponsesStreamData,
   playgroundEndpoints,
+  playgroundModelsForEndpoint,
   playgroundSseFrameData,
   type PlaygroundConversationMessage,
   type PlaygroundEndpoint,
@@ -32,6 +33,7 @@ interface ChatEntry {
   streamed?: boolean;
 }
 
+const endpointOrder: PlaygroundEndpoint[] = ["responses", "chat", "completions"];
 const endpointLabels: Record<PlaygroundEndpoint, string> = {
   responses: "Responses",
   chat: "Chat Completions",
@@ -59,11 +61,12 @@ const nowSeconds = () => Math.floor(Date.now() / 1000);
 const keyUsable = (item: GatewayKey): boolean => item.enabled === 1 && (item.expires_at === null || item.expires_at > nowSeconds());
 const selectedKey = computed(() => keys.value.find((item) => item.id === selectedKeyId.value));
 const selectedAllowedModels = computed(() => gatewayKeyAllowedModelIds(selectedKey.value?.allowed_models_json ?? "[]"));
-const availableModels = computed(() => {
+const keyModels = computed(() => {
   if (!selectedAllowedModels.value.length) return models.value;
   const allowed = new Set(selectedAllowedModels.value);
   return models.value.filter((model) => allowed.has(model.id));
 });
+const availableModels = computed(() => playgroundModelsForEndpoint(keyModels.value, endpoint.value));
 const keyOptions = computed(() => keys.value.map((item) => ({
   label: `${item.name} · ${item.key_prefix}…${keyUsable(item) ? "" : " · 不可用"}`,
   value: item.id,
@@ -72,7 +75,14 @@ const keyOptions = computed(() => keys.value.map((item) => ({
 const modelOptions = computed(() => publicModelOptions(availableModels.value));
 const selectedModel = computed(() => models.value.find((item) => item.id === modelId.value));
 const supportedEndpoints = computed(() => playgroundEndpoints(selectedModel.value));
-const endpointOptions = computed(() => supportedEndpoints.value.map((item) => ({ label: endpointLabels[item], value: item })));
+const endpointOptions = computed(() => endpointOrder.map((item) => {
+  const count = playgroundModelsForEndpoint(keyModels.value, item).length;
+  return {
+    label: `${endpointLabels[item]} · ${count} 个模型`,
+    value: item,
+    disabled: count === 0,
+  };
+}));
 const responsesStreaming = computed(() => endpoint.value === "responses" && streamResponses.value);
 const conversationCount = computed(() => messages.value.filter((entry) => entry.role === "user" || entry.role === "assistant").length);
 const canSend = computed(() => Boolean(
@@ -86,17 +96,17 @@ const canSend = computed(() => Boolean(
 const keyScopeText = computed(() => selectedKey.value
   ? selectedAllowedModels.value.length ? `允许 ${selectedAllowedModels.value.length} 个模型` : "允许全部模型"
   : "请选择网关 Key");
+const endpointModelText = computed(() => availableModels.value.length
+  ? `${endpointLabels[endpoint.value]} 可用 ${availableModels.value.length} 个模型`
+  : `当前 Key 没有支持 ${endpointLabels[endpoint.value]} 的模型`);
 
 function reconcileModel() {
-  if (!availableModels.value.some((model) => model.id === modelId.value)) modelId.value = availableModels.value[0]?.id ?? "";
+  if (!availableModels.value.some((model) => model.id === modelId.value)) {
+    modelId.value = availableModels.value[0]?.id ?? "";
+  }
 }
 
-function reconcileEndpoint() {
-  if (!supportedEndpoints.value.includes(endpoint.value)) endpoint.value = supportedEndpoints.value[0] ?? "responses";
-}
-
-watch(selectedKeyId, reconcileModel);
-watch(modelId, reconcileEndpoint);
+watch([selectedKeyId, endpoint], reconcileModel);
 
 async function load() {
   await run(async () => {
@@ -110,7 +120,6 @@ async function load() {
       selectedKeyId.value = keys.value.find(keyUsable)?.id ?? "";
     }
     reconcileModel();
-    reconcileEndpoint();
   });
 }
 
@@ -320,7 +329,7 @@ onMounted(load);
 </script>
 
 <template>
-  <page-header title="模型操场" description="选择网关 Key 和模型后直接开始多轮对话；Responses 支持 SSE 实时流式输出。">
+  <page-header title="模型操场" description="先选择接口，再选择该接口真正支持的模型；Responses 支持 SSE 实时流式输出。">
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新配置</n-button>
   </page-header>
 
@@ -330,11 +339,12 @@ onMounted(load);
         <n-select v-model:value="selectedKeyId" filterable :options="keyOptions" placeholder="选择 Key" />
         <template #feedback><span class="muted">{{ keyScopeText }}</span></template>
       </n-form-item>
-      <n-form-item label="模型">
-        <n-select v-model:value="modelId" filterable :options="modelOptions" placeholder="选择模型" />
-      </n-form-item>
       <n-form-item label="接口">
         <n-select v-model:value="endpoint" :options="endpointOptions" placeholder="选择接口" />
+      </n-form-item>
+      <n-form-item label="模型" :show-feedback="true">
+        <n-select v-model:value="modelId" filterable :options="modelOptions" placeholder="选择模型" />
+        <template #feedback><span class="muted">{{ endpointModelText }}</span></template>
       </n-form-item>
       <n-form-item label="Temperature">
         <n-input-number v-model:value="temperature" clearable :min="0" :max="2" :step="0.1" placeholder="默认" />
@@ -463,7 +473,7 @@ onMounted(load);
 
 <style scoped>
 .config-card { margin-bottom:18px; }
-.config-grid { display:grid; grid-template-columns:minmax(180px,1.15fr) minmax(220px,1.35fr) minmax(150px,.8fr) minmax(130px,.65fr) minmax(150px,.75fr) minmax(145px,.72fr); gap:14px; align-items:start; }
+.config-grid { display:grid; grid-template-columns:minmax(180px,1.15fr) minmax(170px,.85fr) minmax(220px,1.35fr) minmax(130px,.65fr) minmax(150px,.75fr) minmax(145px,.72fr); gap:14px; align-items:start; }
 .config-grid :deep(.n-form-item) { margin-bottom:0; }
 .stream-setting { min-height:34px; display:flex; align-items:center; gap:9px; color:var(--n-text-color-3); font-size:12px; }
 .advanced-settings { margin-top:4px; border-top:1px solid var(--n-border-color); }
