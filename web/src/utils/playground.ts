@@ -166,13 +166,17 @@ export function parsePlaygroundResponsesStreamData(data: string): PlaygroundResp
   if ((type === "response.output_text.delta" || type === "response.refusal.delta") && typeof event.delta === "string") {
     return { delta: event.delta };
   }
-  if (type === "response.completed") {
+  if (type === "response.completed" || type === "response.incomplete") {
     return {
       completedText: extractPlaygroundText(event.response),
       done: true,
     };
   }
-  if (type === "error" || event.error !== undefined) {
+  if (type === "response.failed") {
+    const response = isRecord(event.response) ? event.response : undefined;
+    return { error: streamErrorMessage(response?.error ?? response ?? event) };
+  }
+  if (type === "error" || (event.error !== undefined && event.error !== null)) {
     return { error: streamErrorMessage(event.error ?? event) };
   }
   return {};
