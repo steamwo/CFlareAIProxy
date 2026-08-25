@@ -19,7 +19,7 @@ import { captureQuotaHeaders } from "./quota";
 import { orderHealthyRoutes, recordProviderFailure, recordProviderSuccess } from "./routing-health";
 import { buildSessionAffinityKey } from "./session-affinity";
 import { trackResponse } from "./stream";
-import type { CredentialRow, Env, GatewayEndpoint, LoggingSettings, ModelRouteRow, PoolCandidate, PoolLease, ProviderConfig, RateLease, Usage, UsageEvent } from "./types";
+import type { CredentialRow, Env, GatewayEndpoint, GatewayKeyRow, LoggingSettings, ModelRouteRow, PoolCandidate, PoolLease, ProviderConfig, RateLease, Usage, UsageEvent } from "./types";
 import {
   classifyTransportError,
   classifyUpstreamResponse,
@@ -107,7 +107,11 @@ function requestMemo<T>(load: (key: string) => Promise<T>): (key: string) => Pro
   };
 }
 
-export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: GatewayEndpoint): Promise<Response> {
+export async function proxyGeneration(
+  c: Context<{ Bindings: Env }>,
+  endpoint: GatewayEndpoint,
+  preauthenticatedGatewayKey?: GatewayKeyRow,
+): Promise<Response> {
   const requestId = crypto.randomUUID();
   const startedAt = Date.now();
   // Resolved inside the try so the settings read can overlap auth and body parsing;
@@ -123,8 +127,9 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
   let logUpstreamModel: string | undefined;
 
   try {
-    // bearerToken is synchronous and throws 401 before any I/O starts.
-    const rawKey = bearerToken(c.req.raw);
+    // External /v1 calls keep the existing Bearer-key path. The admin playground can pass
+    // an already-selected key row after its own session guard has authenticated the operator.
+    const rawKey = preauthenticatedGatewayKey ? "" : bearerToken(c.req.raw);
     const maxBody = asInt(c.env.MAX_BODY_BYTES, 8 * 1024 * 1024);
     // Logging settings, key authentication, and body parsing are mutually
     // independent; overlapping them removes two serial round trips from TTFB.
@@ -132,7 +137,9 @@ export async function proxyGeneration(c: Context<{ Bindings: Env }>, endpoint: G
     // avoids an unhandled rejection when one of them loses the race.
     const [settled, authenticated, parsed] = await Promise.allSettled([
       getLoggingSettings(c.env),
-      authenticateGatewayKey(c.env, rawKey),
+      preauthenticatedGatewayKey
+        ? Promise.resolve(preauthenticatedGatewayKey)
+        : authenticateGatewayKey(c.env, rawKey),
       readJsonBody(c.req.raw, maxBody),
     ]);
     if (settled.status === "fulfilled") logging = settled.value;
