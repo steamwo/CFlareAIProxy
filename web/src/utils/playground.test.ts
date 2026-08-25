@@ -108,10 +108,21 @@ describe("model playground", () => {
     expect(parsePlaygroundResponsesStreamData("[DONE]")).toEqual({ done: true });
   });
 
-  it("uses completed Responses payload text as a streaming fallback", () => {
+  it("uses terminal Responses payload text as a streaming fallback", () => {
     expect(parsePlaygroundResponsesStreamData(JSON.stringify({
       type: "response.completed",
       response: { output: [{ content: [{ type: "output_text", text: "finished" }] }] },
     }))).toEqual({ completedText: "finished", done: true });
+    expect(parsePlaygroundResponsesStreamData(JSON.stringify({
+      type: "response.incomplete",
+      response: { output: [{ content: [{ type: "output_text", text: "partial" }] }] },
+    }))).toEqual({ completedText: "partial", done: true });
+  });
+
+  it("surfaces Responses stream failures", () => {
+    expect(parsePlaygroundResponsesStreamData(JSON.stringify({
+      type: "response.failed",
+      response: { error: { message: "upstream failed" } },
+    }))).toEqual({ error: "upstream failed" });
   });
 });
