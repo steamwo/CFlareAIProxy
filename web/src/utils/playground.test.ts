@@ -6,6 +6,7 @@ import {
   parsePlaygroundAdvancedJson,
   parsePlaygroundResponsesStreamData,
   playgroundEndpoints,
+  playgroundModelsForEndpoint,
   playgroundSseFrameData,
 } from "./playground";
 import type { PublicModel } from "../types";
@@ -14,6 +15,12 @@ const model: PublicModel = {
   id: "codex/gpt-5",
   display_name: "GPT-5",
   x_cflare_endpoints: ["chat", "responses"],
+};
+
+const chatOnlyModel: PublicModel = {
+  id: "opencode/claude-sonnet",
+  display_name: "Claude Sonnet",
+  x_cflare_endpoints: ["chat"],
 };
 
 const messages = [
@@ -25,6 +32,13 @@ const messages = [
 describe("model playground", () => {
   it("uses the endpoints declared by the public model", () => {
     expect(playgroundEndpoints(model)).toEqual(["responses", "chat"]);
+  });
+
+  it("filters models by the selected endpoint instead of hiding endpoint choices", () => {
+    expect(playgroundModelsForEndpoint([chatOnlyModel, model], "responses").map((item) => item.id))
+      .toEqual(["codex/gpt-5"]);
+    expect(playgroundModelsForEndpoint([chatOnlyModel, model], "chat").map((item) => item.id))
+      .toEqual(["opencode/claude-sonnet", "codex/gpt-5"]);
   });
 
   it("parses a gateway key model allow-list without duplicates", () => {
