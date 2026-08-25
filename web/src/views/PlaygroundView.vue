@@ -329,7 +329,7 @@ onMounted(load);
 </script>
 
 <template>
-  <page-header title="模型操场" description="先选择接口，再选择该接口真正支持的模型；Responses 支持 SSE 实时流式输出。">
+  <page-header title="模型操场" description="接口与模型分开选择：先选 Responses / Chat，再筛选真正支持该接口的模型。Responses 支持 SSE 实时流式输出。">
     <n-button :loading="loading" @click="load"><template #icon><refresh-cw /></template>刷新配置</n-button>
   </page-header>
 
