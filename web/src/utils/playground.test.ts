@@ -4,7 +4,9 @@ import {
   extractPlaygroundText,
   gatewayKeyAllowedModelIds,
   parsePlaygroundAdvancedJson,
+  parsePlaygroundResponsesStreamData,
   playgroundEndpoints,
+  playgroundSseFrameData,
 } from "./playground";
 import type { PublicModel } from "../types";
 
@@ -69,6 +71,16 @@ describe("model playground", () => {
     });
   });
 
+  it("allows Responses streaming to override advanced stream values", () => {
+    expect(buildPlaygroundRequest({
+      endpoint: "responses",
+      model: "codex/gpt-5",
+      messages,
+      stream: true,
+      advanced: { stream: false },
+    }).stream).toBe(true);
+  });
+
   it("turns conversation history into a completions transcript", () => {
     expect(buildPlaygroundRequest({
       endpoint: "completions",
@@ -87,5 +99,19 @@ describe("model playground", () => {
     expect(extractPlaygroundText({ choices: [{ message: { content: "chat answer" } }] })).toBe("chat answer");
     expect(extractPlaygroundText({ output: [{ content: [{ type: "output_text", text: "response answer" }] }] }))
       .toBe("response answer");
+  });
+
+  it("extracts data and deltas from Responses SSE frames", () => {
+    const frame = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}';
+    expect(playgroundSseFrameData(frame)).toBe('{"type":"response.output_text.delta","delta":"hello"}');
+    expect(parsePlaygroundResponsesStreamData(playgroundSseFrameData(frame))).toEqual({ delta: "hello" });
+    expect(parsePlaygroundResponsesStreamData("[DONE]")).toEqual({ done: true });
+  });
+
+  it("uses completed Responses payload text as a streaming fallback", () => {
+    expect(parsePlaygroundResponsesStreamData(JSON.stringify({
+      type: "response.completed",
+      response: { output: [{ content: [{ type: "output_text", text: "finished" }] }] },
+    }))).toEqual({ completedText: "finished", done: true });
   });
 });
