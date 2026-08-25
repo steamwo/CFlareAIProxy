@@ -310,7 +310,7 @@ onMounted(load);
 .chat-header { display:flex; align-items:center; justify-content:space-between; gap:14px; }
 .chat-header>div { min-width:0; display:flex; align-items:baseline; flex-wrap:wrap; gap:9px; }
 .chat-subtitle { color:var(--n-text-color-3); font-size:12px; }
-.chat-body { min-height:460px; max-height:62vh; overflow:auto; padding:24px; background:color-mix(in srgb,var(--n-color-embedded) 38%,transparent); scroll-behavior:smooth; }
+.chat-body { min-height:460px; max-height:62vh; overflow:auto; padding:24px; background:var(--n-color-embedded); scroll-behavior:smooth; }
 .chat-empty { min-height:390px; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px; color:var(--n-text-color-3); text-align:center; }
 .chat-empty strong { color:var(--n-text-color-2); font-size:15px; }
 .chat-empty span { max-width:470px; font-size:12px; line-height:1.65; }
@@ -325,8 +325,8 @@ onMounted(load);
 .message-meta strong { color:var(--n-text-color-2); font-size:12px; }
 .chat-row--user .message-meta { justify-content:flex-end; }
 .message-bubble { padding:11px 14px; border:1px solid var(--n-border-color); border-radius:6px 14px 14px 14px; background:var(--n-color); white-space:pre-wrap; word-break:break-word; line-height:1.65; }
-.chat-row--user .message-bubble { border-color:color-mix(in srgb,var(--n-primary-color) 28%,transparent); border-radius:14px 6px 14px 14px; background:color-mix(in srgb,var(--n-primary-color) 11%,var(--n-color)); }
-.chat-row--error .message-bubble { border-color:color-mix(in srgb,var(--n-error-color) 35%,transparent); background:color-mix(in srgb,var(--n-error-color) 8%,var(--n-color)); color:var(--n-error-color); }
+.chat-row--user .message-bubble { border-color:var(--n-primary-color); border-radius:14px 6px 14px 14px; background:var(--n-color); }
+.chat-row--error .message-bubble { border-color:var(--n-error-color); background:var(--n-color); color:var(--n-error-color); }
 .raw-details { margin-top:7px; color:var(--n-text-color-3); font-size:11px; }
 .raw-details summary { width:max-content; cursor:pointer; user-select:none; }
 .raw-details pre { max-height:280px; overflow:auto; margin:8px 0 0; padding:12px; border:1px solid var(--n-border-color); border-radius:9px; background:var(--n-color); color:var(--n-text-color-2); font-size:11px; line-height:1.5; white-space:pre-wrap; word-break:break-all; }
