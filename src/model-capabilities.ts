@@ -18,6 +18,7 @@ export interface ModelCapabilities {
   reasoningLevels?: string[];
   serviceTiers?: string[];
   contextWindow?: number;
+  maxCompletionTokens?: number;
   visibility?: "list" | "hide";
   priority?: number;
   supportsTools?: boolean;
@@ -26,6 +27,11 @@ export interface ModelCapabilities {
   supportsPromptCacheKey?: boolean;
   supportsReasoningSummary?: boolean;
   forceResponseModelMapping?: boolean;
+  multiAgentReasoningEffort?: unknown;
+  requiresSandboxedReview?: boolean;
+  persistentInstructions?: unknown;
+  guardianV2?: unknown;
+  confirmationPolicies?: unknown;
 }
 
 export interface RouteRuntimeOptions {
@@ -67,6 +73,11 @@ function booleanValue(...values: unknown[]): boolean | undefined {
   return undefined;
 }
 
+function definedValue(...values: unknown[]): unknown {
+  for (const value of values) if (value !== undefined) return value;
+  return undefined;
+}
+
 export function normalizeCapabilities(value: unknown): ModelCapabilities {
   const raw = record(value);
   const rawVisibility = typeof raw.visibility === "string" ? raw.visibility.trim().toLowerCase() : "";
@@ -84,6 +95,7 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
       raw.context_length,
       raw.max_context_window,
     ),
+    maxCompletionTokens: positiveNumber(raw.maxCompletionTokens, raw.max_completion_tokens, raw.maxOutputTokens, raw.max_output_tokens),
     visibility: rawVisibility === "hide" || rawVisibility === "list" ? rawVisibility : undefined,
     priority: positiveNumber(raw.priority),
     supportsTools: booleanValue(raw.supportsTools, raw.supports_tools),
@@ -110,6 +122,11 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
       raw.supports_reasoning_summary_parameter,
     ),
     forceResponseModelMapping: raw.forceResponseModelMapping === true || raw.force_response_model_mapping === true ? true : undefined,
+    multiAgentReasoningEffort: definedValue(raw.multiAgentReasoningEffort, raw.multi_agent_reasoning_effort),
+    requiresSandboxedReview: booleanValue(raw.requiresSandboxedReview, raw.requires_sandboxed_review),
+    persistentInstructions: definedValue(raw.persistentInstructions, raw.persistent_instructions),
+    guardianV2: definedValue(raw.guardianV2, raw.guardian_v2),
+    confirmationPolicies: definedValue(raw.confirmationPolicies, raw.confirmation_policies),
   };
 }
 
@@ -120,6 +137,7 @@ export function mergeModelCapabilities(primary: ModelCapabilities, fallback: Mod
     reasoningLevels: primary.reasoningLevels ?? fallback.reasoningLevels,
     serviceTiers: primary.serviceTiers ?? fallback.serviceTiers,
     contextWindow: primary.contextWindow ?? fallback.contextWindow,
+    maxCompletionTokens: primary.maxCompletionTokens ?? fallback.maxCompletionTokens,
     visibility: primary.visibility ?? fallback.visibility,
     priority: primary.priority ?? fallback.priority,
     supportsTools: primary.supportsTools ?? fallback.supportsTools,
@@ -128,6 +146,11 @@ export function mergeModelCapabilities(primary: ModelCapabilities, fallback: Mod
     supportsPromptCacheKey: primary.supportsPromptCacheKey ?? fallback.supportsPromptCacheKey,
     supportsReasoningSummary: primary.supportsReasoningSummary ?? fallback.supportsReasoningSummary,
     forceResponseModelMapping: primary.forceResponseModelMapping ?? fallback.forceResponseModelMapping,
+    multiAgentReasoningEffort: primary.multiAgentReasoningEffort !== undefined ? primary.multiAgentReasoningEffort : fallback.multiAgentReasoningEffort,
+    requiresSandboxedReview: primary.requiresSandboxedReview ?? fallback.requiresSandboxedReview,
+    persistentInstructions: primary.persistentInstructions !== undefined ? primary.persistentInstructions : fallback.persistentInstructions,
+    guardianV2: primary.guardianV2 !== undefined ? primary.guardianV2 : fallback.guardianV2,
+    confirmationPolicies: primary.confirmationPolicies !== undefined ? primary.confirmationPolicies : fallback.confirmationPolicies,
   };
 }
 
