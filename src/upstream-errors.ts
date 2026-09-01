@@ -121,6 +121,12 @@ export function classifyUpstreamResponse(
     || /(?:store\s*[=:]\s*false|store=false).*(?:item|response).*not found|(?:item|response).*not found.*(?:store\s*[=:]\s*false|store=false)/.test(lower)) {
     return { status: 400, code: "RESPONSE_ITEM_NOT_FOUND", type: "invalid_request_error", message, retryable: false, credentialFailure: false, providerFailure: false };
   }
+  // Payment/balance failures are credential-scoped regardless of a generic
+  // invalid_request_error payload. Preserve HTTP 402 while allowing the
+  // existing retry/cooldown path to rotate to another credential.
+  if (status === 402) {
+    return { status, code: "PAYMENT_REQUIRED", type: "billing_error", message, retryable: true, credentialFailure: true, providerFailure: false, retryAfterMs };
+  }
   if (status === 401 || status === 403 || upstreamType === "authentication_error"
     || /invalid_api_key|invalid or expired token|refresh_token_reused|unauthorized|forbidden/.test(lower)) {
     return { status, code: "AUTH_UNAVAILABLE", type: status === 403 ? "permission_error" : "authentication_error", message, retryable: true, credentialFailure: true, providerFailure: false, retryAfterMs };
