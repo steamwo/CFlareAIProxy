@@ -71,8 +71,8 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
   const raw = record(value);
   const rawVisibility = typeof raw.visibility === "string" ? raw.visibility.trim().toLowerCase() : "";
   return {
-    inputModalities: strings(raw.inputModalities ?? raw.input_modalities ?? raw.supported_input_modalities),
-    outputModalities: strings(raw.outputModalities ?? raw.output_modalities ?? raw.supported_output_modalities),
+    inputModalities: strings(raw.inputModalities ?? raw.input_modalities ?? raw.supportedInputModalities ?? raw.supported_input_modalities),
+    outputModalities: strings(raw.outputModalities ?? raw.output_modalities ?? raw.supportedOutputModalities ?? raw.supported_output_modalities),
     reasoningLevels: reasoningLevels(raw.reasoningLevels ?? raw.reasoning_levels ?? raw.supported_reasoning_levels),
     serviceTiers: strings(raw.serviceTiers ?? raw.service_tiers, "id"),
     contextWindow: positiveNumber(
