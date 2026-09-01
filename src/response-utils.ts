@@ -40,6 +40,32 @@ export function mergeResponseUsage(left: Usage, right: Usage): Usage {
   };
 }
 
+function withResponsesUsageDetails(value: Record<string, unknown>): Record<string, unknown> {
+  const usage = responseRecord(value.usage);
+  if (!Object.keys(usage).length) return value;
+  const inputDetails = { ...responseRecord(usage.input_tokens_details) };
+  const outputDetails = { ...responseRecord(usage.output_tokens_details) };
+  if (inputDetails.cached_tokens === undefined) inputDetails.cached_tokens = 0;
+  if (outputDetails.reasoning_tokens === undefined) outputDetails.reasoning_tokens = 0;
+  return {
+    ...value,
+    usage: {
+      ...usage,
+      input_tokens_details: inputDetails,
+      output_tokens_details: outputDetails,
+    },
+  };
+}
+
+export function normalizeResponsesUsageDetails(value: unknown): unknown {
+  const root = responseRecord(value);
+  if (!Object.keys(root).length || root.type === "response.compaction") return value;
+  let output = withResponsesUsageDetails(root);
+  const response = responseRecord(output.response);
+  if (Object.keys(response).length) output = { ...output, response: withResponsesUsageDetails(response) };
+  return output;
+}
+
 export function responseHeaders(source: Headers, contentType?: string): Headers {
   const headers = new Headers(source);
   headers.delete("content-length");
@@ -119,6 +145,32 @@ export async function readResponseText(body: ReadableStream<Uint8Array> | null, 
   let offset = 0;
   for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
   return decoder.decode(output);
+}
+
+export async function ensureResponsesUsageDetails(response: Response): Promise<Response> {
+  if (!response.body) return response;
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("text/event-stream")) {
+    const body = transformResponseSse(response.body, (data, controller) => {
+      if (data === "[DONE]") {
+        controller.enqueue(responseEncoder.encode("data: [DONE]\n\n"));
+        return;
+      }
+      try {
+        controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify(normalizeResponsesUsageDetails(JSON.parse(data)))}\n\n`));
+      } catch {
+        controller.enqueue(responseEncoder.encode(`data: ${data}\n\n`));
+      }
+    }, () => undefined);
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: responseHeaders(response.headers, contentType) });
+  }
+  if (!contentType.includes("json")) return response;
+  const text = await response.text();
+  try {
+    return Response.json(normalizeResponsesUsageDetails(JSON.parse(text)), { status: response.status, headers: responseHeaders(response.headers, "application/json; charset=utf-8") });
+  } catch {
+    return new Response(text, { status: response.status, statusText: response.statusText, headers: responseHeaders(response.headers, contentType) });
+  }
 }
 
 export async function rewriteResponseModels(response: Response, model: string): Promise<Response> {
