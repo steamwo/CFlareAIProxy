@@ -57,8 +57,8 @@ describe("Codex client model schema capabilities", () => {
         confirmation_policies: null,
       }),
     }]);
-    expect(withNull.multi_agent_reasoning_effort).toBeNull();
-    expect(withNull.model_messages).toEqual({
+    expect(withNull!.multi_agent_reasoning_effort).toBeNull();
+    expect(withNull!.model_messages).toEqual({
       persistent_instructions: null,
       guardian_v2: null,
       confirmation_policies: null,
@@ -71,6 +71,6 @@ describe("Codex client model schema capabilities", () => {
     }]);
     expect(missing).not.toHaveProperty("multi_agent_reasoning_effort");
     expect(missing).not.toHaveProperty("requires_sandboxed_review");
-    expect(missing.model_messages).toEqual({});
+    expect(missing!.model_messages).toEqual({});
   });
 });
