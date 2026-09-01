@@ -1,6 +1,6 @@
 import { CODEX_CLIENT_VERSION } from "../builtin-channels";
 import type { Credential, ProviderConfig } from "../types";
-import { decodeJwtPayload, pickString } from "../utils";
+import { decodeJwtPayload, pickString, resolveConfiguredHeaderValue } from "../utils";
 
 const CODEX_USER_AGENT_SUFFIX = "(Debian 13.0.0; x86_64) WindowsTerminal";
 
@@ -39,23 +39,34 @@ export function codexAccountId(credential: Credential): string | undefined {
   return pickString(access, ["chatgpt_account_id", "account_id"]);
 }
 
-export function providerAuthHeaders(provider: ProviderConfig, credential: Credential): Headers {
-  const headers = new Headers(provider.headers);
+export function providerAuthHeaders(provider: ProviderConfig, credential: Credential, incomingHeaders?: Headers): Headers {
+  const headers = new Headers();
+  for (const [key, configured] of Object.entries(provider.headers)) {
+    const value = resolveConfiguredHeaderValue(configured, incomingHeaders);
+    if (value !== undefined) headers.set(key, value);
+  }
+
   const authHeader = typeof provider.auth.header === "string" ? provider.auth.header : "authorization";
   const authPrefix = typeof provider.auth.prefix === "string" ? provider.auth.prefix : "Bearer ";
   if (credential.secret) headers.set(authHeader, `${authPrefix}${credential.secret}`);
+  else headers.delete(authHeader);
 
   const metadataHeaders = credential.metadata.headers;
   if (metadataHeaders && typeof metadataHeaders === "object" && !Array.isArray(metadataHeaders)) {
-    for (const [key, value] of Object.entries(metadataHeaders as Record<string, unknown>)) {
-      if (typeof value === "string") headers.set(key, value);
+    for (const [key, configured] of Object.entries(metadataHeaders as Record<string, unknown>)) {
+      if (typeof configured !== "string") continue;
+      const value = resolveConfiguredHeaderValue(configured, incomingHeaders);
+      if (value !== undefined) headers.set(key, value);
+      else headers.delete(key);
     }
   }
 
   if (provider.kind === "codex") {
     // Authentication and account identity are protected regardless of the transmitted
-    // client identity policy.
-    headers.set("authorization", `Bearer ${credential.secret}`);
+    // client identity policy. Empty config credentials must not leak a stale/custom
+    // authorization value to a custom Codex-compatible upstream.
+    if (credential.secret) headers.set("authorization", `Bearer ${credential.secret}`);
+    else headers.delete("authorization");
     headers.set("accept", headers.get("accept") ?? "application/json");
     headers.set("content-type", headers.get("content-type") ?? "application/json");
     if (!disableCodexCloaking(provider)) {
@@ -64,6 +75,7 @@ export function providerAuthHeaders(provider: ProviderConfig, credential: Creden
     }
     const accountId = codexAccountId(credential);
     if (accountId) headers.set("Chatgpt-Account-Id", accountId);
+    else headers.delete("Chatgpt-Account-Id");
   }
   return headers;
 }
