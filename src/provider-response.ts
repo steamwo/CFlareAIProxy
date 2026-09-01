@@ -3,7 +3,7 @@ import { prepareCodexCustomToolResponse } from "./codex-custom-response";
 import { prepareKimiResponse } from "./kimi-response";
 import { stopOpenAiCompatibleSseAfterDone } from "./openai-compatible-response";
 import { prepareQoderResponse } from "./qoder-response-compat";
-import { rewriteResponseModels } from "./response-utils";
+import { ensureResponsesUsageDetails, rewriteResponseModels } from "./response-utils";
 import { prepareDownstreamResponse } from "./stream";
 import type { GatewayEndpoint, ProviderKind, UpstreamResponseMode } from "./types";
 
@@ -31,5 +31,6 @@ export async function prepareProviderResponse(context: ProviderResponseContext):
     }
     if (context.forceResponseModelMapping) response = await rewriteResponseModels(response, context.model);
   }
+  if (context.endpoint === "responses") response = await ensureResponsesUsageDetails(response);
   return restoreCodexMultiAgentResponse(response, context.restoreCodexCollaborationNamespace === true);
 }
