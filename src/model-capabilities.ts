@@ -26,6 +26,11 @@ export interface ModelCapabilities {
   supportsPromptCacheKey?: boolean;
   supportsReasoningSummary?: boolean;
   forceResponseModelMapping?: boolean;
+  multiAgentReasoningEffort?: unknown;
+  requiresSandboxedReview?: boolean;
+  persistentInstructions?: unknown;
+  guardianV2?: unknown;
+  confirmationPolicies?: unknown;
 }
 
 export interface RouteRuntimeOptions {
@@ -64,6 +69,11 @@ function positiveNumber(...values: unknown[]): number | undefined {
 
 function booleanValue(...values: unknown[]): boolean | undefined {
   for (const value of values) if (typeof value === "boolean") return value;
+  return undefined;
+}
+
+function definedValue(...values: unknown[]): unknown {
+  for (const value of values) if (value !== undefined) return value;
   return undefined;
 }
 
@@ -110,6 +120,11 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
       raw.supports_reasoning_summary_parameter,
     ),
     forceResponseModelMapping: raw.forceResponseModelMapping === true || raw.force_response_model_mapping === true ? true : undefined,
+    multiAgentReasoningEffort: definedValue(raw.multiAgentReasoningEffort, raw.multi_agent_reasoning_effort),
+    requiresSandboxedReview: booleanValue(raw.requiresSandboxedReview, raw.requires_sandboxed_review),
+    persistentInstructions: definedValue(raw.persistentInstructions, raw.persistent_instructions),
+    guardianV2: definedValue(raw.guardianV2, raw.guardian_v2),
+    confirmationPolicies: definedValue(raw.confirmationPolicies, raw.confirmation_policies),
   };
 }
 
@@ -128,6 +143,11 @@ export function mergeModelCapabilities(primary: ModelCapabilities, fallback: Mod
     supportsPromptCacheKey: primary.supportsPromptCacheKey ?? fallback.supportsPromptCacheKey,
     supportsReasoningSummary: primary.supportsReasoningSummary ?? fallback.supportsReasoningSummary,
     forceResponseModelMapping: primary.forceResponseModelMapping ?? fallback.forceResponseModelMapping,
+    multiAgentReasoningEffort: primary.multiAgentReasoningEffort !== undefined ? primary.multiAgentReasoningEffort : fallback.multiAgentReasoningEffort,
+    requiresSandboxedReview: primary.requiresSandboxedReview ?? fallback.requiresSandboxedReview,
+    persistentInstructions: primary.persistentInstructions !== undefined ? primary.persistentInstructions : fallback.persistentInstructions,
+    guardianV2: primary.guardianV2 !== undefined ? primary.guardianV2 : fallback.guardianV2,
+    confirmationPolicies: primary.confirmationPolicies !== undefined ? primary.confirmationPolicies : fallback.confirmationPolicies,
   };
 }
 
