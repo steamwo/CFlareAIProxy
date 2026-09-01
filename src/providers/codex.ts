@@ -46,11 +46,7 @@ function toolOutputImagePart(value: unknown): Record<string, unknown> | undefine
 
 function hasToolOutputImagePart(value: unknown): boolean {
   if (typeof value === "string") {
-    try {
-      return hasToolOutputImagePart(JSON.parse(value) as unknown);
-    } catch {
-      return false;
-    }
+    try { return hasToolOutputImagePart(JSON.parse(value) as unknown); } catch { return false; }
   }
   if (Array.isArray(value)) return value.some((part) => hasToolOutputImagePart(part));
   const item = record(value);
@@ -63,11 +59,7 @@ function toolOutputFallbackPart(value: unknown): Record<string, unknown> {
   const item = record(value);
   if (typeof item.text === "string") return { type: "input_text", text: item.text };
   let text: string;
-  try {
-    text = JSON.stringify(value) ?? String(value);
-  } catch {
-    text = String(value);
-  }
+  try { text = JSON.stringify(value) ?? String(value); } catch { text = String(value); }
   return { type: "input_text", text };
 }
 
@@ -76,9 +68,7 @@ function toolOutputContentPart(value: unknown): Record<string, unknown>[] {
     try {
       const structured = JSON.parse(value) as unknown;
       if (hasToolOutputImagePart(structured)) return toolOutputContentPart(structured);
-    } catch {
-      // A nested plain string remains a text part.
-    }
+    } catch { /* plain string */ }
     return [toolOutputFallbackPart(value)];
   }
   if (Array.isArray(value)) return value.flatMap((part) => toolOutputContentPart(part));
@@ -97,9 +87,7 @@ function toolOutputContent(content: unknown): string | Array<Record<string, unkn
     try {
       const structured = JSON.parse(content) as unknown;
       if (hasToolOutputImagePart(structured)) return toolOutputContentPart(structured);
-    } catch {
-      // Plain tool output stays a string for backward compatibility.
-    }
+    } catch { /* plain string */ }
     return content;
   }
   if (!hasToolOutputImagePart(content)) return contentToText(content);
@@ -131,26 +119,78 @@ function chatToolChoiceToResponses(value: unknown): unknown {
   return value;
 }
 
+function codexIdPrefix(item: Record<string, unknown>): string | undefined {
+  return item.type === "message" ? "msg"
+    : item.type === "reasoning" ? "rs"
+      : item.type === "function_call" ? "fc"
+        : item.type === "custom_tool_call" ? "ctc"
+          : item.type === "custom_tool_call_output" ? "ctco"
+            : undefined;
+}
+
+function stableIdHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+function boundedId(base: string, suffix = ""): string {
+  if (!suffix) return base.slice(0, 64);
+  return `${base.slice(0, Math.max(1, 64 - suffix.length - 1))}_${suffix}`;
+}
+
 export function normalizeCodexInputMessageIds(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  const preserved = new Set<string>();
+  for (const raw of value) {
+    const item = record(raw);
+    const prefix = codexIdPrefix(item);
+    if (!prefix || typeof item.id !== "string" || !item.id) continue;
+    if (item.id.startsWith(`${prefix}_`) && item.id.length <= 64) preserved.add(item.id);
+  }
+  const occupied = new Set(preserved);
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const item = raw as Record<string, unknown>;
+    const prefix = codexIdPrefix(item);
+    if (!prefix || typeof item.id !== "string" || item.id.length === 0) return raw;
+    if (item.id.startsWith(`${prefix}_`) && item.id.length <= 64) return raw;
+    const source = item.id;
+    const base = source.startsWith(`${prefix}_`) ? source : `${prefix}_${source}`;
+    let id = boundedId(base);
+    if (occupied.has(id)) {
+      let attempt = 0;
+      do {
+        const hash = stableIdHash(`${prefix}\0${source}\0${index}\0${attempt}`);
+        id = boundedId(base, hash);
+        attempt += 1;
+      } while (occupied.has(id));
+    }
+    occupied.add(id);
+    return id === item.id ? raw : { ...item, id };
+  });
+}
+
+function stripNestedPromptCacheBreakpoints(value: unknown): unknown {
   if (!Array.isArray(value)) return value;
   return value.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
     const item = raw as Record<string, unknown>;
-    const prefix = item.type === "message"
-      ? "msg"
-      : item.type === "reasoning"
-        ? "rs"
-        : item.type === "function_call"
-          ? "fc"
-          : item.type === "custom_tool_call"
-            ? "ctc"
-            : item.type === "custom_tool_call_output"
-              ? "ctco"
-              : undefined;
-    if (!prefix || typeof item.id !== "string" || item.id.length === 0) return raw;
-    const prefixed = item.id.startsWith(prefix) ? item.id : `${prefix}_${item.id}`;
-    const id = prefixed.slice(0, 64);
-    return id === item.id ? raw : { ...item, id };
+    if (!Array.isArray(item.content)) return raw;
+    let changed = false;
+    const content = item.content.map((rawPart) => {
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) return rawPart;
+      const part = rawPart as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(part, "prompt_cache_breakpoint")) return rawPart;
+      const next = { ...part };
+      delete next.prompt_cache_breakpoint;
+      changed = true;
+      return next;
+    });
+    return changed ? { ...item, content } : raw;
   });
 }
 
@@ -204,10 +244,11 @@ export function chatToResponses(body: Record<string, unknown>, model: string): R
 function normalizeCodexBody(body: Record<string, unknown>, model: string): Record<string, unknown> {
   const output: Record<string, unknown> = { ...body, model, store: false };
   output.instructions = typeof output.instructions === "string" ? output.instructions : "";
-  output.input = normalizeCodexInputMessageIds(output.input);
+  output.input = normalizeCodexInputMessageIds(stripNestedPromptCacheBreakpoints(output.input));
   delete output.previous_response_id;
   delete output.generate;
   delete output.prompt_cache_retention;
+  delete output.prompt_cache_options;
   delete output.safety_identifier;
   const streamOptions = record(output.stream_options);
   const hasReasoningSummaryDelivery = Object.prototype.hasOwnProperty.call(streamOptions, "reasoning_summary_delivery");
@@ -221,19 +262,30 @@ function normalizeCodexBody(body: Record<string, unknown>, model: string): Recor
 export async function buildCodexRequest(context: ProxyRequestContext): Promise<UpstreamBuildResult> {
   const baseUrl = normalizeBaseUrl(context.provider.base_url);
   const headers = sanitizeHeaders(context.originalRequest.headers, context.provider.headers);
-  providerAuthHeaders(context.provider, context.credential).forEach((value, key) => headers.set(key, value));
+  providerAuthHeaders(context.provider, context.credential, context.originalRequest.headers).forEach((value, key) => headers.set(key, value));
+  if (!context.credential.secret) headers.delete("authorization");
   headers.set("accept", context.body.stream === true ? "text/event-stream" : "application/json");
   headers.set("content-type", "application/json");
-  for (const name of ["x-codex-beta-features", "x-codex-turn-metadata", "x-client-request-id", "session_id", "version"]) {
+  for (const name of [
+    "x-codex-beta-features",
+    "x-codex-turn-metadata",
+    "x-client-request-id",
+    "x-codex-window-id",
+    "thread-id",
+    "session-id",
+    "x-openai-internal-codex-responses-lite",
+    "version",
+  ]) {
     const value = context.originalRequest.headers.get(name);
     if (value) headers.set(name, value);
   }
+  headers.delete("session_id");
   const translated = context.endpoint === "responses" ? { ...context.body } : chatToResponses(context.body, context.upstreamModel);
   const body = normalizeCodexBody(translated, context.upstreamModel);
   const sessionId = await resolveCodexHttpSessionId(context.body, context.originalRequest, context.provider.id);
   if (sessionId) {
     body.prompt_cache_key = sessionId;
-    headers.set("session_id", sessionId);
+    headers.set("Session-Id", sessionId);
     headers.set("Conversation_id", sessionId);
   }
   return {
