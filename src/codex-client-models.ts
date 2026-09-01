@@ -2,6 +2,7 @@ import type { Env, ProviderKind } from "./types";
 import { parseJson } from "./utils";
 
 const ALLOWED_REASONING_LEVELS = new Set(["none", "auto", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const EXTENDED_REASONING_MIN_VERSION = [0, 144, 0] as const;
 
 export interface CodexClientCatalogContext {
   multiAgentModels: Set<string>;
@@ -51,9 +52,33 @@ function reasoningDescription(level: string): string {
   }
 }
 
-function reasoningMetadata(capabilities: Record<string, unknown>): { levels?: Array<{ effort: string; description: string }>; defaultLevel?: string } {
-  const levels = stringArray(capabilities.reasoningLevels ?? capabilities.reasoning_levels)
+function parseDottedVersion(value: string | undefined): number[] | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim();
+  if (!normalized || !/^\d+(?:\.\d+)*$/.test(normalized)) return undefined;
+  const parts = normalized.split(".").map(Number);
+  return parts.every((part) => Number.isSafeInteger(part) && part >= 0) ? parts : undefined;
+}
+
+function compareVersion(left: number[], right: readonly number[]): number {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (left[index] ?? 0) - (right[index] ?? 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+function supportsExtendedReasoning(clientVersion: string | undefined): boolean | undefined {
+  const parsed = parseDottedVersion(clientVersion);
+  if (!parsed) return undefined;
+  return compareVersion(parsed, EXTENDED_REASONING_MIN_VERSION) >= 0;
+}
+
+function reasoningMetadata(capabilities: Record<string, unknown>, clientVersion?: string): { levels?: Array<{ effort: string; description: string }>; defaultLevel?: string } {
+  let levels = stringArray(capabilities.reasoningLevels ?? capabilities.reasoning_levels)
     .filter((level) => ALLOWED_REASONING_LEVELS.has(level));
+  if (supportsExtendedReasoning(clientVersion) === false) levels = levels.filter((level) => level !== "max" && level !== "ultra");
   if (levels.length === 0) return {};
   const defaultLevel = levels.includes("medium") ? "medium" : levels.find((level) => level !== "none" && level !== "auto") ?? levels.find((level) => level === "auto") ?? levels[0];
   return { levels: levels.map((effort) => ({ effort, description: reasoningDescription(effort) })), defaultLevel };
@@ -142,6 +167,7 @@ function buildEntry(
   model: Record<string, unknown>,
   context: CodexClientCatalogContext,
   priority: number,
+  clientVersion?: string,
 ): Record<string, unknown> | null {
   const slug = typeof model.id === "string" ? model.id.trim() : "";
   if (!slug) return null;
@@ -151,7 +177,7 @@ function buildEntry(
   const displayName = typeof model.display_name === "string" && model.display_name.trim() ? model.display_name.trim() : slug;
   const description = typeof model.description === "string" && model.description.trim() ? model.description.trim() : displayName;
   const modalities = inputModalities(capabilities);
-  const reasoning = reasoningMetadata(capabilities);
+  const reasoning = reasoningMetadata(capabilities, clientVersion);
   const tiers = serviceTiers(capabilities);
   const contextWindow = firstPositiveNumber(
     capabilities.maxContextLength,
@@ -162,10 +188,15 @@ function buildEntry(
     capabilities.context_length,
     capabilities.max_context_window,
   );
+  const maxTokens = firstPositiveNumber(capabilities.maxCompletionTokens, capabilities.max_completion_tokens, capabilities.maxOutputTokens, capabilities.max_output_tokens);
   const configuredVisibility = typeof capabilities.visibility === "string" ? capabilities.visibility.trim().toLowerCase() : "";
   const visibility = configuredVisibility === "hide" || configuredVisibility === "list"
     ? configuredVisibility
     : modalities.includes("text") ? "list" : "hide";
+  const modelMessages: Record<string, unknown> = {};
+  if (capabilities.persistentInstructions !== undefined) modelMessages.persistent_instructions = capabilities.persistentInstructions;
+  if (capabilities.guardianV2 !== undefined) modelMessages.guardian_v2 = capabilities.guardianV2;
+  if (capabilities.confirmationPolicies !== undefined) modelMessages.confirmation_policies = capabilities.confirmationPolicies;
   const entry: Record<string, unknown> = {
     slug,
     prefer_websockets: false,
@@ -189,7 +220,7 @@ function buildEntry(
     supported_in_api: true,
     upgrade: null,
     priority,
-    model_messages: {},
+    model_messages: modelMessages,
     experimental_supported_tools: [],
     available_in_plans: [],
     supports_search_tool: supportsSearchTool(model, capabilities, context.providerKinds),
@@ -201,11 +232,14 @@ function buildEntry(
   };
   if (modalities.includes("image")) entry.supports_image_detail_original = true;
   if (context.multiAgentModels.has(slug)) entry.multi_agent_version = "v2";
+  if (capabilities.multiAgentReasoningEffort !== undefined) entry.multi_agent_reasoning_effort = capabilities.multiAgentReasoningEffort;
+  if (capabilities.requiresSandboxedReview !== undefined) entry.requires_sandboxed_review = capabilities.requiresSandboxedReview;
   if (contextWindow) {
     entry.context_window = contextWindow;
     entry.max_context_window = contextWindow;
     entry.max_context_length = contextWindow;
   }
+  if (maxTokens) entry.max_tokens = maxTokens;
   if (reasoning.levels && reasoning.defaultLevel) {
     entry.supported_reasoning_levels = reasoning.levels;
     entry.default_reasoning_level = reasoning.defaultLevel;
@@ -216,6 +250,7 @@ function buildEntry(
 export function buildCodexClientModels(
   models: Array<Record<string, unknown>>,
   context: CodexClientCatalogContext = { multiAgentModels: new Set(), providerKinds: new Map() },
+  clientVersion?: string,
 ): Array<Record<string, unknown>> {
   const candidates = models.map((model) => ({
     model,
@@ -230,12 +265,12 @@ export function buildCodexClientModels(
   });
   const assigned = new Map(pending.map((entry, index) => [entry.slug, explicitMax + 100 * (index + 1)] as const));
   return candidates.flatMap((entry) => {
-    const built = buildEntry(entry.model, context, entry.explicitPriority ?? assigned.get(entry.slug) ?? 100);
+    const built = buildEntry(entry.model, context, entry.explicitPriority ?? assigned.get(entry.slug) ?? 100, clientVersion);
     return built ? [built] : [];
   }).sort((left, right) => Number(left.priority ?? 100) - Number(right.priority ?? 100) || String(left.slug).localeCompare(String(right.slug)));
 }
 
-export async function buildCodexClientModelsResponse(env: Env, models: Array<Record<string, unknown>>): Promise<{ models: Array<Record<string, unknown>> }> {
+export async function buildCodexClientModelsResponse(env: Env, models: Array<Record<string, unknown>>, clientVersion?: string): Promise<{ models: Array<Record<string, unknown>> }> {
   const context = await loadCodexClientCatalogContext(env, models);
-  return { models: buildCodexClientModels(models, context) };
+  return { models: buildCodexClientModels(models, context, clientVersion) };
 }
