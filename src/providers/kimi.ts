@@ -39,6 +39,10 @@ function isEmptyAssistantContent(value: unknown): boolean {
   });
 }
 
+function isUsableKimiReasoning(value: string): boolean {
+  return value.length > 0 && value !== REASONING_UNAVAILABLE;
+}
+
 function decodeJsonPointerSegment(value: string): string {
   return value.replace(/~1/g, "/").replace(/~0/g, "~");
 }
@@ -145,14 +149,15 @@ export function normalizeKimiMessages(messages: unknown): Array<Record<string, u
     const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
     const functionCall = record(message.function_call);
     const reasoning = typeof message.reasoning_content === "string" ? message.reasoning_content.trim() : "";
+    const usableReasoning = isUsableKimiReasoning(reasoning);
 
     if (role === "assistant" && isEmptyAssistantContent(message.content) && toolCalls.length === 0
-      && Object.keys(functionCall).length === 0 && !reasoning) continue;
+      && Object.keys(functionCall).length === 0 && !usableReasoning) continue;
 
     if (role === "assistant") {
-      if (reasoning) latestReasoning = reasoning;
+      if (usableReasoning) latestReasoning = reasoning;
       if (toolCalls.length > 0) {
-        if (!reasoning) message.reasoning_content = latestReasoning || contentText(message.content).trim() || REASONING_UNAVAILABLE;
+        if (!usableReasoning) message.reasoning_content = latestReasoning || contentText(message.content).trim() || REASONING_UNAVAILABLE;
         for (const rawCall of toolCalls) {
           const id = typeof record(rawCall).id === "string" ? String(record(rawCall).id).trim() : "";
           if (id) pending.push(id);
@@ -217,7 +222,7 @@ export function buildKimiRequest(context: ProxyRequestContext): UpstreamBuildRes
   const baseUrl = normalizeBaseUrl(context.provider.base_url);
   const endpoint = context.provider.endpoints.chat ?? "/chat/completions";
   const headers = sanitizeHeaders(context.originalRequest.headers, context.provider.headers);
-  providerAuthHeaders(context.provider, context.credential).forEach((value, key) => headers.set(key, value));
+  providerAuthHeaders(context.provider, context.credential, context.originalRequest.headers).forEach((value, key) => headers.set(key, value));
   headers.set("content-type", "application/json");
   headers.set("accept", context.body.stream === true ? "text/event-stream" : "application/json");
   headers.set("x-msh-platform", headers.get("x-msh-platform") ?? "CFlareAIProxy");
