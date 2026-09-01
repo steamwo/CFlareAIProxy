@@ -1,5 +1,5 @@
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
-import { normalizeBaseUrl, sanitizeHeaders } from "../utils";
+import { normalizeBaseUrl, resolveConfiguredHeaderValue, sanitizeHeaders } from "../utils";
 import { applyOpenAiPromptCacheKey } from "./openai-prompt-cache";
 
 function resolveEndpoint(context: ProxyRequestContext): string {
@@ -32,9 +32,12 @@ export async function buildGenericRequest(context: ProxyRequestContext): Promise
   if (context.credential.secret) headers.set(authHeader, `${authPrefix}${context.credential.secret}`);
 
   const metadataHeaders = context.credential.metadata.headers;
-  if (metadataHeaders && typeof metadataHeaders === "object") {
-    for (const [key, value] of Object.entries(metadataHeaders as Record<string, unknown>)) {
-      if (typeof value === "string") headers.set(key, value);
+  if (metadataHeaders && typeof metadataHeaders === "object" && !Array.isArray(metadataHeaders)) {
+    for (const [key, configured] of Object.entries(metadataHeaders as Record<string, unknown>)) {
+      if (typeof configured !== "string") continue;
+      const value = resolveConfiguredHeaderValue(configured, context.originalRequest.headers);
+      if (value !== undefined) headers.set(key, value);
+      else headers.delete(key);
     }
   }
 
