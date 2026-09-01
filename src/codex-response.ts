@@ -50,6 +50,10 @@ function eventError(event: Record<string, unknown>): GatewayError | undefined {
   return gatewayErrorFromClassification(classifyUpstreamResponse(status, body, new Headers(), "codex"));
 }
 
+function isSuccessfulTerminalType(type: unknown): boolean {
+  return type === "response.completed" || type === "response.incomplete" || type === "response.done";
+}
+
 function trackSequence(event: Record<string, unknown>, state: CodexState): void {
   if (typeof event.sequence_number === "number" && Number.isFinite(event.sequence_number)) {
     state.nextSequenceNumber = Math.max(state.nextSequenceNumber, Math.floor(event.sequence_number) + 1);
@@ -159,14 +163,14 @@ function strictResponsesStream(context: CodexResponseContext): Response {
     trackSequence(event, state);
     rememberItem(event, state);
     event = patchStartResponseModel(event, context.model);
-    if (event.type === "response.completed" || event.type === "response.incomplete") {
+    if (isSuccessfulTerminalType(event.type)) {
       state.terminal = true;
       event = patchTerminal(event, state);
     }
     const output = context.forceResponseModelMapping ? rewriteResponseModelFields(event, context.model) : event;
     controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify(output)}\n\n`));
   }, (controller) => {
-    if (!state.terminal) controller.error(new GatewayError(502, "CODEX_STREAM_INCOMPLETE", "CODEX_STREAM_INCOMPLETE: Codex stream closed before response.completed", "upstream_error"));
+    if (!state.terminal) controller.error(new GatewayError(502, "CODEX_STREAM_INCOMPLETE", "CODEX_STREAM_INCOMPLETE: Codex stream closed before a successful terminal event", "upstream_error"));
   });
   return new Response(body, { status: context.upstream.status, headers: responseHeaders(context.upstream.headers, "text/event-stream; charset=utf-8") });
 }
@@ -198,6 +202,18 @@ function strictChatStream(context: CodexResponseContext): Response {
     }
     trackSequence(event, state);
     rememberItem(event, state);
+    if ((event.type === "response.reasoning_summary_text.delta" || event.type === "response.reasoning_text.delta") && typeof event.delta === "string") {
+      const delta: Record<string, unknown> = { reasoning_content: event.delta };
+      if (!roleSent) { delta.role = "assistant"; roleSent = true; }
+      controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify(chatChunk(context.requestId, context.model, delta))}\n\n`));
+      return;
+    }
+    if (event.type === "response.reasoning_summary_text.done" || event.type === "response.reasoning_text.done") {
+      const delta: Record<string, unknown> = { reasoning_content: "\n\n" };
+      if (!roleSent) { delta.role = "assistant"; roleSent = true; }
+      controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify(chatChunk(context.requestId, context.model, delta))}\n\n`));
+      return;
+    }
     if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
       const delta: Record<string, unknown> = { content: event.delta };
       if (!roleSent) { delta.role = "assistant"; roleSent = true; }
@@ -226,7 +242,7 @@ function strictChatStream(context: CodexResponseContext): Response {
       }))}\n\n`));
       return;
     }
-    if (event.type === "response.completed" || event.type === "response.incomplete") {
+    if (isSuccessfulTerminalType(event.type)) {
       state.terminal = true;
       const usage = responseUsage(responseRecord(event.response));
       const final = chatChunk(context.requestId, context.model, {}, event.type === "response.incomplete" ? "length" : finishReason);
@@ -234,16 +250,27 @@ function strictChatStream(context: CodexResponseContext): Response {
       controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify(final)}\n\ndata: [DONE]\n\n`));
     }
   }, (controller) => {
-    if (!state.terminal) controller.error(new GatewayError(502, "CODEX_STREAM_INCOMPLETE", "CODEX_STREAM_INCOMPLETE: Codex stream closed before response.completed", "upstream_error"));
+    if (!state.terminal) controller.error(new GatewayError(502, "CODEX_STREAM_INCOMPLETE", "CODEX_STREAM_INCOMPLETE: Codex stream closed before a successful terminal event", "upstream_error"));
   });
   return new Response(body, { status: context.upstream.status, headers: responseHeaders(context.upstream.headers, "text/event-stream; charset=utf-8") });
 }
 
 function chatFromResponse(payload: Record<string, unknown>, model: string, requestId: string): Record<string, unknown> {
   let content = "";
+  let reasoningContent = "";
   const toolCalls: Record<string, unknown>[] = [];
   for (const rawItem of Array.isArray(payload.output) ? payload.output : []) {
     const item = responseRecord(rawItem);
+    if (item.type === "reasoning") {
+      for (const rawSummary of Array.isArray(item.summary) ? item.summary : []) {
+        const summary = responseRecord(rawSummary);
+        if (typeof summary.text === "string" && summary.text.length > 0) reasoningContent += summary.text;
+      }
+      for (const rawPart of Array.isArray(item.content) ? item.content : []) {
+        const part = responseRecord(rawPart);
+        if (part.type === "reasoning_text" && typeof part.text === "string" && part.text.length > 0) reasoningContent += part.text;
+      }
+    }
     if (item.type === "message") {
       for (const rawPart of Array.isArray(item.content) ? item.content : []) {
         const part = responseRecord(rawPart);
@@ -258,6 +285,7 @@ function chatFromResponse(payload: Record<string, unknown>, model: string, reque
   }
   const usage = responseUsage(payload);
   const message: Record<string, unknown> = { role: "assistant", content: content || null };
+  if (reasoningContent.length > 0) message.reasoning_content = reasoningContent;
   if (toolCalls.length) message.tool_calls = toolCalls;
   return {
     id: typeof payload.id === "string" ? payload.id : `chatcmpl-${requestId}`,
@@ -280,13 +308,13 @@ function parseSse(text: string): Record<string, unknown> {
     if (failure) throw failure;
     trackSequence(event, state);
     rememberItem(event, state);
-    if (event.type === "response.completed" || event.type === "response.incomplete") {
+    if (isSuccessfulTerminalType(event.type)) {
       state.terminal = true;
       const patched = patchTerminal(event, state);
-      terminal = event.type === "response.completed" ? hydrateCompletedOutputItemIds(patched, state) : patched;
+      terminal = event.type === "response.incomplete" ? patched : hydrateCompletedOutputItemIds(patched, state);
     }
   }
-  if (!state.terminal || !terminal) throw new GatewayError(502, "CODEX_STREAM_INCOMPLETE", "CODEX_STREAM_INCOMPLETE: Codex stream closed before response.completed", "upstream_error");
+  if (!state.terminal || !terminal) throw new GatewayError(502, "CODEX_STREAM_INCOMPLETE", "CODEX_STREAM_INCOMPLETE: Codex stream closed before a successful terminal event", "upstream_error");
   return responseRecord(terminal.response);
 }
 
