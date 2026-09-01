@@ -81,6 +81,11 @@ function firstPositiveNumber(...values: unknown[]): number | undefined {
   return undefined;
 }
 
+function firstDefined(...values: unknown[]): unknown {
+  for (const value of values) if (value !== undefined) return value;
+  return undefined;
+}
+
 function featureFlag(options: Record<string, unknown>): boolean | undefined {
   const value = options.codex_multi_agent_v2 ?? options.codexMultiAgentV2;
   return typeof value === "boolean" ? value : undefined;
@@ -166,6 +171,19 @@ function buildEntry(
   const visibility = configuredVisibility === "hide" || configuredVisibility === "list"
     ? configuredVisibility
     : modalities.includes("text") ? "list" : "hide";
+  const multiAgentReasoningEffort = firstDefined(capabilities.multiAgentReasoningEffort, capabilities.multi_agent_reasoning_effort);
+  const requiresSandboxedReview = typeof capabilities.requiresSandboxedReview === "boolean"
+    ? capabilities.requiresSandboxedReview
+    : typeof capabilities.requires_sandboxed_review === "boolean"
+      ? capabilities.requires_sandboxed_review
+      : undefined;
+  const persistentInstructions = firstDefined(capabilities.persistentInstructions, capabilities.persistent_instructions);
+  const guardianV2 = firstDefined(capabilities.guardianV2, capabilities.guardian_v2);
+  const confirmationPolicies = firstDefined(capabilities.confirmationPolicies, capabilities.confirmation_policies);
+  const modelMessages: Record<string, unknown> = {};
+  if (persistentInstructions !== undefined) modelMessages.persistent_instructions = persistentInstructions;
+  if (guardianV2 !== undefined) modelMessages.guardian_v2 = guardianV2;
+  if (confirmationPolicies !== undefined) modelMessages.confirmation_policies = confirmationPolicies;
   const entry: Record<string, unknown> = {
     slug,
     prefer_websockets: false,
@@ -189,7 +207,7 @@ function buildEntry(
     supported_in_api: true,
     upgrade: null,
     priority,
-    model_messages: {},
+    model_messages: modelMessages,
     experimental_supported_tools: [],
     available_in_plans: [],
     supports_search_tool: supportsSearchTool(model, capabilities, context.providerKinds),
@@ -201,6 +219,8 @@ function buildEntry(
   };
   if (modalities.includes("image")) entry.supports_image_detail_original = true;
   if (context.multiAgentModels.has(slug)) entry.multi_agent_version = "v2";
+  if (multiAgentReasoningEffort !== undefined) entry.multi_agent_reasoning_effort = multiAgentReasoningEffort;
+  if (requiresSandboxedReview !== undefined) entry.requires_sandboxed_review = requiresSandboxedReview;
   if (contextWindow) {
     entry.context_window = contextWindow;
     entry.max_context_window = contextWindow;
