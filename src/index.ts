@@ -16,7 +16,7 @@ import { ensureOpenCodeAnonymousModels, refreshCredentialModels } from "./models
 import { proxyGeneration } from "./proxy-v2";
 import { refreshCredentialQuota } from "./quota";
 import { RateLimiter } from "./rate-limiter";
-import type { CredentialRow, Env, LogLevel, QuotaSnapshot, QuotaSnapshotRow, UsageQueueEvent } from "./types";
+import type { CredentialRow, Env, GatewayEndpoint, GatewayKeyRow, LogLevel, QuotaSnapshot, QuotaSnapshotRow, UsageQueueEvent } from "./types";
 import { persistUsageQueueBatch } from "./usage-storage";
 import { parseJson } from "./utils";
 
@@ -77,6 +77,23 @@ app.post("/v1/completions", (c) => proxyGeneration(c, "completions"));
 app.get("/", (c) => c.redirect("/admin", 302));
 
 const adminApp = createAdminApp();
+
+adminApp.post("/api/playground/:endpoint/:keyId", async (c) => {
+  const rawEndpoint = c.req.param("endpoint");
+  const endpoint: GatewayEndpoint | undefined = rawEndpoint === "responses" || rawEndpoint === "chat" || rawEndpoint === "completions"
+    ? rawEndpoint
+    : undefined;
+  if (!endpoint) throw new GatewayError(400, "PLAYGROUND_ENDPOINT_INVALID", "不支持的模型接口", "invalid_request_error");
+
+  const gatewayKey = await c.env.DB.prepare("SELECT * FROM gateway_keys WHERE id=? AND enabled=1")
+    .bind(c.req.param("keyId"))
+    .first<GatewayKeyRow>();
+  const now = Math.floor(Date.now() / 1000);
+  if (!gatewayKey || (gatewayKey.expires_at !== null && gatewayKey.expires_at <= now)) {
+    throw new GatewayError(404, "PLAYGROUND_KEY_UNAVAILABLE", "所选网关 Key 不存在、已停用或已过期", "invalid_request_error");
+  }
+  return proxyGeneration(c, endpoint, gatewayKey);
+});
 
 adminApp.get("/api/settings/logging", async (c) => c.json({ data: await getLoggingSettings(c.env) }));
 adminApp.put("/api/settings/logging", async (c) => {
