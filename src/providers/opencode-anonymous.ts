@@ -1,19 +1,10 @@
 import type { Credential, CredentialRow } from "../types";
 
 export const OPENCODE_ANONYMOUS_CREDENTIAL_ID = "__opencode_anonymous__";
+export const OPENCODE_MODEL_CATALOG_URL = "https://models.opencode.ai/api.json";
 
 export function isOpenCodeAnonymousCredential(id: string): boolean {
   return id === OPENCODE_ANONYMOUS_CREDENTIAL_ID;
-}
-
-/**
- * OpenCode Zen exposes a small rotating anonymous catalog. The stable marker
- * used by the live catalog is either the special Big Pickle model or a model
- * id ending in -free. Paid models are never routed without an API key.
- */
-export function isOpenCodeAnonymousModel(modelId: string): boolean {
-  const normalized = modelId.trim().toLowerCase();
-  return normalized === "big-pickle" || normalized.endsWith("-free");
 }
 
 export function openCodeAnonymousCredentialRow(): CredentialRow {

@@ -1,3 +1,4 @@
+import { isRememberedOfficialCodexClient } from "./codex-client-identity";
 import { GatewayError } from "./errors";
 import type { GatewayEndpoint } from "./types";
 import { classifyUpstreamResponse, gatewayErrorFromClassification } from "./upstream-errors";
@@ -17,16 +18,24 @@ export interface CodexResponseContext {
 
 interface CodexState {
   terminal: boolean;
+  failed: boolean;
   items: Map<number, Record<string, unknown>>;
   fallbackItems: Record<string, unknown>[];
+  nextSequenceNumber: number;
+}
+
+function eventErrorPayload(event: Record<string, unknown>): Record<string, unknown> {
+  const type = typeof event.type === "string" ? event.type : "";
+  const response = responseRecord(event.response);
+  if (type === "response.failed") return responseRecord(response.error ?? event.error);
+  if (type === "error") return responseRecord(event.error ?? response.error ?? event);
+  return {};
 }
 
 function eventError(event: Record<string, unknown>): GatewayError | undefined {
   const type = typeof event.type === "string" ? event.type : "";
   if (type !== "error" && type !== "response.failed") return undefined;
-  const payload = type === "response.failed"
-    ? responseRecord(responseRecord(event.response).error ?? event.error)
-    : responseRecord(event.error ?? event);
+  const payload = eventErrorPayload(event);
   const body = JSON.stringify({ error: Object.keys(payload).length ? payload : { message: "Upstream stream failed without details" } });
   const embedded = typeof payload.status_code === "number" ? payload.status_code : typeof payload.status === "number" ? payload.status : undefined;
   const errorType = typeof payload.type === "string" ? payload.type.toLowerCase() : "";
@@ -39,6 +48,41 @@ function eventError(event: Record<string, unknown>): GatewayError | undefined {
         : errorType === "permission_error" ? 403
           : errorType === "invalid_request_error" || errorType === "bad_request_error" ? 400 : 502;
   return gatewayErrorFromClassification(classifyUpstreamResponse(status, body, new Headers(), "codex"));
+}
+
+function trackSequence(event: Record<string, unknown>, state: CodexState): void {
+  if (typeof event.sequence_number === "number" && Number.isFinite(event.sequence_number)) {
+    state.nextSequenceNumber = Math.max(state.nextSequenceNumber, Math.floor(event.sequence_number) + 1);
+  }
+}
+
+function responseFailedPayload(
+  event: Record<string, unknown>,
+  failure: GatewayError,
+  sequenceNumber: number,
+): Record<string, unknown> {
+  const upstreamError = eventErrorPayload(event);
+  const error = Object.keys(upstreamError).length
+    ? upstreamError
+    : {
+        type: failure.status >= 500
+          ? "server_error"
+          : failure.status === 400
+            ? "invalid_request_error"
+            : failure.type,
+        code: failure.code,
+        message: failure.message,
+      };
+  const upstreamResponse = responseRecord(event.response);
+  return {
+    type: "response.failed",
+    sequence_number: typeof event.sequence_number === "number" ? event.sequence_number : sequenceNumber,
+    response: {
+      ...upstreamResponse,
+      status: "failed",
+      error,
+    },
+  };
 }
 
 function rememberItem(event: Record<string, unknown>, state: CodexState): void {
@@ -58,10 +102,41 @@ function patchTerminal(event: Record<string, unknown>, state: CodexState): Recor
   return event;
 }
 
+function hydrateCompletedOutputItemIds(event: Record<string, unknown>, state: CodexState): Record<string, unknown> {
+  const response = responseRecord(event.response);
+  if (!Array.isArray(response.output) || response.output.length === 0) return event;
+  let changed = false;
+  const output = response.output.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const item = raw as Record<string, unknown>;
+    const id = item.id;
+    if (id !== undefined && id !== null && (typeof id !== "string" || id.trim() !== "")) return raw;
+    const collectedId = state.items.get(index)?.id;
+    if (typeof collectedId !== "string" || collectedId.trim() === "") return raw;
+    changed = true;
+    return { ...item, id: collectedId };
+  });
+  if (changed) event.response = { ...response, output };
+  return event;
+}
+
+function patchStartResponseModel(event: Record<string, unknown>, model: string): Record<string, unknown> {
+  if (event.type !== "response.created" && event.type !== "response.in_progress") return event;
+  const response = responseRecord(event.response);
+  const current = response.model;
+  if (current !== undefined && current !== null && (typeof current !== "string" || current.trim() !== "")) return event;
+  const fallback = model.trim();
+  if (!fallback) return event;
+  event.response = { ...response, model: fallback };
+  return event;
+}
+
 function strictResponsesStream(context: CodexResponseContext): Response {
   if (!context.upstream.body) throw new GatewayError(502, "CODEX_STREAM_EMPTY", "Codex returned an empty stream", "upstream_error");
-  const state: CodexState = { terminal: false, items: new Map(), fallbackItems: [] };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
+  const officialCodexClient = isRememberedOfficialCodexClient(context.requestId);
   const body = transformResponseSse(context.upstream.body, (data, controller) => {
+    if (state.failed) return;
     if (data === "[DONE]") {
       if (state.terminal) controller.enqueue(responseEncoder.encode("data: [DONE]\n\n"));
       return;
@@ -70,11 +145,20 @@ function strictResponsesStream(context: CodexResponseContext): Response {
     try { event = JSON.parse(data) as Record<string, unknown>; } catch { return; }
     const failure = eventError(event);
     if (failure) {
-      controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify({ error: { message: failure.message, type: failure.type, code: failure.code } })}\n\n`));
-      controller.error(failure);
+      if (officialCodexClient) {
+        state.failed = true;
+        state.terminal = true;
+        const payload = responseFailedPayload(event, failure, state.nextSequenceNumber);
+        controller.enqueue(responseEncoder.encode(`event: response.failed\ndata: ${JSON.stringify(payload)}\n\n`));
+      } else {
+        controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify({ error: { message: failure.message, type: failure.type, code: failure.code } })}\n\n`));
+        controller.error(failure);
+      }
       return;
     }
+    trackSequence(event, state);
     rememberItem(event, state);
+    event = patchStartResponseModel(event, context.model);
     if (event.type === "response.completed" || event.type === "response.incomplete") {
       state.terminal = true;
       event = patchTerminal(event, state);
@@ -98,7 +182,7 @@ function chatChunk(requestId: string, model: string, delta: Record<string, unkno
 
 function strictChatStream(context: CodexResponseContext): Response {
   if (!context.upstream.body) throw new GatewayError(502, "CODEX_STREAM_EMPTY", "Codex returned an empty stream", "upstream_error");
-  const state: CodexState = { terminal: false, items: new Map(), fallbackItems: [] };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
   let roleSent = false;
   let finishReason = "stop";
   const emittedToolItems = new Set<number>();
@@ -112,6 +196,7 @@ function strictChatStream(context: CodexResponseContext): Response {
       controller.error(failure);
       return;
     }
+    trackSequence(event, state);
     rememberItem(event, state);
     if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
       const delta: Record<string, unknown> = { content: event.delta };
@@ -184,7 +269,7 @@ function chatFromResponse(payload: Record<string, unknown>, model: string, reque
 }
 
 function parseSse(text: string): Record<string, unknown> {
-  const state: CodexState = { terminal: false, items: new Map(), fallbackItems: [] };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
   let terminal: Record<string, unknown> | undefined;
   for (const frame of text.split(/\r?\n\r?\n/)) {
     const data = responseFrameData(frame);
@@ -193,10 +278,12 @@ function parseSse(text: string): Record<string, unknown> {
     try { event = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
     const failure = eventError(event);
     if (failure) throw failure;
+    trackSequence(event, state);
     rememberItem(event, state);
     if (event.type === "response.completed" || event.type === "response.incomplete") {
       state.terminal = true;
-      terminal = patchTerminal(event, state);
+      const patched = patchTerminal(event, state);
+      terminal = event.type === "response.completed" ? hydrateCompletedOutputItemIds(patched, state) : patched;
     }
   }
   if (!state.terminal || !terminal) throw new GatewayError(502, "CODEX_STREAM_INCOMPLETE", "CODEX_STREAM_INCOMPLETE: Codex stream closed before response.completed", "upstream_error");

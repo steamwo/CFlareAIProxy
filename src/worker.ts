@@ -1,14 +1,35 @@
+import { Hono } from "hono";
+import { cors } from "hono/cors";
 import handler from "./index";
 import { sendAlert } from "./alerts";
+import { handleAnthropicMessages } from "./anthropic-messages-handler";
+import { handleAnthropicTokenCount } from "./anthropic-token-count";
 import {
   activityCutoff, cleanupExpiredActivity, cleanupExpiredOAuthSessions, cleanupExpiredRequestLogs,
   oauthSessionCutoff, requestLogCutoff,
 } from "./log-retention";
 import { refreshAllModels } from "./models";
+import { proxyGeneration } from "./proxy-v2";
 import { refreshAllQuotas } from "./quota";
 import type { Env, UsageQueueEvent } from "./types";
 
 export { AccountPool, RateLimiter } from "./index";
+
+const qoderMessages = new Hono<{ Bindings: Env }>({ strict: false });
+qoderMessages.use("/v1/messages", cors({
+  origin: "*",
+  allowHeaders: ["authorization", "content-type", "x-api-key", "x-session-id", "x-conversation-id", "x-request-id", "anthropic-version", "anthropic-beta"],
+  allowMethods: ["POST", "OPTIONS"],
+  exposeHeaders: ["x-request-id", "retry-after"],
+  maxAge: 86400,
+}));
+qoderMessages.post("/v1/messages", (c) => proxyGeneration(c, "messages"));
+
+const nativeMessagesWorker = {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return qoderMessages.fetch(request, env, ctx);
+  },
+};
 
 interface RetentionTask {
   event: string;
@@ -93,6 +114,12 @@ async function runRetention(env: Env, scheduledTime: number): Promise<void> {
 
 export default {
   ...handler,
+  async fetch(request, env, ctx) {
+    const tokenCount = await handleAnthropicTokenCount(request, env, ctx);
+    if (tokenCount) return tokenCount;
+    const anthropic = await handleAnthropicMessages(request, env, ctx, nativeMessagesWorker, handler);
+    return anthropic ?? handler.fetch(request, env, ctx);
+  },
   scheduled(controller, env, ctx) {
     const scheduledTime = Number.isFinite(controller.scheduledTime)
       ? controller.scheduledTime

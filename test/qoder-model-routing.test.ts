@@ -89,7 +89,8 @@ describe("Qoder channel model routing", () => {
     let queries = 0;
     const db = new FakeDatabase((sql) => {
       queries += 1;
-      expect(sql).toContain("credential_id='' AND enabled=1");
+      expect(sql).toContain("dm.credential_id='' AND dm.enabled=1");
+      expect(sql).toContain("qoder_credential.enabled=1");
       return { all: [
         { model_id: "anon-a8f3", display_name: "Claude Sonnet", discovered_at: 20 },
         { model_id: "anon-a8f3", display_name: "Old Name", discovered_at: 10 },
@@ -142,7 +143,8 @@ describe("Qoder channel model routing", () => {
 
   it("authorizes a display name through a legacy Qoder anonymous allow-list entry", async () => {
     const db = new FakeDatabase((sql, values) => {
-      expect(sql).toContain("credential_id='' AND display_name=?");
+      expect(sql).toContain("dm.credential_id='' AND dm.display_name=?");
+      expect(sql).toContain("qoder_credential.enabled=1");
       expect(values).toEqual(["Claude Sonnet"]);
       return { all: [{ model_id: "anon-a8f3" }] };
     });

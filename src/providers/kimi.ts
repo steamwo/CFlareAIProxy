@@ -1,6 +1,15 @@
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
 import { normalizeBaseUrl, sanitizeHeaders } from "../utils";
 import { providerAuthHeaders } from "./headers";
+import { normalizeKimiUpstreamModel } from "./kimi-model";
+import {
+  rememberKimiResponseToolIdentities,
+  responsesInputToMessages,
+  responsesToolChoiceToChat,
+  responsesToolsToChat,
+} from "./kimi-responses";
+
+const REASONING_UNAVAILABLE = "[reasoning unavailable]";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -44,85 +53,28 @@ export function normalizeKimiMessages(messages: unknown): Array<Record<string, u
     if (role === "assistant") {
       if (reasoning) latestReasoning = reasoning;
       if (toolCalls.length > 0) {
-        if (!reasoning) message.reasoning_content = latestReasoning || contentText(message.content).trim() || "[reasoning unavailable]";
+        if (!reasoning) message.reasoning_content = latestReasoning || contentText(message.content).trim() || REASONING_UNAVAILABLE;
         for (const rawCall of toolCalls) {
           const id = typeof record(rawCall).id === "string" ? String(record(rawCall).id).trim() : "";
           if (id) pending.push(id);
         }
       }
-    } else if (role === "tool") {
-      let id = typeof message.tool_call_id === "string" ? message.tool_call_id.trim() : "";
-      if (!id && typeof message.call_id === "string") id = message.call_id.trim();
-      if (!id && pending.length === 1) id = pending[0]!;
-      if (id) {
-        message.tool_call_id = id;
-        const index = pending.indexOf(id);
-        if (index >= 0) pending.splice(index, 1);
+    } else {
+      latestReasoning = "";
+      if (role === "tool") {
+        let id = typeof message.tool_call_id === "string" ? message.tool_call_id.trim() : "";
+        if (!id && typeof message.call_id === "string") id = message.call_id.trim();
+        if (!id && pending.length === 1) id = pending[0]!;
+        if (id) {
+          message.tool_call_id = id;
+          const index = pending.indexOf(id);
+          if (index >= 0) pending.splice(index, 1);
+        }
       }
     }
     output.push(message);
   }
   return output;
-}
-
-function responsesContentToChat(value: unknown): unknown {
-  if (!Array.isArray(value)) return value;
-  return value.map((raw) => {
-    const part = record(raw);
-    const type = typeof part.type === "string" ? part.type : "";
-    if ((type === "input_text" || type === "output_text") && typeof part.text === "string") {
-      return { type: "text", text: part.text };
-    }
-    if (type === "input_image") {
-      const image = part.image_url ?? part.image;
-      if (typeof image === "string") return { type: "image_url", image_url: { url: image } };
-      if (image && typeof image === "object" && !Array.isArray(image)) return { type: "image_url", image_url: image };
-    }
-    return part;
-  });
-}
-
-function responsesToolChoiceToChat(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const choice = record(value);
-  if (choice.type === "function" && typeof choice.name === "string") {
-    return { type: "function", function: { name: choice.name } };
-  }
-  return value;
-}
-
-function responsesInputToMessages(body: Record<string, unknown>): Array<Record<string, unknown>> {
-  const messages: Array<Record<string, unknown>> = [];
-  if (typeof body.instructions === "string" && body.instructions.trim()) messages.push({ role: "system", content: body.instructions });
-  const input = body.input;
-  if (typeof input === "string") messages.push({ role: "user", content: input });
-  else if (Array.isArray(input)) {
-    for (const raw of input) {
-      if (typeof raw === "string") { messages.push({ role: "user", content: raw }); continue; }
-      const item = record(raw);
-      const type = typeof item.type === "string" ? item.type : "";
-      if (type === "function_call_output" || type === "custom_tool_call_output") {
-        messages.push({ role: "tool", tool_call_id: item.call_id, content: item.output ?? "" });
-      } else if (type === "function_call" || type === "custom_tool_call") {
-        messages.push({ role: "assistant", content: null, tool_calls: [{ id: item.call_id ?? item.id, type: "function", function: { name: item.name ?? "unknown", arguments: item.arguments ?? "{}" } }] });
-      } else {
-        messages.push({ role: typeof item.role === "string" ? item.role : "user", content: responsesContentToChat(item.content ?? item.text ?? "") });
-      }
-    }
-  }
-  return messages;
-}
-
-function responsesToolsToChat(value: unknown): unknown[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value.map((raw) => {
-    const tool = record(raw);
-    if (tool.type === "function" && tool.function && typeof tool.function === "object") return tool;
-    if (tool.type === "function") {
-      return { type: "function", function: { name: tool.name ?? "unknown", description: tool.description, parameters: tool.parameters ?? {} } };
-    }
-    return tool;
-  });
 }
 
 function requestBody(context: ProxyRequestContext): Record<string, unknown> {
@@ -133,8 +85,9 @@ function requestBody(context: ProxyRequestContext): Record<string, unknown> {
       messages: responsesInputToMessages(source),
       stream: source.stream === true,
     };
-    const tools = responsesToolsToChat(source.tools);
-    if (tools) body.tools = tools;
+    const translatedTools = responsesToolsToChat(source);
+    if (translatedTools.tools.length > 0) body.tools = translatedTools.tools;
+    rememberKimiResponseToolIdentities(context.requestId, translatedTools.identities);
     if (source.tool_choice !== undefined) body.tool_choice = responsesToolChoiceToChat(source.tool_choice);
     if (source.temperature !== undefined) body.temperature = source.temperature;
     if (source.top_p !== undefined) body.top_p = source.top_p;
@@ -151,7 +104,7 @@ function requestBody(context: ProxyRequestContext): Record<string, unknown> {
   const overrides = record(context.provider.options.request_overrides);
   for (const [key, value] of Object.entries(defaults)) if (body[key] === undefined) body[key] = value;
   Object.assign(body, overrides);
-  body.model = context.upstreamModel.replace(/\[1m\]$/i, "");
+  body.model = normalizeKimiUpstreamModel(context.upstreamModel);
   body.messages = normalizeKimiMessages(body.messages);
   if (body.stream === true) {
     const streamOptions = record(body.stream_options);

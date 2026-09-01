@@ -2,7 +2,7 @@ import { decryptSecret, encryptSecret } from "./crypto";
 import { canonicalizeBuiltinRow } from "./builtin-channels";
 import { GatewayError } from "./errors";
 import {
-  isOpenCodeAnonymousCredential, isOpenCodeAnonymousModel, openCodeAnonymousCredential, openCodeAnonymousCredentialRow,
+  isOpenCodeAnonymousCredential, openCodeAnonymousCredential, openCodeAnonymousCredentialRow,
 } from "./providers/opencode-anonymous";
 import { discoveredModelAllowed, normalizeAllowedModelNames, publicDiscoveredModelId, QODER_PROVIDER_ID, sortModelRoutes } from "./qoder-model-routing";
 import type {
@@ -194,18 +194,26 @@ export async function gatewayKeyAllowsModel(env: Env, publicModel: string, allow
   const allowed = new Set(allowedModels);
   if (![...allowed].some((model) => model.startsWith(`${QODER_PROVIDER_ID}/`))) return false;
   const result = await env.DB.prepare(
-    `SELECT model_id FROM discovered_models
-     WHERE provider_id='qoder' AND credential_id='' AND display_name=? AND enabled=1
-     GROUP BY model_id`,
+    `SELECT dm.model_id FROM discovered_models dm
+     WHERE dm.provider_id='qoder' AND dm.credential_id='' AND dm.display_name=? AND dm.enabled=1
+       AND EXISTS(
+         SELECT 1 FROM credentials qoder_credential
+         WHERE qoder_credential.provider_id=dm.provider_id AND qoder_credential.enabled=1
+       )
+     GROUP BY dm.model_id`,
   ).bind(publicModel).all<{ model_id: string }>();
   return result.results.some((row) => allowed.has(`${QODER_PROVIDER_ID}/${row.model_id}`));
 }
 
 async function loadQoderAllowedModelAliases(env: Env): Promise<Map<string, string>> {
   const result = await env.DB.prepare(
-    `SELECT model_id,display_name,discovered_at FROM discovered_models
-     WHERE provider_id='qoder' AND credential_id='' AND enabled=1
-     ORDER BY discovered_at DESC,model_id ASC`,
+    `SELECT dm.model_id,dm.display_name,dm.discovered_at FROM discovered_models dm
+     WHERE dm.provider_id='qoder' AND dm.credential_id='' AND dm.enabled=1
+       AND EXISTS(
+         SELECT 1 FROM credentials qoder_credential
+         WHERE qoder_credential.provider_id=dm.provider_id AND qoder_credential.enabled=1
+       )
+     ORDER BY dm.discovered_at DESC,dm.model_id ASC`,
   ).all<{ model_id: string; display_name: string; discovered_at: number }>();
   const aliases = new Map<string, string>();
   for (const row of result.results) {
@@ -239,6 +247,13 @@ export async function listRoutesForModel(
     `SELECT r.* FROM model_routes r
      JOIN providers p ON p.id=r.provider_id AND p.enabled=1
      WHERE r.public_model = ? AND r.enabled = 1 AND r.endpoint = ?
+       AND (
+         p.kind<>'qoder'
+         OR EXISTS(
+           SELECT 1 FROM credentials qoder_credential
+           WHERE qoder_credential.provider_id=p.id AND qoder_credential.enabled=1
+         )
+       )
      ORDER BY r.priority ASC, r.weight DESC, r.created_at ASC`,
   ).bind(publicModel, endpoint).all<ModelRouteRow>();
 
@@ -250,6 +265,10 @@ export async function listRoutesForModel(
        JOIN providers p ON p.id=dm.provider_id AND p.kind='qoder' AND p.enabled=1
        WHERE dm.provider_id='qoder' AND dm.credential_id='' AND dm.display_name=?
          AND dm.endpoint=? AND dm.enabled=1
+         AND EXISTS(
+           SELECT 1 FROM credentials qoder_credential
+           WHERE qoder_credential.provider_id=dm.provider_id AND qoder_credential.enabled=1
+         )
        GROUP BY dm.model_id,p.options_json
        ORDER BY MAX(dm.discovered_at) DESC,dm.model_id ASC
        LIMIT 1`,
@@ -292,9 +311,21 @@ export async function listRoutesForModel(
      FROM discovered_models dm
      LEFT JOIN credentials c ON c.id=dm.credential_id AND c.enabled=1
      WHERE dm.provider_id=? AND dm.model_id=? AND dm.endpoint=? AND dm.enabled=1
-       AND (dm.credential_id='' OR c.id IS NOT NULL)
+       AND (
+         (dm.credential_id<>'' AND c.id IS NOT NULL)
+         OR (
+           dm.credential_id=''
+           AND (
+             ?<>'qoder'
+             OR EXISTS(
+               SELECT 1 FROM credentials qoder_credential
+               WHERE qoder_credential.provider_id=dm.provider_id AND qoder_credential.enabled=1
+             )
+           )
+         )
+       )
      GROUP BY dm.provider_id`,
-  ).bind(providerId, upstreamModel, endpoint).all<{ provider_id: string; created_at: number }>();
+  ).bind(providerId, upstreamModel, endpoint, provider.kind).all<{ provider_id: string; created_at: number }>();
 
   const providerWeight = typeof options.routing_weight === "number" ? Math.max(1, Math.floor(options.routing_weight)) : 1;
   return discovered.results.map((row) => ({
@@ -330,7 +361,13 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
        JOIN providers p ON p.id=dm.provider_id AND p.enabled=1
        LEFT JOIN credentials c ON c.id=dm.credential_id AND c.enabled=1
        WHERE dm.enabled=1 AND (
-         (p.kind='qoder' AND dm.credential_id='')
+         (
+           p.kind='qoder' AND dm.credential_id=''
+           AND EXISTS(
+             SELECT 1 FROM credentials qoder_credential
+             WHERE qoder_credential.provider_id=p.id AND qoder_credential.enabled=1
+           )
+         )
          OR (p.kind<>'qoder' AND (dm.credential_id='' OR c.id IS NOT NULL))
        )
        GROUP BY dm.provider_id,dm.model_id
@@ -343,7 +380,15 @@ export async function listModels(env: Env, allowedModels: string[] = []): Promis
       `SELECT r.public_model, MIN(r.created_at) AS created_at, GROUP_CONCAT(DISTINCT r.endpoint) AS endpoints,
               GROUP_CONCAT(DISTINCT r.provider_id) AS providers
        FROM model_routes r JOIN providers p ON p.id=r.provider_id AND p.enabled=1
-       WHERE r.enabled=1 GROUP BY r.public_model ORDER BY r.public_model`,
+       WHERE r.enabled=1
+         AND (
+           p.kind<>'qoder'
+           OR EXISTS(
+             SELECT 1 FROM credentials qoder_credential
+             WHERE qoder_credential.provider_id=p.id AND qoder_credential.enabled=1
+           )
+         )
+       GROUP BY r.public_model ORDER BY r.public_model`,
     ).all<{ public_model: string; created_at: number; endpoints: string; providers: string }>(),
   ]);
 
@@ -456,29 +501,39 @@ export async function listCredentialAvailabilityForModel(
   upstreamModel: string,
   endpoint: GatewayEndpoint,
 ): Promise<CredentialAvailability[]> {
-  const result = await env.DB.prepare(
-    `SELECT c.*, q.status AS quota_status, q.quota_json, q.fetched_at AS quota_fetched_at, q.expires_at AS quota_expires_at
-     FROM credentials c
-     LEFT JOIN quota_snapshots q ON q.credential_id=c.id
-     WHERE c.provider_id=? AND c.enabled=1
-       AND (
-         NOT EXISTS(
-           SELECT 1 FROM discovered_models any_model
-           WHERE any_model.provider_id=c.provider_id AND any_model.endpoint=? AND any_model.enabled=1
+  const anonymousModelPromise = providerId === "opencode"
+    ? env.DB.prepare(
+        `SELECT 1 AS available FROM discovered_models
+         WHERE provider_id='opencode' AND credential_id='' AND endpoint=? AND model_id=? AND enabled=1
+         LIMIT 1`,
+      ).bind(endpoint, upstreamModel).first<{ available: number }>()
+    : Promise.resolve(null);
+  const [result, anonymousModel] = await Promise.all([
+    env.DB.prepare(
+      `SELECT c.*, q.status AS quota_status, q.quota_json, q.fetched_at AS quota_fetched_at, q.expires_at AS quota_expires_at
+       FROM credentials c
+       LEFT JOIN quota_snapshots q ON q.credential_id=c.id
+       WHERE c.provider_id=? AND c.enabled=1
+         AND (
+           NOT EXISTS(
+             SELECT 1 FROM discovered_models any_model
+             WHERE any_model.provider_id=c.provider_id AND any_model.endpoint=? AND any_model.enabled=1
+           )
+           OR EXISTS(
+             SELECT 1 FROM discovered_models dm
+             WHERE dm.provider_id=c.provider_id AND dm.endpoint=? AND dm.model_id=? AND dm.enabled=1
+               AND (dm.credential_id='' OR dm.credential_id=c.id)
+           )
          )
-         OR EXISTS(
-           SELECT 1 FROM discovered_models dm
-           WHERE dm.provider_id=c.provider_id AND dm.endpoint=? AND dm.model_id=? AND dm.enabled=1
-             AND (dm.credential_id='' OR dm.credential_id=c.id)
-         )
-       )
-     ORDER BY c.priority ASC,c.created_at ASC`,
-  ).bind(providerId, endpoint, endpoint, upstreamModel).all<CredentialRow & {
-    quota_status: QuotaSnapshot["status"] | null;
-    quota_json: string | null;
-    quota_fetched_at: number | null;
-    quota_expires_at: number | null;
-  }>();
+       ORDER BY c.priority ASC,c.created_at ASC`,
+    ).bind(providerId, endpoint, endpoint, upstreamModel).all<CredentialRow & {
+      quota_status: QuotaSnapshot["status"] | null;
+      quota_json: string | null;
+      quota_fetched_at: number | null;
+      quota_expires_at: number | null;
+    }>(),
+    anonymousModelPromise,
+  ]);
   const now = Math.floor(Date.now() / 1000);
   const output = result.results.map((entry) => {
     const { quota_status, quota_json, quota_fetched_at, quota_expires_at, ...row } = entry;
@@ -489,7 +544,7 @@ export async function listCredentialAvailabilityForModel(
       ? { row, available: false, reason: state.reason, retryAt: state.retryAt }
       : { row, available: true };
   });
-  if (providerId === "opencode" && isOpenCodeAnonymousModel(upstreamModel)) {
+  if (anonymousModel) {
     output.push({ row: openCodeAnonymousCredentialRow(), available: true });
   }
   return output;
@@ -651,4 +706,3 @@ export async function createGatewayKey(
     .run();
   return { id, key };
 }
-

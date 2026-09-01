@@ -2,6 +2,8 @@ import { GatewayError } from "./errors";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const INTERNAL_JSON_BODY_HEADER = "x-cfap-internal-json-body";
+const internalJsonBodies = new Map<string, Record<string, unknown>>();
 
 export function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
@@ -102,10 +104,38 @@ export function pickString(object: Record<string, unknown>, paths: string[]): st
   return undefined;
 }
 
+/**
+ * Stores a parsed JSON body for one internal Worker-to-Worker dispatch.
+ *
+ * The caller puts the opaque cache id on the synthetic request headers. The normal
+ * readJsonBody path consumes and deletes the cached object, avoiding a full
+ * JSON.stringify -> Request body buffering -> JSON.parse round trip for large
+ * protocol-adapter payloads.
+ */
+export function cacheInternalJsonBody(headers: Headers, body: Record<string, unknown>): string {
+  const id = crypto.randomUUID();
+  internalJsonBodies.set(id, body);
+  headers.set(INTERNAL_JSON_BODY_HEADER, id);
+  return id;
+}
+
+export function releaseInternalJsonBody(id: string): void {
+  internalJsonBodies.delete(id);
+}
+
 export async function readJsonBody(
   request: Request,
   maxBytes: number,
 ): Promise<Record<string, unknown>> {
+  const internalBodyId = request.headers.get(INTERNAL_JSON_BODY_HEADER);
+  if (internalBodyId) {
+    const cached = internalJsonBodies.get(internalBodyId);
+    if (cached) {
+      internalJsonBodies.delete(internalBodyId);
+      return cached;
+    }
+  }
+
   const contentLength = Number.parseInt(request.headers.get("content-length") ?? "0", 10);
   if (contentLength > maxBytes) {
     throw new GatewayError(413, "REQUEST_TOO_LARGE", `Request body exceeds ${maxBytes} bytes`, "invalid_request_error");

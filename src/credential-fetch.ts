@@ -1,5 +1,6 @@
 import { GatewayError } from "./errors";
 import { idleTimeoutFor, proxyRequest, validateProxyUrl, type ProxyDialect } from "./proxy-transport";
+import { QODER_DISCOVERY_HEADER, runRegisteredQoderResponsesDiscovery } from "./providers/qoder-discovery";
 import type { Credential, Env, ProviderConfig } from "./types";
 import { providerFetch, type ProviderFetchOptions } from "./upstream-fetch";
 
@@ -21,9 +22,9 @@ const CREDENTIAL_PROXY_DIALECT: ProxyDialect = {
   authRejected: () => new GatewayError(502, "CREDENTIAL_PROXY_AUTH_UNSUPPORTED", "Credential SOCKS5 proxy rejected all authentication methods", "upstream_error"),
   authMethodUnsupported: (method) => new GatewayError(502, "CREDENTIAL_PROXY_AUTH_UNSUPPORTED", `Credential SOCKS5 proxy returned authentication method ${method}`, "upstream_error"),
   authFailed: () => new GatewayError(502, "CREDENTIAL_PROXY_AUTH_FAILED", "Credential SOCKS5 authentication failed", "upstream_error"),
-  proxyCredentialTooLong: () => new GatewayError(400, "CREDENTIAL_PROXY_CREDENTIAL_TOO_LONG", "Credential proxy username or password is too long"),
+  proxyCredentialTooLong: () => new GatewayError(400, "CREDENTIAL_PROXY_CREDENTIAL_TOO_LONG", "Credential SOCKS username, password, or USERID is too long or invalid"),
   hostTooLong: () => new GatewayError(400, "UPSTREAM_HOST_INVALID", "Upstream hostname is too long"),
-  socksConnectFailed: (code) => new GatewayError(502, "CREDENTIAL_PROXY_CONNECT_FAILED", `Credential SOCKS5 proxy failed to connect, code ${code}`, "upstream_error"),
+  socksConnectFailed: (code) => new GatewayError(502, "CREDENTIAL_PROXY_CONNECT_FAILED", `Credential SOCKS proxy failed to connect, code ${code}`, "upstream_error"),
   socksUnknownAddress: () => new GatewayError(502, "CREDENTIAL_PROXY_PROTOCOL_ERROR", "Credential SOCKS5 proxy returned an unknown address type", "upstream_error"),
   tlsNegotiationTimeout: (target, timeoutMs) => new GatewayError(504, "CREDENTIAL_PROXY_TLS_TIMEOUT", `TLS negotiation with ${target.hostname}:${target.port || "443"} timed out after ${timeoutMs} ms`, "upstream_error"),
   tlsHandshakeFailed: (target, message) => new GatewayError(502, "CREDENTIAL_PROXY_TLS_HANDSHAKE_FAILED", `Credential proxy tunnel was established, but TLS handshake with ${target.hostname}:${target.port || "443"} failed: ${message}`, "upstream_error"),
@@ -56,7 +57,7 @@ async function credentialProxyFetch(proxyValue: string, target: URL, init: Reque
   }
 }
 
-export async function providerFetchForCredential(
+async function baseProviderFetchForCredential(
   env: Env,
   provider: ProviderConfig,
   credential: Credential,
@@ -72,4 +73,26 @@ export async function providerFetchForCredential(
     return fetch(url.toString(), { ...init, signal: init.signal ?? AbortSignal.timeout(timeoutMs) });
   }
   return credentialProxyFetch(override, url, init, timeoutMs);
+}
+
+export async function providerFetchForCredential(
+  env: Env,
+  provider: ProviderConfig,
+  credential: Credential,
+  target: string | URL,
+  init: RequestInit = {},
+  options: ProviderFetchOptions = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const discoveryRequestId = provider.kind === "qoder" ? headers.get(QODER_DISCOVERY_HEADER)?.trim() : undefined;
+  if (!discoveryRequestId) return baseProviderFetchForCredential(env, provider, credential, target, init, options);
+
+  headers.delete(QODER_DISCOVERY_HEADER);
+  const cleanInit: RequestInit = { ...init, headers };
+  return runRegisteredQoderResponsesDiscovery(
+    discoveryRequestId,
+    target,
+    cleanInit,
+    (nextTarget, nextInit) => baseProviderFetchForCredential(env, provider, credential, nextTarget, nextInit, options),
+  );
 }

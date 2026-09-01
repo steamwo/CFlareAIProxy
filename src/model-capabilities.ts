@@ -1,4 +1,10 @@
 import { GatewayError } from "./errors";
+import {
+  markOpenAiTextOnlyToolResultNormalization,
+  prepareOpenAiToolResultsForValidation,
+} from "./openai-tool-results";
+import { setOpenAiPromptCacheRouteSupport } from "./providers/openai-prompt-cache";
+import { setReasoningSummaryRouteSupport } from "./reasoning-summary-intent";
 import type { Env, GatewayEndpoint, ModelRouteRow } from "./types";
 import { parseJson } from "./utils";
 
@@ -17,6 +23,8 @@ export interface ModelCapabilities {
   supportsTools?: boolean;
   supportsImages?: boolean;
   supportsSearchTool?: boolean;
+  supportsPromptCacheKey?: boolean;
+  supportsReasoningSummary?: boolean;
   forceResponseModelMapping?: boolean;
 }
 
@@ -65,16 +73,42 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
   return {
     inputModalities: strings(raw.inputModalities ?? raw.input_modalities ?? raw.supported_input_modalities),
     outputModalities: strings(raw.outputModalities ?? raw.output_modalities ?? raw.supported_output_modalities),
-    // Unknown levels are deliberately removed. If a configured declaration contains no
-    // valid levels, merge precedence falls back to the next capability source.
     reasoningLevels: reasoningLevels(raw.reasoningLevels ?? raw.reasoning_levels ?? raw.supported_reasoning_levels),
     serviceTiers: strings(raw.serviceTiers ?? raw.service_tiers, "id"),
-    contextWindow: positiveNumber(raw.contextWindow, raw.context_window, raw.context_length, raw.max_context_window),
+    contextWindow: positiveNumber(
+      raw.maxContextLength,
+      raw.max_context_length,
+      raw["max-context-length"],
+      raw.contextWindow,
+      raw.context_window,
+      raw.context_length,
+      raw.max_context_window,
+    ),
     visibility: rawVisibility === "hide" || rawVisibility === "list" ? rawVisibility : undefined,
     priority: positiveNumber(raw.priority),
     supportsTools: booleanValue(raw.supportsTools, raw.supports_tools),
     supportsImages: booleanValue(raw.supportsImages, raw.supports_images),
     supportsSearchTool: booleanValue(raw.supportsSearchTool, raw.supports_search_tool),
+    supportsPromptCacheKey: booleanValue(
+      raw.supportsPromptCacheKey,
+      raw.supports_prompt_cache_key,
+      raw["supports-prompt-cache-key"],
+      raw.supportPromptCacheKey,
+      raw.support_prompt_cache_key,
+      raw["support-prompt-cache-key"],
+    ),
+    supportsReasoningSummary: booleanValue(
+      raw.supportsReasoningSummary,
+      raw.supports_reasoning_summary,
+      raw["supports-reasoning-summary"],
+      raw.supportReasoningSummary,
+      raw.support_reasoning_summary,
+      raw["support-reasoning-summary"],
+      raw.supportsReasoningSummaries,
+      raw.supports_reasoning_summaries,
+      raw.supportsReasoningSummaryParameter,
+      raw.supports_reasoning_summary_parameter,
+    ),
     forceResponseModelMapping: raw.forceResponseModelMapping === true || raw.force_response_model_mapping === true ? true : undefined,
   };
 }
@@ -91,6 +125,8 @@ export function mergeModelCapabilities(primary: ModelCapabilities, fallback: Mod
     supportsTools: primary.supportsTools ?? fallback.supportsTools,
     supportsImages: primary.supportsImages ?? fallback.supportsImages,
     supportsSearchTool: primary.supportsSearchTool ?? fallback.supportsSearchTool,
+    supportsPromptCacheKey: primary.supportsPromptCacheKey ?? fallback.supportsPromptCacheKey,
+    supportsReasoningSummary: primary.supportsReasoningSummary ?? fallback.supportsReasoningSummary,
     forceResponseModelMapping: primary.forceResponseModelMapping ?? fallback.forceResponseModelMapping,
   };
 }
@@ -141,13 +177,14 @@ function discoveredCapabilities(capabilitiesJson: string | undefined, rawJson: s
 export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoint: GatewayEndpoint): Promise<RouteRuntimeOptions> {
   const options = parseJson<Record<string, unknown>>(route.options_json, {});
   const row = await env.DB.prepare(
-    `SELECT p.options_json AS provider_options_json,d.capabilities_json,d.raw_json
+    `SELECT p.kind AS provider_kind,p.options_json AS provider_options_json,d.capabilities_json,d.raw_json
      FROM providers p
      LEFT JOIN discovered_models d
        ON d.provider_id=p.id AND d.model_id=? AND d.endpoint=? AND d.enabled=1
      WHERE p.id=?
      ORDER BY d.discovered_at DESC,d.credential_id ASC LIMIT 1`,
   ).bind(route.upstream_model, endpoint, route.provider_id).first<{
+    provider_kind: string;
     provider_options_json: string;
     capabilities_json: string | null;
     raw_json: string | null;
@@ -162,6 +199,7 @@ export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoi
     routeConfigured,
     mergeModelCapabilities(providerConfigured, discovered),
   );
+  if (row?.provider_kind === "openai-compatible") markOpenAiTextOnlyToolResultNormalization(capabilities);
   const forceResponseModelMapping = options.force_response_model_mapping === true
     || options.forceResponseModelMapping === true
     || capabilities.forceResponseModelMapping === true;
@@ -181,6 +219,9 @@ function containsImage(value: unknown, depth = 0): boolean {
 }
 
 export function validateModelCapabilities(body: Record<string, unknown>, capabilities: ModelCapabilities): void {
+  prepareOpenAiToolResultsForValidation(body, capabilities);
+  setOpenAiPromptCacheRouteSupport(body, capabilities.supportsPromptCacheKey);
+  setReasoningSummaryRouteSupport(body, capabilities.supportsReasoningSummary);
   if (capabilities.supportsTools === false && Array.isArray(body.tools) && body.tools.length > 0) {
     throw new GatewayError(400, "MODEL_TOOLS_UNSUPPORTED", "The selected model does not support tool calls", "invalid_request_error");
   }

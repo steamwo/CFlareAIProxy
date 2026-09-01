@@ -5,7 +5,7 @@ import { providerAuthHeaders } from "./providers/headers";
 import { buildQoderHeaders } from "./providers/qoder-crypto";
 import { openCodeGatewayEndpoints } from "./providers/opencode";
 import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
-import { isOpenCodeAnonymousModel, openCodeAnonymousCredential } from "./providers/opencode-anonymous";
+import { openCodeAnonymousCredential, OPENCODE_MODEL_CATALOG_URL } from "./providers/opencode-anonymous";
 import { discoveryCredentialScopes } from "./qoder-model-routing";
 import type { Credential, DiscoveredModelRow, Env, GatewayEndpoint, ProviderConfig, ProviderProxyConfig } from "./types";
 import { base64Decode, base64UrlDecode, base64UrlEncode, normalizeBaseUrl } from "./utils";
@@ -139,7 +139,7 @@ async function verifyProviderModelRefreshCursorSignature(
   if (await crypto.subtle.verify("HMAC", current, signature, encoded)) return true;
   const previous = typeof env.MASTER_KEY_PREVIOUS === "string" ? env.MASTER_KEY_PREVIOUS.trim() : "";
   if (!previous) return false;
-  const previousKey = await providerRefreshCursorKey(previous, "MASTER_KEY_PREVIOUS");
+  const previousKey = await providerRefreshCursorKey(env.MASTER_KEY_PREVIOUS, "MASTER_KEY_PREVIOUS");
   return crypto.subtle.verify("HMAC", previousKey, signature, encoded);
 }
 
@@ -246,6 +246,18 @@ export function parseModels(payload: Record<string, unknown>): ModelCandidate[] 
   return [...output.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
+export function parseOpenCodeAnonymousModelIds(payload: Record<string, unknown>): Set<string> {
+  const provider = record(payload.opencode);
+  const models = record(provider.models);
+  const output = new Set<string>();
+  for (const [modelId, value] of Object.entries(models)) {
+    const model = record(value);
+    const cost = record(model.cost);
+    if (cost.input === 0) output.add(modelId);
+  }
+  return output;
+}
+
 function configuredString(provider: ProviderConfig, key: string): string | undefined {
   const value = provider.options[key] ?? provider.auth[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -331,6 +343,41 @@ async function fetchModelPayload(
   return payload as Record<string, unknown>;
 }
 
+async function fetchOpenCodeAnonymousModelIds(
+  env: Env,
+  provider: ProviderConfig,
+  proxyCache?: ProviderProxyCache,
+): Promise<Set<string>> {
+  const timeoutMs = typeof provider.options.discovery_timeout_ms === "number"
+    ? Math.max(1000, provider.options.discovery_timeout_ms)
+    : 20_000;
+  const proxyConfig = await loadCachedProviderProxy(env, provider.id, proxyCache);
+  const response = await providerFetch(
+    env,
+    provider,
+    OPENCODE_MODEL_CATALOG_URL,
+    { method: "GET", headers: { accept: "application/json" }, redirect: "manual" },
+    { purpose: "models", timeoutMs, proxyConfig },
+  );
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new GatewayError(
+      response.status,
+      "MODEL_DISCOVERY_FAILED",
+      `OpenCode model catalog returned ${response.status}: ${text.slice(0, 500)}`,
+      "upstream_error",
+    );
+  }
+  const payload = await response.json().catch(() => null);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new GatewayError(502, "MODEL_DISCOVERY_INVALID", "OpenCode model catalog returned an invalid payload", "upstream_error");
+  }
+  const modelIds = parseOpenCodeAnonymousModelIds(payload as Record<string, unknown>);
+  if (!modelIds.size) {
+    throw new GatewayError(502, "MODEL_DISCOVERY_EMPTY", "OpenCode model catalog returned no zero-cost models", "upstream_error");
+  }
+  return modelIds;
+}
 
 const MODEL_DISCOVERY_JSON_MAX_BYTES = 1_500_000;
 const modelJsonEncoder = new TextEncoder();
@@ -399,9 +446,12 @@ export async function refreshOpenCodeAnonymousModels(
   let provider: ProviderConfig | undefined;
   try {
     provider = await loadCachedProvider(env, "opencode", providerCache);
-    const payload = await fetchModelPayload(env, provider, openCodeAnonymousCredential(), proxyCache);
-    const models = parseModels(payload).filter((model) => isOpenCodeAnonymousModel(model.id));
-    if (!models.length) throw new GatewayError(502, "MODEL_DISCOVERY_EMPTY", "OpenCode Zen returned no anonymous free models", "upstream_error");
+    const [payload, anonymousModelIds] = await Promise.all([
+      fetchModelPayload(env, provider, openCodeAnonymousCredential(), proxyCache),
+      fetchOpenCodeAnonymousModelIds(env, provider, proxyCache),
+    ]);
+    const models = parseModels(payload).filter((model) => anonymousModelIds.has(model.id));
+    if (!models.length) throw new GatewayError(502, "MODEL_DISCOVERY_EMPTY", "OpenCode Zen returned no anonymous zero-cost models", "upstream_error");
     const endpointSet = new Set<GatewayEndpoint>();
     const now = Math.floor(Date.now() / 1000);
     const rows: DiscoveredModelWrite[] = [];
@@ -415,7 +465,7 @@ export async function refreshOpenCodeAnonymousModels(
           endpoint,
           owned_by: model.ownedBy || "opencode",
           capabilities_json: JSON.stringify(model.capabilities),
-          raw_json: JSON.stringify({ ...model.raw, anonymous: true }),
+          raw_json: JSON.stringify({ ...model.raw, anonymous: true, anonymous_source: "opencode-catalog" }),
           discovered_at: now,
         });
       }
@@ -496,7 +546,7 @@ export async function refreshCredentialModels(
 /**
  * Five credentials fit both Free-plan ceilings in the true worst case: distinct providers,
  * no provider-specific proxy, successful writes and an enabled OpenCode anonymous catalogue.
- * That path uses at most 39 D1 queries and 48 total subrequests after cache invalidation is
+ * That path uses at most 39 D1 queries and 49 total subrequests after cache invalidation is
  * collapsed to one three-key operation per sweep.
  */
 export const MODEL_REFRESH_BATCH_LIMIT = 5;
@@ -660,7 +710,21 @@ export async function listDiscoveredModels(env: Env): Promise<Array<DiscoveredMo
     `SELECT dm.*, c.label AS credential_label, p.name AS provider_name
      FROM discovered_models dm
      JOIN providers p ON p.id=dm.provider_id
-     LEFT JOIN credentials c ON c.id=dm.credential_id
+     LEFT JOIN credentials c ON c.id=dm.credential_id AND c.provider_id=dm.provider_id
+     WHERE p.kind<>'qoder'
+       OR (
+         p.enabled=1
+         AND (
+           (dm.credential_id<>'' AND c.enabled=1)
+           OR (
+             dm.credential_id=''
+             AND EXISTS(
+               SELECT 1 FROM credentials qoder_credential
+               WHERE qoder_credential.provider_id=p.id AND qoder_credential.enabled=1
+             )
+           )
+         )
+       )
      ORDER BY p.name,dm.model_id,dm.endpoint,c.label`,
   ).all<DiscoveredModelRow & { credential_label: string; provider_name: string }>();
   return result.results;

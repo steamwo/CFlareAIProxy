@@ -3,7 +3,7 @@ import { computed, h } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { NAvatar, NButton, NDrawer, NDrawerContent, NDropdown, NIcon, NLayout, NLayoutContent, NLayoutHeader, NLayoutSider, NMenu, NSpace, NText, useDialog } from "naive-ui";
 import type { MenuOption } from "naive-ui";
-import { BadgeCheck, Boxes, Cable, CircleDollarSign, Gauge, KeyRound, ListTree, Menu as MenuIcon, Moon, Network, ScrollText, Settings, Sun, UsersRound } from "@lucide/vue";
+import { BadgeCheck, Bot, Boxes, Cable, CircleDollarSign, Gauge, KeyRound, ListTree, Menu as MenuIcon, Moon, Network, ScrollText, Settings, Sun, UsersRound } from "@lucide/vue";
 import SystemLogo from "../components/SystemLogo.vue";
 import { useSessionStore } from "../stores/session";
 import { useUiStore } from "../stores/ui";
@@ -21,6 +21,7 @@ const items: MenuOption[] = [
   { label: "授权", key: "/authorization", icon: icon(BadgeCheck) },
   { label: "账号池", key: "/accounts", icon: icon(UsersRound) },
   { label: "模型目录", key: "/models", icon: icon(Boxes) },
+  { label: "模型操场", key: "/playground", icon: icon(Bot) },
   { label: "模型路由", key: "/routes", icon: icon(ListTree) },
   { label: "网关密钥", key: "/keys", icon: icon(KeyRound) },
   { label: "模型价格", key: "/prices", icon: icon(CircleDollarSign) },

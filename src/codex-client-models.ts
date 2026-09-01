@@ -73,6 +73,14 @@ function positiveNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
 }
 
+function firstPositiveNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const normalized = positiveNumber(value);
+    if (normalized !== undefined) return normalized;
+  }
+  return undefined;
+}
+
 function featureFlag(options: Record<string, unknown>): boolean | undefined {
   const value = options.codex_multi_agent_v2 ?? options.codexMultiAgentV2;
   return typeof value === "boolean" ? value : undefined;
@@ -145,7 +153,15 @@ function buildEntry(
   const modalities = inputModalities(capabilities);
   const reasoning = reasoningMetadata(capabilities);
   const tiers = serviceTiers(capabilities);
-  const contextWindow = positiveNumber(capabilities.contextWindow ?? capabilities.context_window);
+  const contextWindow = firstPositiveNumber(
+    capabilities.maxContextLength,
+    capabilities.max_context_length,
+    capabilities["max-context-length"],
+    capabilities.contextWindow,
+    capabilities.context_window,
+    capabilities.context_length,
+    capabilities.max_context_window,
+  );
   const configuredVisibility = typeof capabilities.visibility === "string" ? capabilities.visibility.trim().toLowerCase() : "";
   const visibility = configuredVisibility === "hide" || configuredVisibility === "list"
     ? configuredVisibility
@@ -188,6 +204,7 @@ function buildEntry(
   if (contextWindow) {
     entry.context_window = contextWindow;
     entry.max_context_window = contextWindow;
+    entry.max_context_length = contextWindow;
   }
   if (reasoning.levels && reasoning.defaultLevel) {
     entry.supported_reasoning_levels = reasoning.levels;

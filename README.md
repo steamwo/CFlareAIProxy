@@ -25,7 +25,7 @@ CFlareAIProxy 把不同上游的授权方式、请求协议、账号池和故障
 | **多账号调度** | 支持优先级、权重、最大并发、会话亲和、额度摘除、账号冷却与自动 Token 刷新。 |
 | **弹性路由** | 数字更小的优先级先使用；同级按权重分流；线路失败时切换账号、供应商或备用路由。 |
 | **能力感知** | 模型目录可暴露 tools、图片、推理等级和输入/输出模态；请求进入上游前会做能力校验。 |
-| **原生代理** | Worker 原生 HTTP CONNECT / SOCKS5；支持账号、供应商和系统三级代理策略及 `direct`/`none` 覆盖。 |
+| **原生代理** | Worker 原生 HTTP CONNECT / SOCKS4/4a / SOCKS5；支持账号、供应商和系统三级代理策略及 `direct`/`none` 覆盖。 |
 | **限流与成本** | 每个网关 Key 可限制 RPM、并发、月 Token 和模型范围；日志记录缓存 Token 与估算费用。 |
 | **故障告警** | 熔断、账号耗尽、队列死信与定时任务失败可推送到自定义 webhook，带去重窗口。 |
 | **备份与轮换** | 配置可整体导出/恢复（凭据保持密文）；`MASTER_KEY` 支持不停机轮换。 |
@@ -195,6 +195,8 @@ Worker 直连
 
 ```text
 http://user:pass@host:port
+socks4://user@host:port
+socks4a://user@host:port
 socks5://user:pass@host:port
 socks5h://user:pass@host:port
 ```
