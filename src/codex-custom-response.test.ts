@@ -121,6 +121,74 @@ describe("Codex custom tool response translation", () => {
     ]);
   });
 
+  it("falls back to the current call when an argument-done item_id is unknown", async () => {
+    const chunks = await streamChunks("unknown-item-id", [
+      {
+        type: "response.output_item.added",
+        output_index: 2,
+        item: { id: "item-real", type: "function_call", call_id: "call-real", name: "TaskCreate", arguments: "" },
+      },
+      {
+        type: "response.function_call_arguments.done",
+        item_id: "item-stale",
+        arguments: "{\"subject\":\"test\"}",
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 2,
+        item: { id: "item-real", type: "function_call", call_id: "call-real", name: "TaskCreate", arguments: "{\"subject\":\"test\"}" },
+      },
+    ]);
+
+    expect(emittedToolCalls(chunks)).toEqual([
+      { index: 0, id: "call-real", type: "function", function: { name: "TaskCreate", arguments: "" } },
+      { index: 0, function: { arguments: "{\"subject\":\"test\"}" } },
+    ]);
+  });
+
+  it("falls back from an unknown done item without repeating tool identity", async () => {
+    const chunks = await streamChunks("unknown-done-item", [
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { id: "item-real", type: "function_call", call_id: "call-real", name: "TaskCreate", arguments: "" },
+      },
+      {
+        type: "response.output_item.done",
+        item: { id: "item-stale", type: "function_call", call_id: "call-stale", name: "WrongName", arguments: "{\"subject\":\"test\"}" },
+      },
+    ]);
+
+    expect(emittedToolCalls(chunks)).toEqual([
+      { index: 0, id: "call-real", type: "function", function: { name: "TaskCreate", arguments: "" } },
+      { index: 0, function: { arguments: "{\"subject\":\"test\"}" } },
+    ]);
+  });
+
+  it("uses known mappings before current fallback for concurrent calls", async () => {
+    const chunks = await streamChunks("mapping-before-current", [
+      {
+        type: "response.output_item.added",
+        output_index: 3,
+        item: { id: "item-a", type: "function_call", call_id: "call-a", name: "first", arguments: "" },
+      },
+      {
+        type: "response.output_item.added",
+        output_index: 7,
+        item: { id: "item-b", type: "function_call", call_id: "call-b", name: "second", arguments: "" },
+      },
+      { type: "response.function_call_arguments.delta", output_index: 3, item_id: "unknown-a", delta: "A" },
+      { type: "response.function_call_arguments.delta", output_index: 99, item_id: "unknown-current", delta: "B" },
+    ]);
+
+    expect(emittedToolCalls(chunks)).toEqual([
+      { index: 0, id: "call-a", type: "function", function: { name: "first", arguments: "" } },
+      { index: 1, id: "call-b", type: "function", function: { name: "second", arguments: "" } },
+      { index: 0, function: { arguments: "A" } },
+      { index: 1, function: { arguments: "B" } },
+    ]);
+  });
+
   it("falls back to a complete call when only output_item.done arrives", async () => {
     const chunks = await streamChunks("output-only", [{
       type: "response.output_item.done",
