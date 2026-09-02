@@ -99,7 +99,7 @@ describe("Codex Responses input item IDs", () => {
     expect(normalizeCodexInputMessageIds(once)).toEqual(once);
   });
 
-  it("prefixes supported IDs before applying the 64 character limit", () => {
+  it("prefixes supported IDs and shortens them collision-safely within 64 characters", () => {
     const longId = `item_${"x".repeat(80)}`;
     const normalized = normalizeCodexInputMessageIds([
       { type: "message", id: longId },
@@ -108,15 +108,16 @@ describe("Codex Responses input item IDs", () => {
       { type: "custom_tool_call", id: longId },
       { type: "custom_tool_call_output", id: longId },
     ]) as Array<Record<string, unknown>>;
+    const ids = normalized.map((item) => String(item.id));
 
-    expect(normalized.map((item) => item.id)).toEqual([
-      `msg_${longId}`.slice(0, 64),
-      `rs_${longId}`.slice(0, 64),
-      `fc_${longId}`.slice(0, 64),
-      `ctc_${longId}`.slice(0, 64),
-      `ctco_${longId}`.slice(0, 64),
-    ]);
-    expect(normalized.every((item) => String(item.id).length === 64)).toBe(true);
+    expect(ids.every((id) => id.length === 64)).toBe(true);
+    expect(ids[0]).toMatch(/^msg_/);
+    expect(ids[1]).toMatch(/^rs_/);
+    expect(ids[2]).toMatch(/^fc_/);
+    expect(ids[3]).toMatch(/^ctc_/);
+    expect(ids[4]).toMatch(/^ctco_/);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(normalizeCodexInputMessageIds(normalized)).toEqual(normalized);
   });
 
   it("preserves already valid prefixes and is idempotent", () => {

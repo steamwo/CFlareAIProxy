@@ -47,10 +47,11 @@ function fallbackPart(value: unknown): Record<string, unknown> {
   return { type: "text", text: serializedOutput(value) };
 }
 
-function convertedStructuredParts(value: unknown): Array<Record<string, unknown>> | undefined {
+function convertedStructuredParts(value: unknown): { parts: Array<Record<string, unknown>>; hasImage: boolean; allText: boolean } | undefined {
   if (!Array.isArray(value)) return undefined;
   const parts: Array<Record<string, unknown>> = [];
   let hasImage = false;
+  let allText = true;
 
   for (const raw of value) {
     const item = record(raw);
@@ -64,16 +65,18 @@ function convertedStructuredParts(value: unknown): Array<Record<string, unknown>
       const image = chatImageFields(item);
       if (!image) return undefined;
       hasImage = true;
+      allText = false;
       parts.push({
         type: "image_url",
         image_url: { url: image.url, ...(image.detail ? { detail: image.detail } : {}) },
       });
       continue;
     }
+    allText = false;
     parts.push(fallbackPart(raw));
   }
 
-  return hasImage ? parts : undefined;
+  return { parts, hasImage, allText };
 }
 
 export function responsesToolOutputToChatContent(output: unknown): string | Array<Record<string, unknown>> {
@@ -86,6 +89,9 @@ export function responsesToolOutputToChatContent(output: unknown): string | Arra
     }
   }
 
-  const parts = convertedStructuredParts(structured);
-  return parts ?? serializedOutput(output);
+  const converted = convertedStructuredParts(structured);
+  if (!converted) return serializedOutput(output);
+  if (converted.hasImage) return converted.parts;
+  if (converted.allText && converted.parts.length > 0) return converted.parts.map((part) => String(part.text ?? "")).join("");
+  return serializedOutput(output);
 }

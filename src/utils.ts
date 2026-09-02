@@ -170,6 +170,14 @@ export async function readJsonBody(
   }
 }
 
+export function resolveConfiguredHeaderValue(value: string, incoming?: Headers): string | undefined {
+  if (!value.startsWith("$")) return value;
+  const sourceName = value.slice(1).trim();
+  if (!sourceName || !incoming) return undefined;
+  const resolved = incoming.get(sourceName);
+  return resolved === null ? undefined : resolved;
+}
+
 export function sanitizeHeaders(input: Headers, extra: Record<string, string> = {}): Headers {
   const output = new Headers();
   const allow = ["accept", "content-type", "user-agent", "x-request-id", "openai-organization", "openai-project"];
@@ -178,7 +186,10 @@ export function sanitizeHeaders(input: Headers, extra: Record<string, string> = 
     if (value) output.set(key, value);
   }
   output.set("content-type", "application/json");
-  for (const [key, value] of Object.entries(extra)) output.set(key, value);
+  for (const [key, configured] of Object.entries(extra)) {
+    const value = resolveConfiguredHeaderValue(configured, input);
+    if (value !== undefined) output.set(key, value);
+  }
   return output;
 }
 
