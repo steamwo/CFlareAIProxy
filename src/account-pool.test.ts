@@ -185,4 +185,25 @@ describe("AccountPool session affinity aliases", () => {
     await release(pool, replacement);
     close();
   });
+
+  it("cools down HTTP 402 credentials and rebinds affinity to the replacement", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { pool, close } = await createPool();
+    const [promptCacheKey] = await aliasKeys();
+
+    const initial = await acquire(pool, promptCacheKey);
+    expect(initial.credentialId).toBe("credential-a");
+    await release(pool, initial, { success: false, statusCode: 402, cooldownMs: 60_000 });
+
+    const replacement = await acquire(pool, promptCacheKey);
+    expect(replacement.credentialId).toBe("credential-b");
+    await release(pool, replacement);
+
+    vi.advanceTimersByTime(60_001);
+    const rebound = await acquire(pool, promptCacheKey);
+    expect(rebound.credentialId).toBe("credential-b");
+    await release(pool, rebound);
+    close();
+  });
 });
