@@ -77,17 +77,26 @@ function stateKeys(event: Record<string, unknown>, item: Record<string, unknown>
   return keys;
 }
 
+function findMappedState(
+  tracker: ToolCallStreamTracker,
+  event: Record<string, unknown>,
+  item: Record<string, unknown>,
+): ToolCallStreamState | undefined {
+  for (const key of stateKeys(event, item)) {
+    const state = tracker.states.get(key);
+    if (state) return state;
+  }
+  return undefined;
+}
+
 function findState(
   tracker: ToolCallStreamTracker,
   event: Record<string, unknown>,
   item: Record<string, unknown>,
 ): ToolCallStreamState | undefined {
-  const keys = stateKeys(event, item);
-  for (const key of keys) {
-    const state = tracker.states.get(key);
-    if (state) return state;
-  }
-  return keys.length === 0 ? tracker.current : undefined;
+  // Match the upstream translator: known item/call/output mappings win. Only a lookup
+  // miss on a follow-up event falls back to the currently active tool call.
+  return findMappedState(tracker, event, item) ?? tracker.current;
 }
 
 function ensureState(
@@ -95,7 +104,9 @@ function ensureState(
   event: Record<string, unknown>,
   item: Record<string, unknown>,
 ): ToolCallStreamState {
-  const existing = findState(tracker, event, item);
+  // State creation must not use the current-call fallback: a new output_item.added event
+  // represents a distinct tool call even while another call is active.
+  const existing = findMappedState(tracker, event, item);
   if (existing) {
     for (const key of stateKeys(event, item)) tracker.states.set(key, existing);
     tracker.current = existing;
@@ -145,9 +156,9 @@ function normalizeStreamEvent(
   }
 
   if (type === "response.function_call_arguments.delta" || type === "response.custom_tool_call_input.delta") {
-    const state = ensureState(tracker, event, item);
+    const state = findState(tracker, event, item);
     const delta = typeof event.delta === "string" ? event.delta : "";
-    if (state.done || !delta) return [];
+    if (!state || state.done || !delta) return [];
     state.bufferedArguments += delta;
     if (!state.announced) return [];
     state.argumentsEmitted = true;
@@ -155,8 +166,8 @@ function normalizeStreamEvent(
   }
 
   if (type === "response.function_call_arguments.done" || type === "response.custom_tool_call_input.done") {
-    const state = ensureState(tracker, event, item);
-    if (state.done || state.argumentsEmitted) return [];
+    const state = findState(tracker, event, item);
+    if (!state || state.done || state.argumentsEmitted) return [];
     const fullArguments = type === "response.custom_tool_call_input.done"
       ? typeof event.input === "string" ? event.input : ""
       : typeof event.arguments === "string" ? event.arguments : "";
@@ -167,21 +178,32 @@ function normalizeStreamEvent(
   }
 
   if (type === "response.output_item.done" && isToolCallItem(item)) {
+    const existing = findState(tracker, event, item);
+    if (existing) {
+      if (existing.done) return [];
+      existing.done = true;
+      const normalizedItem = normalizeToolCallItem(item, toolNames);
+      const itemArguments = typeof normalizedItem.arguments === "string" ? normalizedItem.arguments : "";
+      const fullArguments = itemArguments || existing.bufferedArguments;
+      normalizedItem.arguments = fullArguments;
+      const done = { ...event, output_index: existing.index, item: normalizedItem };
+      if (!existing.announced) {
+        existing.argumentsEmitted = fullArguments.length > 0;
+        return [done];
+      }
+      if (existing.argumentsEmitted || !fullArguments) return [done];
+      existing.argumentsEmitted = true;
+      return [argumentDeltaEvent(event, existing, fullArguments), done];
+    }
+
+    // Upstream may omit output_item.added entirely. In that case create a completed state
+    // and emit the full call once; this path is used only when there is no mapped/current call.
     const state = ensureState(tracker, event, item);
-    if (state.done) return [];
     state.done = true;
     const normalizedItem = normalizeToolCallItem(item, toolNames);
-    const itemArguments = typeof normalizedItem.arguments === "string" ? normalizedItem.arguments : "";
-    const fullArguments = itemArguments || state.bufferedArguments;
-    normalizedItem.arguments = fullArguments;
-    const done = { ...event, output_index: state.index, item: normalizedItem };
-    if (!state.announced) {
-      state.argumentsEmitted = fullArguments.length > 0;
-      return [done];
-    }
-    if (state.argumentsEmitted || !fullArguments) return [done];
-    state.argumentsEmitted = true;
-    return [argumentDeltaEvent(event, state, fullArguments), done];
+    const fullArguments = typeof normalizedItem.arguments === "string" ? normalizedItem.arguments : "";
+    state.argumentsEmitted = fullArguments.length > 0;
+    return [{ ...event, output_index: state.index, item: normalizedItem }];
   }
 
   return [normalizePayload(event, toolNames) as Record<string, unknown>];
