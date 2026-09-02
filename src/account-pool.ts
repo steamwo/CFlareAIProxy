@@ -418,7 +418,7 @@ export class AccountPool extends DurableObject<Env> {
 
     const status = payload.statusCode ?? 500;
     const shouldCooldown = payload.cooldownEligible !== false
-      && (status === 401 || status === 403 || status === 408 || status === 429 || status >= 500);
+      && (status === 401 || status === 402 || status === 403 || status === 408 || status === 429 || status >= 500);
     if (shouldCooldown) {
       const stat = this.ctx.storage.sql
         .exec<{ failures: number }>("SELECT failures FROM pool_stats WHERE credential_id = ?", lease.credential_id)
