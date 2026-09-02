@@ -97,7 +97,7 @@ describe("upstream compatibility regression batch", () => {
     expect(second).toEqual(first);
   });
 
-  it("cleans Codex nested cache breakpoints and uses canonical session headers", async () => {
+  it("cleans Codex nested cache breakpoints and uses canonical scoped session headers", async () => {
     const p = provider("codex");
     const request = new Request("https://gateway.example/v1/responses", { headers: { "Session-Id": "session-1", "X-Codex-Window-Id": "window-1" } });
     const context: ProxyRequestContext = {
@@ -120,7 +120,8 @@ describe("upstream compatibility regression batch", () => {
     const headers = built.init.headers as Headers;
     expect(body).not.toHaveProperty("prompt_cache_options");
     expect(content[0]).not.toHaveProperty("prompt_cache_breakpoint");
-    expect(headers.get("session-id")).toBe("session-1");
+    expect(headers.get("session-id")).toBe(body.prompt_cache_key);
+    expect(headers.get("session-id")).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-5[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
     expect(headers.has("session_id")).toBe(false);
     expect(headers.get("x-codex-window-id")).toBe("window-1");
   });
