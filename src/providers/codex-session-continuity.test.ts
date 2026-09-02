@@ -110,7 +110,7 @@ describe("Codex HTTP session continuity", () => {
     )).toBeUndefined();
   });
 
-  it("applies one final session id to prompt cache and HTTP identity headers", async () => {
+  it("applies one final session id to prompt cache and canonical HTTP identity headers", async () => {
     const result = await buildCodexRequest(context(
       { model: "public-model", stream: true, messages: [{ role: "user", content: "Hello" }] },
       request({ "x-session-id": "client-session" }),
@@ -120,7 +120,8 @@ describe("Codex HTTP session continuity", () => {
     const headers = new Headers(result.init.headers);
 
     expect(body.prompt_cache_key).toMatch(/^[a-f0-9-]{36}$/);
-    expect(headers.get("session_id")).toBe(body.prompt_cache_key);
+    expect(headers.get("session-id")).toBe(body.prompt_cache_key);
+    expect(headers.has("session_id")).toBe(false);
     expect(headers.get("conversation_id")).toBe(body.prompt_cache_key);
     expect(body.stream).toBe(true);
   });
@@ -134,6 +135,7 @@ describe("Codex HTTP session continuity", () => {
     const headers = new Headers(result.init.headers);
 
     expect(body.prompt_cache_key).toBeUndefined();
+    expect(headers.get("session-id")).toBeNull();
     expect(headers.get("session_id")).toBeNull();
     expect(headers.get("conversation_id")).toBeNull();
   });
