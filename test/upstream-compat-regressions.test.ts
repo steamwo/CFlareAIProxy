@@ -72,6 +72,41 @@ describe("upstream compatibility regression batch", () => {
     expect(missing.get("x-static")).toBe("yes");
   });
 
+  it("treats dynamic header names case-insensitively and omits an empty $ reference", () => {
+    const headers = sanitizeHeaders(
+      new Headers({ "x-client-session": "mixed-case" }),
+      { "X-Upstream-Session": "$X-CLIENT-SESSION", "X-Empty-Reference": "$" },
+    );
+    expect(headers.get("x-upstream-session")).toBe("mixed-case");
+    expect(headers.has("x-empty-reference")).toBe(false);
+  });
+
+  it("keeps Codex credential identity protected from dynamic provider and metadata headers", () => {
+    const p = provider("codex");
+    p.headers.authorization = "$X-Forward-Authorization";
+    p.headers["Chatgpt-Account-Id"] = "$X-Forward-Account";
+    const incoming = new Headers({
+      "X-Forward-Authorization": "Bearer attacker-token",
+      "X-Forward-Account": "attacker-account",
+      "X-Metadata-Trace": "trace-42",
+    });
+    const headers = providerAuthHeaders(
+      p,
+      credential("real-token", {
+        account_id: "real-account",
+        headers: {
+          authorization: "$X-Forward-Authorization",
+          "Chatgpt-Account-Id": "$X-Forward-Account",
+          "X-Upstream-Trace": "$X-Metadata-Trace",
+        },
+      }),
+      incoming,
+    );
+    expect(headers.get("authorization")).toBe("Bearer real-token");
+    expect(headers.get("chatgpt-account-id")).toBe("real-account");
+    expect(headers.get("x-upstream-trace")).toBe("trace-42");
+  });
+
   it("clears Codex authorization for an empty config credential and resolves metadata headers", () => {
     const p = provider("codex");
     p.headers.authorization = "Bearer stale";
