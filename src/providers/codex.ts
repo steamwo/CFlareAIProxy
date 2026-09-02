@@ -128,49 +128,96 @@ function codexIdPrefix(item: Record<string, unknown>): string | undefined {
             : undefined;
 }
 
-function stableIdHash(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, "0");
+function normalizeCodexId(item: Record<string, unknown>, id: string): string {
+  const prefix = codexIdPrefix(item);
+  if (!prefix || !id || id.startsWith(prefix)) return id;
+  return `${prefix}_${id}`;
 }
 
-function boundedId(base: string, suffix = ""): string {
-  if (!suffix) return base.slice(0, 64);
-  return `${base.slice(0, Math.max(1, 64 - suffix.length - 1))}_${suffix}`;
+function stableIdHash(value: string): string {
+  // Synchronous deterministic 64-bit suffix for the Workers request-normalization path.
+  // The upstream implementation uses SHA-256; collision handling below retries the suffix,
+  // so the contract here is determinism and stability rather than cryptographic strength.
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    left ^= code;
+    left = Math.imul(left, 0x01000193) >>> 0;
+    right ^= code + index;
+    right = Math.imul(right, 0x85ebca6b) >>> 0;
+  }
+  return left.toString(16).padStart(8, "0") + right.toString(16).padStart(8, "0");
+}
+
+function runeLength(value: string): number {
+  return Array.from(value).length;
+}
+
+function withHashSuffix(id: string, attempt: number): string {
+  const suffix = `_${stableIdHash(attempt > 0 ? `${id}\0${attempt}` : id)}`;
+  const runes = Array.from(id);
+  const prefixLength = Math.max(0, 64 - Array.from(suffix).length);
+  return `${runes.slice(0, prefixLength).join("")}${suffix}`;
 }
 
 export function normalizeCodexInputMessageIds(value: unknown): unknown {
   if (!Array.isArray(value)) return value;
-  const preserved = new Set<string>();
+
+  const states = new Map<string, { occupied: boolean; preserved: boolean }>();
   for (const raw of value) {
     const item = record(raw);
-    const prefix = codexIdPrefix(item);
-    if (!prefix || typeof item.id !== "string" || !item.id) continue;
-    if (item.id.startsWith(`${prefix}_`) && item.id.length <= 64) preserved.add(item.id);
+    if (!codexIdPrefix(item) || typeof item.id !== "string") continue;
+    const original = item.id;
+    const normalized = normalizeCodexId(item, original);
+    const state = states.get(normalized) ?? { occupied: false, preserved: false };
+    if (normalized === original) state.preserved = true;
+    if (runeLength(normalized) <= 64) state.occupied = true;
+    states.set(normalized, state);
   }
-  const occupied = new Set(preserved);
-  return value.map((raw, index) => {
+
+  const shortened = new Map<string, string>();
+  const collisionMapped = new Map<string, string>();
+  return value.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
     const item = raw as Record<string, unknown>;
-    const prefix = codexIdPrefix(item);
-    if (!prefix || typeof item.id !== "string" || item.id.length === 0) return raw;
-    if (item.id.startsWith(`${prefix}_`) && item.id.length <= 64) return raw;
-    const source = item.id;
-    const base = source.startsWith(`${prefix}_`) ? source : `${prefix}_${source}`;
-    let id = boundedId(base);
-    if (occupied.has(id)) {
-      let attempt = 0;
-      do {
-        const hash = stableIdHash(`${prefix}\0${source}\0${index}\0${attempt}`);
-        id = boundedId(base, hash);
-        attempt += 1;
-      } while (occupied.has(id));
+    if (!codexIdPrefix(item) || typeof item.id !== "string") return raw;
+    const original = item.id;
+    let id = normalizeCodexId(item, original);
+
+    if (id !== original && states.get(id)?.preserved) {
+      let collisionId = collisionMapped.get(id);
+      if (!collisionId) {
+        for (let attempt = 0; ; attempt += 1) {
+          const candidate = withHashSuffix(id, attempt);
+          if (!states.get(candidate)?.occupied) {
+            collisionId = candidate;
+            collisionMapped.set(id, candidate);
+            states.set(candidate, { occupied: true, preserved: false });
+            break;
+          }
+        }
+      }
+      id = collisionId;
     }
-    occupied.add(id);
-    return id === item.id ? raw : { ...item, id };
+
+    if (runeLength(id) > 64) {
+      let mapped = shortened.get(id);
+      if (!mapped) {
+        for (let attempt = 0; ; attempt += 1) {
+          const candidate = withHashSuffix(id, attempt);
+          if (!states.get(candidate)?.occupied) {
+            mapped = candidate;
+            shortened.set(id, candidate);
+            states.set(candidate, { occupied: true, preserved: false });
+            break;
+          }
+        }
+      }
+      id = mapped;
+    }
+
+    return id === original ? raw : { ...item, id };
   });
 }
 
