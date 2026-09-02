@@ -92,6 +92,11 @@ export function responsesToolOutputToChatContent(output: unknown): string | Arra
   const converted = convertedStructuredParts(structured);
   if (!converted) return serializedOutput(output);
   if (converted.hasImage) return converted.parts;
-  if (converted.allText) return converted.parts.map((part) => String(part.text ?? "")).join("");
+  // Preserve the pre-existing Chat fallback for already-structured text-only arrays.
+  // Upstream's new folding rule applies to JSON-stringified text arrays, where returning
+  // their text avoids leaking the encoded container over the wire.
+  if (converted.allText && typeof output === "string") {
+    return converted.parts.map((part) => String(part.text ?? "")).join("");
+  }
   return serializedOutput(output);
 }
