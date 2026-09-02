@@ -4,10 +4,14 @@ import { buildKimiRequest } from "./kimi";
 import { responsesToolOutputToChatContent } from "./responses-tool-output";
 
 describe("Responses structured tool output to Chat content", () => {
-  it("keeps plain and text-only structured outputs as strings", () => {
+  it("keeps plain output stable and folds text-only structured output", () => {
     expect(responsesToolOutputToChatContent("plain output")).toBe("plain output");
     expect(responsesToolOutputToChatContent([{ type: "input_text", text: "still text" }]))
-      .toBe('[{"type":"input_text","text":"still text"}]');
+      .toBe("still text");
+    expect(responsesToolOutputToChatContent(JSON.stringify([
+      { type: "input_text", text: "one" },
+      { type: "output_text", text: " two" },
+    ]))).toBe("one two");
     expect(responsesToolOutputToChatContent([])).toBe("[]");
   });
 
