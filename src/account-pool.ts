@@ -29,6 +29,7 @@ interface AcquirePayload {
 }
 
 const MAX_CREDENTIAL_WEIGHT = 1_000_000;
+const SCHEDULER_STATE_RETENTION_MS = 24 * 60 * 60_000;
 
 function sessionKeys(value: string | string[] | undefined): string[] {
   const values = Array.isArray(value) ? value : value ? [value] : [];
@@ -67,11 +68,21 @@ export class AccountPool extends DurableObject<Env> {
           provider_id TEXT PRIMARY KEY,
           cursor INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS round_robin_state (
+          provider_id TEXT PRIMARY KEY,
+          last_picked_credential_id TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS smooth_weights (
           provider_id TEXT NOT NULL,
           credential_id TEXT NOT NULL,
           current_weight INTEGER NOT NULL DEFAULT 0,
           configured_weight INTEGER NOT NULL,
+          PRIMARY KEY (provider_id, credential_id)
+        );
+        CREATE TABLE IF NOT EXISTS scheduler_membership (
+          provider_id TEXT NOT NULL,
+          credential_id TEXT NOT NULL,
+          last_seen INTEGER NOT NULL,
           PRIMARY KEY (provider_id, credential_id)
         );
         CREATE TABLE IF NOT EXISTS refresh_locks (
@@ -110,7 +121,7 @@ export class AccountPool extends DurableObject<Env> {
         return Response.json({ ok: true });
       }
       if (request.method === "POST" && url.pathname === "/reset") {
-        this.ctx.storage.sql.exec("DELETE FROM pool_stats; DELETE FROM leases; DELETE FROM affinities; DELETE FROM smooth_weights; DELETE FROM refresh_locks;");
+        this.ctx.storage.sql.exec("DELETE FROM pool_stats; DELETE FROM leases; DELETE FROM affinities; DELETE FROM round_robin_state; DELETE FROM smooth_weights; DELETE FROM scheduler_membership; DELETE FROM refresh_locks;");
         return Response.json({ ok: true });
       }
       return new Response("Not found", { status: 404 });
@@ -136,6 +147,32 @@ export class AccountPool extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM leases WHERE expires_at <= ?", now);
     this.ctx.storage.sql.exec("DELETE FROM affinities WHERE expires_at <= ?", now);
     this.ctx.storage.sql.exec("DELETE FROM refresh_locks WHERE expires_at <= ?", now);
+
+    const staleBefore = now - SCHEDULER_STATE_RETENTION_MS;
+    // Only providers that have entered the new membership tracker are eligible for
+    // cleanup. This avoids dropping pre-upgrade smooth state on the first request,
+    // while a later request can remove orphaned rows for permanently deleted credentials.
+    this.ctx.storage.sql.exec(
+      `DELETE FROM smooth_weights
+       WHERE provider_id IN (SELECT provider_id FROM scheduler_membership)
+         AND NOT EXISTS (
+           SELECT 1 FROM scheduler_membership m
+           WHERE m.provider_id=smooth_weights.provider_id
+             AND m.credential_id=smooth_weights.credential_id
+             AND m.last_seen >= ?
+         )`,
+      staleBefore,
+    );
+    this.ctx.storage.sql.exec(
+      `DELETE FROM round_robin_state
+       WHERE NOT EXISTS (
+         SELECT 1 FROM scheduler_membership m
+         WHERE m.provider_id=round_robin_state.provider_id
+           AND m.last_seen >= ?
+       )`,
+      staleBefore,
+    );
+    this.ctx.storage.sql.exec("DELETE FROM scheduler_membership WHERE last_seen < ?", staleBefore);
   }
 
   private acquire(payload: AcquirePayload): PoolLease {
@@ -148,6 +185,13 @@ export class AccountPool extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         "INSERT OR IGNORE INTO pool_stats (credential_id, inflight, cooldown_until, failures, last_used) VALUES (?, 0, 0, 0, 0)",
         candidate.id,
+      );
+      this.ctx.storage.sql.exec(
+        `INSERT INTO scheduler_membership(provider_id,credential_id,last_seen) VALUES(?,?,?)
+         ON CONFLICT(provider_id,credential_id) DO UPDATE SET last_seen=excluded.last_seen`,
+        payload.providerId,
+        candidate.id,
+        now,
       );
     }
 
@@ -220,15 +264,36 @@ export class AccountPool extends DurableObject<Env> {
           break;
         }
         case "round_robin":
-        default: {
-          const sorted = [...tier].sort((a, b) => a.id.localeCompare(b.id));
-          const cursor = this.nextCursor(payload.providerId, sorted.length);
-          chosen = sorted[cursor]!;
-        }
+        default:
+          chosen = this.nextRoundRobin(payload.providerId, tier);
+          break;
       }
     }
 
     return this.createLease(chosen.id, affinityKeys, payload.leaseTtlMs ?? 600_000, now);
+  }
+
+  private nextRoundRobin(providerId: string, candidates: PoolCandidate[]): PoolCandidate {
+    const sorted = [...candidates].sort((a, b) => a.id.localeCompare(b.id));
+    const previous = this.ctx.storage.sql
+      .exec<{ last_picked_credential_id: string }>(
+        "SELECT last_picked_credential_id FROM round_robin_state WHERE provider_id=?",
+        providerId,
+      )
+      .toArray()[0]?.last_picked_credential_id;
+    let chosen = sorted[0]!;
+    if (previous) {
+      const exactIndex = sorted.findIndex((candidate) => candidate.id === previous);
+      if (exactIndex >= 0) chosen = sorted[(exactIndex + 1) % sorted.length]!;
+      else chosen = sorted.find((candidate) => candidate.id.localeCompare(previous) > 0) ?? sorted[0]!;
+    }
+    this.ctx.storage.sql.exec(
+      `INSERT INTO round_robin_state(provider_id,last_picked_credential_id) VALUES(?,?)
+       ON CONFLICT(provider_id) DO UPDATE SET last_picked_credential_id=excluded.last_picked_credential_id`,
+      providerId,
+      chosen.id,
+    );
+    return chosen;
   }
 
   private nextSmoothWeighted(providerId: string, candidates: PoolCandidate[]): PoolCandidate {
@@ -244,26 +309,27 @@ export class AccountPool extends DurableObject<Env> {
       )
       .toArray();
     const existingById = new Map(existing.map((row) => [row.credential_id, row] as const));
-    const changed = existing.length !== sorted.length
-      || sorted.some((candidate) => existingById.get(candidate.id)?.configured_weight !== candidate.weight);
-
-    if (changed) {
-      // Reset the whole active tier when availability, membership, or weights change. An
-      // unavailable account therefore cannot accumulate credit and burst when it recovers.
-      this.ctx.storage.sql.exec("DELETE FROM smooth_weights WHERE provider_id=?", providerId);
-      for (const candidate of sorted) {
+    for (const candidate of sorted) {
+      const row = existingById.get(candidate.id);
+      if (!row) {
         this.ctx.storage.sql.exec(
           "INSERT INTO smooth_weights(provider_id,credential_id,current_weight,configured_weight) VALUES(?,?,0,?)",
           providerId,
           candidate.id,
           candidate.weight,
         );
+        existingById.set(candidate.id, { credential_id: candidate.id, current_weight: 0, configured_weight: candidate.weight });
+      } else if (row.configured_weight !== candidate.weight) {
+        this.ctx.storage.sql.exec(
+          "UPDATE smooth_weights SET current_weight=0,configured_weight=? WHERE provider_id=? AND credential_id=?",
+          candidate.weight,
+          providerId,
+          candidate.id,
+        );
+        existingById.set(candidate.id, { credential_id: candidate.id, current_weight: 0, configured_weight: candidate.weight });
       }
     }
 
-    const currentById = changed
-      ? new Map(sorted.map((candidate) => [candidate.id, 0] as const))
-      : new Map(existing.map((row) => [row.credential_id, row.current_weight] as const));
     const totalWeight = sorted.reduce((sum, candidate) => sum + candidate.weight, 0);
     if (!Number.isSafeInteger(totalWeight)) throw new Error("Combined credential weight exceeds the safe scheduler range");
 
@@ -271,7 +337,7 @@ export class AccountPool extends DurableObject<Env> {
     let chosenWeight = Number.NEGATIVE_INFINITY;
     const updated = new Map<string, number>();
     for (const candidate of sorted) {
-      const current = (currentById.get(candidate.id) ?? 0) + candidate.weight;
+      const current = (existingById.get(candidate.id)?.current_weight ?? 0) + candidate.weight;
       updated.set(candidate.id, current);
       if (current > chosenWeight) {
         chosen = candidate;
