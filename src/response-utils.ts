@@ -147,21 +147,53 @@ export async function readResponseText(body: ReadableStream<Uint8Array> | null, 
   return decoder.decode(output);
 }
 
+function rewriteSseFrameData(frame: string, transform: (value: unknown) => unknown): string {
+  const data = frameData(frame);
+  if (!data || data === "[DONE]") return frame;
+  let rewritten: string;
+  try {
+    rewritten = JSON.stringify(transform(JSON.parse(data)));
+  } catch {
+    return frame;
+  }
+  const lines = frame.split(/\r?\n/);
+  const output: string[] = [];
+  let inserted = false;
+  for (const line of lines) {
+    if (!line.startsWith("data:")) {
+      output.push(line);
+      continue;
+    }
+    if (!inserted) {
+      output.push(`data: ${rewritten}`);
+      inserted = true;
+    }
+  }
+  return output.join("\n");
+}
+
 export async function ensureResponsesUsageDetails(response: Response): Promise<Response> {
   if (!response.body) return response;
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
-    const body = transformResponseSse(response.body, (data, controller) => {
-      if (data === "[DONE]") {
-        controller.enqueue(responseEncoder.encode("data: [DONE]\n\n"));
-        return;
-      }
-      try {
-        controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify(normalizeResponsesUsageDetails(JSON.parse(data)))}\n\n`));
-      } catch {
-        controller.enqueue(responseEncoder.encode(`data: ${data}\n\n`));
-      }
-    }, () => undefined);
+    let buffer = "";
+    const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let match: RegExpMatchArray | null;
+        while ((match = buffer.match(/\r?\n\r?\n/))) {
+          const boundary = match.index ?? -1;
+          if (boundary < 0) break;
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + match[0].length);
+          controller.enqueue(responseEncoder.encode(`${rewriteSseFrameData(frame, normalizeResponsesUsageDetails)}\n\n`));
+        }
+      },
+      flush(controller) {
+        buffer += decoder.decode();
+        if (buffer) controller.enqueue(responseEncoder.encode(rewriteSseFrameData(buffer, normalizeResponsesUsageDetails)));
+      },
+    }));
     return new Response(body, { status: response.status, statusText: response.statusText, headers: responseHeaders(response.headers, contentType) });
   }
   if (!contentType.includes("json")) return response;
