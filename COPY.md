@@ -6,7 +6,7 @@
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
 <!-- upstream-ref: 17a65ee5470fbaf0e22fc219381e6a4ae9e07624 -->
-<!-- local-implementation-ref: 14bd81b4f44fb36a497c34efa90ecebe4dd48266 -->
+<!-- local-implementation-ref: 090183c8da9231a0bf66559f730e5846d3fef01b -->
 <!-- last-reviewed: 2026-09-02 -->
 
 ## 1. 当前基线
@@ -17,22 +17,23 @@
 | 上游分支 | `main` |
 | 已审阅上游提交 | `17a65ee5470fbaf0e22fc219381e6a4ae9e07624` |
 | 本地分支 | `dev` |
-| 本地实现基线 | `14bd81b4f44fb36a497c34efa90ecebe4dd48266` |
+| 本地实现基线 | `090183c8da9231a0bf66559f730e5846d3fef01b` |
 | 审阅日期 | 2026-09-02 |
 
-本轮累计审阅范围为 `41fc5e13..17a65ee`：
+本轮累计审阅范围为 `41fc5e13..17a65ee`，并已完成其中一批后续验证项：
 
-- 已在 PR #124 / merge `14bd81b4` 中同步可安全适配 Workers 的 HTTP 行为：request-scoped custom headers、空 Codex credential 认证头清理、Codex `Session-Id`/会话 header 透传、prompt-cache 字段清理、collision-safe Responses input IDs、Kimi reasoning/incomplete/partial tool-call 语义、Responses tool-output 文本/图片规范化、Responses usage detail normalization、401 request-scoped `invalid_request_error` 不冷却 credential、Codex client catalog 新字段与 max completion token、以及严格的 OpenAI-compatible Responses SSE EOF/error 处理。
-- PR #124 的 GitHub Actions 已通过 worker/web typecheck、完整测试、production web build 和 Wrangler dry-run；Cloudflare Workers build 也成功。
-- 仍需架构决策或单独验证的范围继续保留 Issue：credential retry-round 与 exclusion（#94）、request-scoped error action/cooldown 继承（#100）、candidate filtering 后 RR/SWRR 公平性（#108）、Codex quota observation snapshot（#109）、旧 Codex client reasoning-level handler 透传（#110）、HTTPS proxy 双层 TLS/ALPN（#111）、Kimi tool schema `$ref` normalization（#112）、registration epoch/error precedence（#113）、`response.done` HTTP/SSE 终止语义（#115）、Codex `reasoning_text` Chat 转换（#116）、以及 LCP/parent-subagent session affinity（#117）。
+- PR #124 / merge `14bd81b4` 同步了可安全适配 Workers 的 HTTP 行为：request-scoped custom headers、空 Codex credential 认证头清理、Codex `Session-Id`/会话 header 透传、prompt-cache 字段清理、collision-safe Responses input IDs、Kimi reasoning/incomplete/partial tool-call 语义、Responses tool-output 文本/图片规范化、Responses usage detail normalization、401 request-scoped `invalid_request_error` 不冷却 credential、Codex client catalog 新字段与 max completion token、以及严格的 OpenAI-compatible Responses SSE EOF/error 处理。
+- 已完成此前分流的安全兼容项：HTTP 402 credential failure + AccountPool cooldown/rebind（PR #119/#129，Issue #91）；Codex/Kimi Responses 边界及 tool-call state fallback（PR #124/#126，Issue #92）；camelCase modality metadata（PR #122，Issue #95）；request-scoped dynamic headers 的剩余安全验收（PR #128，Issue #101）；Kimi `$ref/$defs/definitions` tool schema normalization（PR #121，Issue #112）；Codex client model catalog 新 schema 字段（PR #124，Issue #114）；Codex `response.done` 与 `reasoning_text` Chat 转换（PR #120，Issue #115/#116）；candidate filtering 后 RR/SWRR 公平性（PR #125，Issue #108）。
+- 上述运行代码均在对应 PR 的 current-`dev` merge ref 上通过仓库 Actions；其中 #125 Actions #592、#126 Actions #595、#128 Actions #587、#129 Actions #598 均全绿，并经过最终净 diff 与 unresolved review thread 检查后才合入 `dev`。
+- 仍需架构决策或尚未完成的范围继续保留 Issue：credential retry override（#94）、request-scoped proxy override（#96）、剩余 Responses incomplete/partial tool-call 边界（#97）、session-affinity race 等混合项（#99）、request-scoped error action（#100）、Responses Compact（#102）、stream bootstrap failover（#104）、混合 reasoning/auth 后续项（#105）、Codex quota observation snapshot（#109）、旧 Codex client reasoning-level handler 透传（#110）、HTTPS proxy 双层 TLS/ALPN（#111）、registration epoch/error precedence（#113）、以及 LCP/parent-subagent session affinity（#117）。
 - WebSocket/WebRTC/sideband、Claude 协议与 Claude OAuth、仅 Gemini/Grok 变化继续排除，不因推进 `upstream-ref` 而视为已实现。
 
 ## 2. 对齐程度
 
 以下比例是工程估算，用来表达工作量和行为覆盖，不是官方兼容认证，也不是逐测试用例通过率。
 
-- **当前目标范围（暂不包含 Claude 协议和未批准的 Codex Live）：约 82%，属于“大体对齐”。**
-- **相对 CLIProxyAPI 全部产品能力：约 48%，属于“部分对齐”。**
+- **当前目标范围（暂不包含 Claude 协议和未批准的 Codex Live）：约 85%，属于“大体对齐”。**
+- **相对 CLIProxyAPI 全部产品能力：约 50%，属于“部分对齐”。**
 
 等级定义：
 
@@ -47,19 +48,19 @@
 | 能力 | 程度 | CFlareAIProxy 状态 | 后续动作 |
 | --- | --- | --- | --- |
 | OpenAI Chat Completions | 已对齐 | 支持流式、非流式、tools、多账号路由和 OpenAI-compatible 上游 | 跟进上游新增字段和错误语义 |
-| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses、tool-output 文本/图片规范化、严格 SSE EOF/error 处理和可选 Multi-Agent V2 | 补齐 `response.done`、Codex reasoning_text 与剩余 custom tool 交错调用测试，跟进 Issue #115/#116/#38 |
+| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses、tool-output 文本/图片规范化、严格 SSE EOF/error 处理、Codex `response.done` 终止事件、reasoning_text 转换和可选 Multi-Agent V2 | 继续覆盖剩余 custom tool/partial-call 边界，跟进 Issue #38/#97 |
 | OpenAI Completions | 大体对齐 | 可路由 generic、Codex、Kimi | 保持兼容，不扩大旧协议特性 |
-| Kimi Chat 上游 | 已对齐 | 专用 adapter，固定走 Chat Completions；reasoning placeholder 与同轮 reasoning/tool 行为已补强 | 持续对比 `kimi_executor.go`；tool schema `$ref` normalization 跟进 Issue #112 |
+| Kimi Chat 上游 | 已对齐 | 专用 adapter，固定走 Chat Completions；reasoning placeholder、同轮 reasoning/tool 与 function parameter schema normalization 已补强 | 持续对比 `kimi_executor.go` 与 schema 边界 |
 | Kimi 模型名归一化 | 已对齐 | 去除 `[1m]` 后缀 | 跟进上游新增 suffix/alias 规则 |
 | Kimi 模型目录与能力 | 大体对齐 | 公开模型来自 discovered models 与显式 routes，不复制上游静态目录 | 发现或配置 `kimi-k3-256k` 时验证 256K context、image input；验证 `kimi-k3` 1M context、65K output 和 `low/high/max` thinking metadata |
 | Kimi 多轮工具消息修复 | 已对齐 | 删除无效空 assistant、补 `reasoning_content`、修复 `call_id/tool_call_id`，并保持 Responses 同轮 reasoning/tool 连续性 | 新增上游测试时同步移植测试语义 |
-| Kimi Responses/Completions 转换 | 大体对齐 | 支持文字、图片、工具定义、tool choice、reasoning fallback、incomplete/content-filter 和 partial tool-call completion safety | 跟进新的 Responses item/event 类型与 Issue #112 |
+| Kimi Responses/Completions 转换 | 大体对齐 | 支持文字、图片、工具定义、tool choice、reasoning fallback、incomplete/content-filter、partial tool-call completion safety，并规范化本地 JSON Schema refs | 跟进新的 Responses item/event 类型 |
 | Kimi 流式 usage | 大体对齐 | 自动请求 `include_usage` 并归集基础 Token；Responses detail 已规范化 | 接入更完整 canonical Token 质量模型 |
 | Codex Responses 请求归一化 | 大体对齐 | 清理不兼容 prompt-cache 字段、collision-safe input IDs、转换 tools/tool choice、使用 canonical `Session-Id` 并透传 Codex 会话 header；当前不强制伪装官方 Codex `User-Agent`/`Originator` | 评估派生会话 UUID（Issue #35）、custom tool/name conflict（Issue #38）、原生 session signal 优先级（Issue #42）及 HTTP 身份 header 策略（Issue #55） |
-| Codex `response.failed/error` | 已对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误；无 payload 的异常 EOF 不再伪装成功 | 对比上游新增 code/type 分类；`response.done` 跟进 Issue #115 |
-| Codex 中断流检测 | 已对齐 | 未收到已知成功终止事件时视为失败，不伪造成功；严格处理 SSE EOF/error | 补齐 `response.done` 终止事件，跟进 Issue #115 |
+| Codex `response.failed/error` | 已对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误；无 payload 的异常 EOF 不再伪装成功；`response.done` 作为成功 terminal 处理 | 对比上游新增 code/type 分类 |
+| Codex 中断流检测 | 已对齐 | `response.completed/incomplete/done` 均为已知成功终止事件；其余 clean EOF 视为失败，不伪造成功 | 保持终止事件与错误优先级回归测试 |
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
-| Codex custom tool HTTP/SSE | 部分对齐 | 基础 function tool 已覆盖；尚未完整验证 custom tool、交错调用、done fallback 与重复抑制 | 跟进 Issue #38，不涉及 WebSocket |
+| Codex custom tool HTTP/SSE | 大体对齐 | 已覆盖 function/custom tool 基础转换、交错调用、done-only arguments、lookup miss current-state fallback 与重复 identity 抑制 | 继续跟进 Issue #38 的名称冲突和更复杂 mixed-output 边界；不涉及 WebSocket |
 | Codex tool output 图片 | 大体对齐 | Responses tool-output 文本/图片已做结构化规范化；仍需覆盖复杂递归与混合内容 | 跟进 Issue #42，仅限 HTTP/SSE |
 | Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，覆盖 reasoning、modalities、context window、max completion token、visibility、search-tool、service tier、稳定 priority、V2 及新增 model message/schema 字段；builder 已支持旧客户端过滤 max/ultra | `/v1/models` 的 client-version 透传仍跟进 Issue #110；默认内置目录策略见 Issue #52 |
 | Codex Multi-Agent V2 | 大体对齐 | 默认关闭；按 route/provider 开启；仅目标 UA；支持 spawn/agent/namespace、非 Codex 转换及流式/非流式恢复 | 真实 Codex 客户端 smoke；WebSocket 单独设计 |
@@ -67,14 +68,14 @@
 | Codex reasoning replay/signature cache | 未对齐 | 尚未实现跨请求 reasoning/signature 重放缓存 | 评估 Workers KV/DO 实现 |
 | Codex Responses WebSocket | 未对齐 | Workers 网关当前仅实现 HTTP/SSE | 未单独批准前不自动移植 |
 | Codex Alpha Search / 特殊路由插件 | 未对齐 | 尚未实现插件式模型选择 | 有真实使用需求后再跟进 |
-| 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | retry-round/exclusion、candidate filtering 公平性及 LCP hierarchy 分别跟进 Issue #94/#108/#117；registration epoch 跟进 #113 |
-| 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断；request-scoped 401 invalid_request 不污染账号可用性 | 402、request-scoped error action 与 disable-cooling 继承继续跟进 Issue #91/#100 |
+| 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；RR 按 credential identity 继续排序后继，SWRR 在临时过滤时保留 per-credential credit，sticky 不推进 scheduler，长期缺席状态有界清理 | per-credential retry override、LCP hierarchy、registration epoch 分别跟进 Issue #94/#117/#113 |
+| 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误及 HTTP 402 payment failure 可进入 credential cooldown/轮换；402 后 session affinity 重绑健康账号；request-scoped 401 invalid_request 不污染账号可用性 | request-scoped error action 与 disable-cooling 继承继续跟进 Issue #100 |
 | Token/OAuth 刷新锁 | 大体对齐 | Durable Object 选出唯一 refresh 持有者；Codex 直连与账号级代理 refresh 使用独立 30 秒超时；Codex 超时/传输故障分类为 `OAUTH_REFRESH_FAILED` | 跟进新的 OAuth 字段和刷新失败语义；Workers 不提供 Go singleflight 式等待共享结果；Home/Redis 401 恢复协议不适用 |
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理；request-scoped APICall proxy 见 Issue #96 |
 | Provider/System 代理 | 大体对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连；request-scoped custom header 已支持 | HTTPS proxy 双层 TLS/ALPN 需 Workers smoke，跟进 Issue #111 |
 | OpenAI-compatible 自定义上游 | 已对齐 | 可配置 base URL、API mode、模型、权重、Key、代理和 request-scoped dynamic headers | 配置型模型精确 thinking capability、优先级和热更新跟进 Issue #49 |
 | 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名；当前不按 Codex API-key 隐式注入内置模型 | 明确默认目录、默认图像模型、credential 匹配与陈旧目录清理策略，跟进 Issue #52；quota observation 见 #109 |
-| 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、max completion token、visibility、search-tool、priority 和模型名回写 | 跟进 Kimi K3/K3-256K 元数据、camelCase modality 兼容（Issue #95）及配置型 capability（Issue #49） |
+| 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、camelCase upstream modality aliases、context window、max completion token、visibility、search-tool、priority 和模型名回写 | 跟进 Kimi K3/K3-256K 静态元数据及配置型 capability（Issue #49） |
 | Usage/Token 规范化 | 大体对齐 | 已记录 prompt/completion/cached/total/费用，并规范化 Responses `reasoning_tokens` 与 `cached_tokens` detail | 继续跟进 canonical breakdown、partial/unclassified/inconsistent 与 Codex quota observation（Issue #109） |
 | 请求级日志与费用 | 项目差异 | 使用 D1/Queue 内建 | 不要求结构一致，只保证 Token 语义可靠 |
 | 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构；账号权重直接来自 D1 账号字段，不移植 auth-file 扫描响应拼装 |
@@ -154,7 +155,8 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
-| 2026-09-02 | `41fc5e13..17a65ee` | `14bd81b4`（PR #124）+ 跟进 Issues | 已完成该区间逐项分类并推进审阅基线。PR #124 同步了可安全适配 Workers 的 HTTP/Responses、Kimi、Codex request normalization、dynamic headers、401 分类、usage detail 与 model catalog 行为；CI 的 worker/web typecheck、tests、production build、Wrangler dry-run 和 Cloudflare Workers build 全部通过。调度 retry-round/candidate fairness、error-action/cooldown、quota snapshot、HTTPS proxy、registration epoch、`response.done`、Codex `reasoning_text`、Kimi tool schema 与 LCP session hierarchy 等仍按 Issue #94/#100/#108/#109/#111/#112/#113/#115/#116/#117 跟进；WebSocket/Claude/Gemini-only/Grok-only 变化继续排除。 |
+| 2026-09-02 | `41fc5e13..17a65ee` 后续验证收口 | `090183c8`（至 PR #129） | 保持 upstream review 基线 `17a65ee` 不变，在最新 `dev` 上完成此前分流的安全兼容项：#91（PR #119/#129）、#92（PR #124/#126）、#95（PR #122）、#101（PR #124/#128）、#108（PR #125）、#112（PR #121）、#114（PR #124）、#115/#116（PR #120）。#125/#126/#128/#129 分别经 Actions #592/#595/#587/#598 全绿、最终净 diff 和 unresolved review-thread 检查后合入；架构级 #94/#96/#100/#102/#104/#109/#111/#113/#117 与混合未完成项继续保留。 |
+| 2026-09-02 | `41fc5e13..17a65ee` | `14bd81b4`（PR #124）+ 跟进 Issues | 已完成该区间逐项分类并推进审阅基线。PR #124 同步了可安全适配 Workers 的 HTTP/Responses、Kimi、Codex request normalization、dynamic headers、401 分类、usage detail 与 model catalog 行为；CI 的 worker/web typecheck、tests、production build、Wrangler dry-run 和 Cloudflare Workers build 全部通过。当时尚未验证的调度、tool schema、`response.done`、reasoning_text 等项被分流为独立 Issue，后续完成情况见上一行；WebSocket/Claude/Gemini-only/Grok-only 变化继续排除。 |
 | 2026-08-03 | `bc71c77f..41fc5e13` | `2a057b44` | Codex OAuth refresh 在 Workers 中使用独立 30 秒 timeout signal；Codex 直连和账号级代理的超时/传输故障均分类为可观测的 `OAUTH_REFRESH_FAILED`。并发语义由 Durable Object refresh lock 提供唯一持有者，不复制 Go singleflight 的等待共享结果；测试覆盖并发唯一持有者及调用方取消后锁所有权保持。Claude OAuth/TLS handshake 与 Home client closure 继续排除。 |
 | 2026-07-31 | `a80e8082..4a315136` | 文档更新 | 4 个提交中 `7d00936a` 为 Kimi registry 增加 `kimi-k3-256k`，并更新 `kimi-k3` 的 1M context、65K output 与 `low/high/max` thinking metadata，属于 Kimi/provider-model registry 范围内实质变化。CFlareAIProxy 的公开目录来自 discovered models 与显式 routes，不复制上游静态目录，因此未硬编码新模型；待发现或配置该模型时验证能力与别名回写。`f179a0f4`、`4db8e120` 及合并提交 `4a315136` 为 Home/Redis/Go SDK 的 401 OAuth 恢复、token 指纹、选择重派发及 WebSocket retention，Workers 当前无对应 Home 协议，未移植。 |
 | 2026-07-30 | `a80e8082..4a315136` | 文档更新；Issue #55 补充 | `a80e8082` 为 Codex HTTP 请求新增可关闭的 cloaking 策略，但默认会在客户端、配置和自定义 header 之后强制覆盖固定 `User-Agent` 与 `Originator`，同时更新固定 UA 版本。该行为属于 Codex HTTP 范围内实质变化，但涉及官方客户端身份伪装、header 优先级、审计可观测性、API-key/OAuth 差异和合规决策，未直接移植；WebSocket 测试继续排除，已创建仅限 HTTP/SSE 的 Issue #55。 |
