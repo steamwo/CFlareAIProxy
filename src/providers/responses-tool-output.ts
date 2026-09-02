@@ -92,6 +92,6 @@ export function responsesToolOutputToChatContent(output: unknown): string | Arra
   const converted = convertedStructuredParts(structured);
   if (!converted) return serializedOutput(output);
   if (converted.hasImage) return converted.parts;
-  if (converted.allText) return converted.parts.map((part) => String(part.text ?? "")).join("");
+  if (converted.allText && converted.parts.length > 0) return converted.parts.map((part) => String(part.text ?? "")).join("");
   return serializedOutput(output);
 }
