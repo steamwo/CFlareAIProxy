@@ -50,6 +50,26 @@ describe("Codex client model catalog", () => {
     });
   });
 
+  it("preserves an empty supported reasoning levels array", () => {
+    const [model] = buildCodexClientModels([{
+      id: "budget-only",
+      x_cflare_endpoints: ["responses"],
+      x_cflare_capabilities: {},
+    }], undefined, "0.153.3");
+    expect(model).toMatchObject({ supported_reasoning_levels: [] });
+    expect(model).not.toHaveProperty("default_reasoning_level");
+  });
+
+  it("preserves an empty array when legacy filtering removes all reasoning levels", () => {
+    const [model] = buildCodexClientModels([{
+      id: "extended-only",
+      x_cflare_endpoints: ["responses"],
+      x_cflare_capabilities: { reasoningLevels: ["max", "ultra"] },
+    }], undefined, "0.143.9");
+    expect(model).toMatchObject({ supported_reasoning_levels: [] });
+    expect(model).not.toHaveProperty("default_reasoning_level");
+  });
+
   it("uses max context length overrides before legacy aliases", () => {
     const [model] = buildCodexClientModels([{
       id: "large-context",
