@@ -240,10 +240,8 @@ function buildEntry(
     entry.max_context_length = contextWindow;
   }
   if (maxTokens) entry.max_tokens = maxTokens;
-  if (reasoning.levels && reasoning.defaultLevel) {
-    entry.supported_reasoning_levels = reasoning.levels;
-    entry.default_reasoning_level = reasoning.defaultLevel;
-  }
+  entry.supported_reasoning_levels = reasoning.levels ?? [];
+  if (reasoning.defaultLevel) entry.default_reasoning_level = reasoning.defaultLevel;
   return entry;
 }
 
