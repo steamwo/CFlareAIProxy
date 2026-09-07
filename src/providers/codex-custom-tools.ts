@@ -46,23 +46,28 @@ function stableHash(value: string): string {
   return `${(left >>> 0).toString(36)}${(right >>> 0).toString(36)}`;
 }
 
+function sanitizeToolName(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
 function allocateToolName(metadata: ToolNameMetadata, original: string): string {
   const existing = metadata.shortByOriginal.get(original);
   if (existing) return existing;
 
-  let candidate = original;
-  const directlyAvailable = original.length <= 64
-    && (!metadata.usedNames.has(original) || metadata.originalByShort[original] === original);
+  const sanitized = sanitizeToolName(original);
+  let candidate = sanitized;
+  const directlyAvailable = sanitized.length <= 64
+    && (!metadata.usedNames.has(sanitized) || metadata.originalByShort[sanitized] === original);
   if (!directlyAvailable) {
     const suffix = `_${stableHash(original)}`;
-    candidate = `${original.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
+    candidate = `${sanitized.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
   }
 
   let collision = 0;
   while (metadata.usedNames.has(candidate) && metadata.originalByShort[candidate] !== original) {
     collision += 1;
     const suffix = `_${stableHash(original)}_${collision.toString(36)}`;
-    candidate = `${original.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
+    candidate = `${sanitized.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
   }
 
   metadata.usedNames.add(candidate);
@@ -151,9 +156,9 @@ function translatedTools(tools: unknown, metadata: ToolNameMetadata): unknown[] 
       type: "function",
       name: allocateToolName(metadata, named(fn.name)),
       parameters: record(fn.parameters),
+      strict: typeof fn.strict === "boolean" ? fn.strict : false,
     };
     if (typeof fn.description === "string") output.description = fn.description;
-    if (typeof fn.strict === "boolean") output.strict = fn.strict;
     return output;
   });
 }
