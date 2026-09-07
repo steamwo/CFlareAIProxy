@@ -427,7 +427,7 @@ export class AccountPool extends DurableObject<Env> {
       const base = payload.cooldownMs ?? 60_000;
       const cooldown = Math.min(15 * 60_000, base * 2 ** Math.min(4, failures - 1));
       this.ctx.storage.sql.exec(
-        "UPDATE pool_stats SET failures = ?, cooldown_until = ? WHERE credential_id = ?",
+        "UPDATE pool_stats SET failures = ?, cooldown_until = MAX(cooldown_until, ?) WHERE credential_id = ?",
         failures,
         Date.now() + cooldown,
         lease.credential_id,
