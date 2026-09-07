@@ -60,7 +60,7 @@ describe("Codex custom tool request translation", () => {
     expect(inputItems(translated.body).find((item) => item.call_id === "call-shared")?.type).toBe("function_call");
     expect(translated.body.tool_choice).toEqual({ type: "function", name: "shared" });
     expect(translated.body.tools).toEqual([
-      { type: "function", name: "shared", parameters: { type: "object" } },
+      { type: "function", name: "shared", parameters: { type: "object" }, strict: false },
       { type: "custom", name: "shared", description: "Custom form." },
     ]);
   });
@@ -84,5 +84,59 @@ describe("Codex custom tool request translation", () => {
       name: "shared",
       input: "raw input",
     });
+  });
+
+  it("defaults omitted function strict to false while preserving explicit values", () => {
+    const translated = translateCodexChatCustomTools({
+      messages: [{ role: "user", content: "Search." }],
+      tools: [
+        { type: "function", function: { name: "omitted", parameters: { type: "object" } } },
+        { type: "function", function: { name: "explicit_true", strict: true, parameters: { type: "object" } } },
+        { type: "function", function: { name: "explicit_false", strict: false, parameters: { type: "object" } } },
+      ],
+    }, "gpt-test");
+
+    expect(translated.body.tools).toEqual([
+      { type: "function", name: "omitted", parameters: { type: "object" }, strict: false },
+      { type: "function", name: "explicit_true", parameters: { type: "object" }, strict: true },
+      { type: "function", name: "explicit_false", parameters: { type: "object" }, strict: false },
+    ]);
+  });
+
+  it("sanitizes invalid tool name characters consistently across declarations, choices, and history", () => {
+    const originalName = "mcp.repo:read/file";
+    const translated = translateCodexChatCustomTools({
+      messages: [{
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "call-sanitized", type: "function", function: { name: originalName, arguments: "{}" } }],
+      }],
+      tools: [{ type: "function", function: { name: originalName, parameters: { type: "object" } } }],
+      tool_choice: { type: "function", function: { name: originalName } },
+    }, "gpt-test");
+
+    const tools = translated.body.tools as Array<Record<string, unknown>>;
+    const sanitizedName = tools[0]?.name as string;
+    expect(sanitizedName).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
+    expect(sanitizedName).toBe("mcp_repo_read_file");
+    expect(translated.toolNames[sanitizedName]).toBe(originalName);
+    expect(translated.body.tool_choice).toEqual({ type: "function", name: sanitizedName });
+    expect(inputItems(translated.body).find((item) => item.call_id === "call-sanitized")?.name).toBe(sanitizedName);
+  });
+
+  it("keeps sanitized-name collisions distinct and reversible", () => {
+    const translated = translateCodexChatCustomTools({
+      messages: [],
+      tools: [
+        { type: "function", function: { name: "repo.read", parameters: {} } },
+        { type: "function", function: { name: "repo:read", parameters: {} } },
+      ],
+    }, "gpt-test");
+
+    const tools = translated.body.tools as Array<Record<string, unknown>>;
+    const names = tools.map((tool) => tool.name as string);
+    expect(new Set(names).size).toBe(2);
+    expect(names.every((name) => /^[A-Za-z0-9_-]{1,64}$/.test(name))).toBe(true);
+    expect(names.map((name) => translated.toolNames[name]).sort()).toEqual(["repo.read", "repo:read"]);
   });
 });
