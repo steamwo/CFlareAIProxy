@@ -119,6 +119,56 @@ function chatToolChoiceToResponses(value: unknown): unknown {
   return value;
 }
 
+const CODEX_SCHEMA_MAP_KEYWORDS = ["properties", "$defs", "definitions", "dependentSchemas"] as const;
+const CODEX_SCHEMA_VALUE_KEYWORDS = [
+  "items", "prefixItems", "additionalProperties", "unevaluatedProperties", "propertyNames", "contains",
+  "not", "if", "then", "else", "allOf", "anyOf", "oneOf",
+] as const;
+
+function hasUnsupportedUnicodePropertyEscape(value: string): boolean {
+  return /\\[pP]\{[^}]+\}/.test(value);
+}
+
+function normalizeCodexSchemaNode(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => normalizeCodexSchemaNode(item));
+  if (!value || typeof value !== "object") return value;
+
+  const schema = value as Record<string, unknown>;
+  const output: Record<string, unknown> = { ...schema };
+  if (typeof schema.pattern === "string" && hasUnsupportedUnicodePropertyEscape(schema.pattern)) delete output.pattern;
+
+  const patternProperties = record(schema.patternProperties);
+  if (Object.keys(patternProperties).length > 0) {
+    const normalized: Record<string, unknown> = {};
+    for (const [pattern, subSchema] of Object.entries(patternProperties)) {
+      if (hasUnsupportedUnicodePropertyEscape(pattern)) continue;
+      normalized[pattern] = normalizeCodexSchemaNode(subSchema);
+    }
+    output.patternProperties = normalized;
+  }
+
+  for (const keyword of CODEX_SCHEMA_MAP_KEYWORDS) {
+    const children = record(schema[keyword]);
+    if (Object.keys(children).length === 0) continue;
+    output[keyword] = Object.fromEntries(Object.entries(children).map(([key, child]) => [key, normalizeCodexSchemaNode(child)]));
+  }
+  for (const keyword of CODEX_SCHEMA_VALUE_KEYWORDS) {
+    if (!Object.prototype.hasOwnProperty.call(schema, keyword)) continue;
+    output[keyword] = normalizeCodexSchemaNode(schema[keyword]);
+  }
+  return output;
+}
+
+export function normalizeCodexToolSchemas(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((rawTool) => {
+    if (!rawTool || typeof rawTool !== "object" || Array.isArray(rawTool)) return rawTool;
+    const tool = rawTool as Record<string, unknown>;
+    if (!tool.parameters || typeof tool.parameters !== "object" || Array.isArray(tool.parameters)) return rawTool;
+    return { ...tool, parameters: normalizeCodexSchemaNode(tool.parameters) };
+  });
+}
+
 function codexIdPrefix(item: Record<string, unknown>): string | undefined {
   return item.type === "message" ? "msg"
     : item.type === "reasoning" ? "rs"
@@ -292,6 +342,7 @@ function normalizeCodexBody(body: Record<string, unknown>, model: string): Recor
   const output: Record<string, unknown> = { ...body, model, store: false };
   output.instructions = typeof output.instructions === "string" ? output.instructions : "";
   output.input = normalizeCodexInputMessageIds(stripNestedPromptCacheBreakpoints(output.input));
+  output.tools = normalizeCodexToolSchemas(output.tools);
   delete output.previous_response_id;
   delete output.generate;
   delete output.prompt_cache_retention;

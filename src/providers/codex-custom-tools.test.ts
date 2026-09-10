@@ -139,4 +139,32 @@ describe("Codex custom tool request translation", () => {
     expect(names.every((name) => /^[A-Za-z0-9_-]{1,64}$/.test(name))).toBe(true);
     expect(names.map((name) => translated.toolNames[name]).sort()).toEqual(["repo.read", "repo:read"]);
   });
+
+  it("normalizes unsupported Unicode property escapes after custom-tool translation", () => {
+    const translated = translateCodexChatCustomTools({
+      messages: [],
+      tools: [{
+        type: "function",
+        function: {
+          name: "artifact",
+          parameters: {
+            type: "object",
+            properties: {
+              field: { type: "string", pattern: "\\p{L}+" },
+              id: { type: "string", pattern: "^[0-9]+$" },
+            },
+          },
+        },
+      }],
+    }, "gpt-test");
+
+    const tools = translated.body.tools as Array<Record<string, unknown>>;
+    expect(tools[0]?.parameters).toEqual({
+      type: "object",
+      properties: {
+        field: { type: "string" },
+        id: { type: "string", pattern: "^[0-9]+$" },
+      },
+    });
+  });
 });

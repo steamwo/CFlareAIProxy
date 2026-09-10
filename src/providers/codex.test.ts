@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chatToResponses, normalizeCodexInputMessageIds } from "./codex";
+import { chatToResponses, normalizeCodexInputMessageIds, normalizeCodexToolSchemas } from "./codex";
 
 function toolOutput(content: unknown): unknown {
   const converted = chatToResponses({
@@ -63,6 +63,52 @@ describe("Codex Chat Completions tool output conversion", () => {
   it("does not treat invalid image-shaped objects as images", () => {
     const invalid = JSON.stringify([{ type: "input_image", detail: "low" }]);
     expect(toolOutput(invalid)).toBe(invalid);
+  });
+});
+
+describe("Codex tool schema normalization", () => {
+  it("strips unsupported Unicode property escapes only from schema pattern positions", () => {
+    const tools = normalizeCodexToolSchemas([{
+      type: "function",
+      name: "artifact",
+      parameters: {
+        type: "object",
+        properties: {
+          field: { type: "string", pattern: "^(?!__.*__$)[^\\p{Cc}\\p{Cf}]+$" },
+          asset_id: { type: "string", pattern: "^[0-9a-f]{32}$" },
+          metadata: {
+            type: "object",
+            default: { pattern: "\\p{L}+" },
+            enum: [{ pattern: "\\p{N}+" }],
+          },
+        },
+      },
+    }]) as Array<Record<string, unknown>>;
+    const params = tools[0]?.parameters as Record<string, unknown>;
+    const properties = params.properties as Record<string, Record<string, unknown>>;
+    const metadata = properties.metadata as Record<string, unknown>;
+
+    expect(properties.field).toEqual({ type: "string" });
+    expect(properties.asset_id).toEqual({ type: "string", pattern: "^[0-9a-f]{32}$" });
+    expect(metadata.default).toEqual({ pattern: "\\p{L}+" });
+    expect(metadata.enum).toEqual([{ pattern: "\\p{N}+" }]);
+  });
+
+  it("drops unsupported patternProperties keys and recursively normalizes safe subschemas", () => {
+    const tools = normalizeCodexToolSchemas([{
+      type: "function",
+      name: "patterns",
+      parameters: {
+        type: "object",
+        patternProperties: {
+          "^\\p{L}+$": { type: "string" },
+          "^[a-z]+$": { type: "string", pattern: "\\P{Cc}+" },
+        },
+      },
+    }]) as Array<Record<string, unknown>>;
+    const params = tools[0]?.parameters as Record<string, unknown>;
+
+    expect(params.patternProperties).toEqual({ "^[a-z]+$": { type: "string" } });
   });
 });
 

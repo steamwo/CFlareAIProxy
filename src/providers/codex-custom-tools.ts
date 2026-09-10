@@ -1,5 +1,5 @@
 import type { ProxyRequestContext, UpstreamBuildResult } from "../types";
-import { chatToResponses, buildCodexRequest } from "./codex";
+import { chatToResponses, buildCodexRequest, normalizeCodexToolSchemas } from "./codex";
 
 type ToolKind = "function" | "custom";
 
@@ -204,7 +204,7 @@ function patchTranslatedBody(
   }
 
   const tools = translatedTools(original.tools, metadata);
-  if (tools) translated.tools = tools;
+  if (tools) translated.tools = normalizeCodexToolSchemas(tools);
   if (original.tool_choice !== undefined) translated.tool_choice = translatedToolChoice(original.tool_choice, metadata);
   return translated;
 }

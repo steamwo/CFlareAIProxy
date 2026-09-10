@@ -5,9 +5,9 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: 7fac6b15bcfe5ea55c18c9eaec8e5b7e6457d974 -->
-<!-- local-implementation-ref: 7e91167ccc76d1624f776127155af8e47e6b61de -->
-<!-- last-reviewed: 2026-09-09 -->
+<!-- upstream-ref: d1a024e9400bc65bd78ccd908945cf2eacc2835e -->
+<!-- local-implementation-ref: 07d2bb6d88163f0d9829c80a4246922eba395e88 -->
+<!-- last-reviewed: 2026-09-10 -->
 
 ## 1. 当前基线
 
@@ -15,12 +15,12 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `7fac6b15bcfe5ea55c18c9eaec8e5b7e6457d974` |
+| 已审阅上游提交 | `d1a024e9400bc65bd78ccd908945cf2eacc2835e` |
 | 本地分支 | `dev` |
-| 本地实现基线 | `7e91167ccc76d1624f776127155af8e47e6b61de` |
-| 审阅日期 | 2026-09-09 |
+| 本地实现基线 | `07d2bb6d88163f0d9829c80a4246922eba395e88` |
+| 审阅日期 | 2026-09-10 |
 
-本轮累计审阅范围为 `41fc5e13..7fac6b15`：
+本轮累计审阅范围为 `41fc5e13..d1a024e9`：
 
 - 已在 PR #124 / merge `14bd81b4` 中同步可安全适配 Workers 的 HTTP 行为：request-scoped custom headers、空 Codex credential 认证头清理、Codex `Session-Id`/会话 header 透传、prompt-cache 字段清理、collision-safe Responses input IDs、Kimi reasoning/incomplete/partial tool-call 语义、Responses tool-output 文本/图片规范化、Responses usage detail normalization、401 request-scoped `invalid_request_error` 不冷却 credential、Codex client catalog 新字段与 max completion token、以及严格的 OpenAI-compatible Responses SSE EOF/error 处理。
 - PR #124 的 GitHub Actions 已通过 worker/web typecheck、完整测试、production web build 和 Wrangler dry-run；Cloudflare Workers build 也成功。`dev` 后续 PR #129 / merge `090183c8` 已补齐 HTTP 402 后 credential cooldown/rebind 行为。
@@ -30,7 +30,8 @@
 - `c76dfd4..934fb792` 的 14 个提交已逐提交、逐文件分类：`1c22598d` 修复后续失败缩短既有 cooldown deadline 的问题，本地已在 AccountPool credential-wide cooldown 上使用单调 deadline，并增加并发租约回归测试；PR #140 的 GitHub Actions worker/web typecheck、完整测试、production build、Wrangler dry-run 全部通过。`fa01468e` 将非 credential-scoped result 更新收窄到 canonical request/route model scheduler shards，并缓存 supported-model set/registry epoch；本地尚无 model-scoped pool state，因此已补充 #133 的架构验收，不把该优化机械移植到 credential-wide DO。`00c63a56` 只扩展 pluginhost outbound HTTP wire profile（header casing/order、HTTP/1.1、compression 等），本地没有 pluginhost HTTP bridge，且不改变当前 core provider proxy 行为。其余提交为 Antigravity/Gemini、Grok/xAI WebSocket、Claude 或赞助/README，按范围排除。
 - `934fb792..ba7e5583` 的 Codex HTTP/Responses 变化已逐提交、逐文件审阅：`d01516c1` 的 function-tool 缺省 `strict:false` 与 `bee20b99` 的 `[A-Za-z0-9_-]` tool-name sanitization/64 字符限制/碰撞安全可逆映射已在 PR #142（实现提交 `7e91167c`，merge `dd41a737`）同步，覆盖 declarations、`tool_choice` 与历史 assistant tool calls，并增加 omitted/explicit strict、非法字符传播和 sanitization collision 回归测试；PR CI 的 worker/web TypeScript typecheck、完整测试、production build、Wrangler dry-run 均通过。`bf20b999` constant-union schema normalization 与空 `response.incomplete`、`8696585c` 的 `service_tier` 和 cache-write token details、`82f4f370` Multi-Agent dotted-name 恢复、`03a054e3` 无歧义 namespace recovery、`ba7e5583` retry-advising `server_error` bootstrap failover 继续由 Issue #141 跟进，不在未验证状态下直接合入。
 - `ba7e5583..7fac6b15` 的 28 个提交已逐提交、逐文件审阅：`d4146bde` 为 Kimi 新增原生 OpenAI Responses upstream 路径（stream/non-stream 直接 `/v1/responses`，不再经 Chat bridge），会改变 wire protocol、tool/reasoning/incomplete/usage/error 路径，已创建 Issue #144 进行显式 Workers 架构与兼容验证，不直接切换生产路径；`48e5e9e0` 仅为 Go 常驻 OAuth refresh loop 的最大 30 秒 sleep，Workers 无常驻 timer loop；`1d5f7b2a` 清除 Go `time.Time` monotonic clock 部分，JS/Workers `Date` 无对应状态；`39058915`、`6b187e77`、`1119ef14` 的 session hierarchy / canonical UUIDv8 继续归入 #117；`7fac6b15` 的 `$schema/$id` tool schema 清理只修改 Claude→Codex translator，按当前范围排除 Claude 协议。其余变化为 Gemini/Antigravity、Claude、plugin-store/Home/Redis、logging、赞助/文档等范围外内容。
-- 仍需架构决策或单独验证的范围继续保留 Issue：credential retry-round 与 exclusion（#94）、request-scoped error action/cooldown 继承（#100）、candidate filtering 后 RR/SWRR 公平性（#108）、Codex quota observation snapshot（#109）、旧 Codex client reasoning-level handler 透传（#110）、HTTPS proxy 双层 TLS/ALPN（#111）、Kimi tool schema `$ref` normalization（#112）、registration epoch/error precedence 与 refresh state merge（#113）、`response.done` HTTP/SSE 终止语义（#115）、Codex `reasoning_text` Chat 转换（#116）、LCP/parent-subagent/fork session affinity（#117）、OAuth token expiry/refresh failure（#131）、usage/token safe-integer accounting（#132）、model-scoped quota cooldown/targeted scheduler state（#133）、orphan delegation compatibility（#134）、OpenAI-compatible 429/TPM bounded wait（#136）、Codex usage-limit credential scope/quota reset/candidate filtering（#138）、post-934fb792 Codex HTTP/Responses 剩余兼容行为（#141），以及 Kimi 原生 Responses upstream 路径（#144）。
+- `7fac6b15..d1a024e9` 的 10 个提交已逐提交、逐文件审阅：`e56abd56` 与 `37ce368c` 在 Codex executor 通用 tool-schema 出站路径中清理 Python/下游不支持的 Unicode property escape `\p{...}`/`\P{...}`，并处理 JSON `\u` 解码后的绕过和 `patternProperties` key；本地已按 JSON Schema 位置做无状态递归规范化，保留 `default`/`enum` 等非 schema 用户数据，并覆盖 native Responses 与 Chat/custom-tool 路径及回归测试。`b064b832` 新增可配置 model-level quota cooling，进一步确认 #133 需引入 model-scoped error/cooldown state，未直接改变 credential-wide DO。`aedc9e6a` 在所有候选凭据均发生永久认证失败后返回 non-retryable `upstream_authentication_required`，属于 selector 聚合错误语义，已补充 #100。`3bf787fc` 让 canonical session identity 同时驱动 `$CPA-SESSION-ID` dynamic header，已补充 #117，避免 affinity/header 各自解析。`d1a024e9` 新增 `gpt-image-2.5`/`-flare`/`-sunburst` built-in registry 及直接 `/images/generations`/`images/edits` 执行；本地不隐式宣传未验证 built-ins，且无对应完整 direct-image 路径，已创建 #146。`60e5b8bd` 为 auth-file 管理端显式 force-refresh endpoint/Go manager 操作，本地 D1/Workers 管理模型无 auth-file 生命周期，不机械移植；`0796d6d1` 为 pluginhost session-affinity lookup callback，本地无 pluginhost；`a59b1764` 为 Claude usage，排除；`db011593` 为 schema 修复合并提交，无额外语义。
+- 仍需架构决策或单独验证的范围继续保留 Issue：credential retry-round 与 exclusion（#94）、request-scoped error action/cooldown 与终止型聚合认证错误（#100）、candidate filtering 后 RR/SWRR 公平性（#108）、Codex quota observation snapshot（#109）、旧 Codex client reasoning-level handler 透传（#110）、HTTPS proxy 双层 TLS/ALPN（#111）、Kimi tool schema `$ref` normalization（#112）、registration epoch/error precedence 与 refresh state merge（#113）、`response.done` HTTP/SSE 终止语义（#115）、Codex `reasoning_text` Chat 转换（#116）、LCP/parent-subagent/fork session affinity 与 canonical session/header 一致性（#117）、OAuth token expiry/refresh failure（#131）、usage/token safe-integer accounting（#132）、model-scoped quota cooldown/targeted scheduler state（#133）、orphan delegation compatibility（#134）、OpenAI-compatible 429/TPM bounded wait（#136）、Codex usage-limit credential scope/quota reset/candidate filtering（#138）、post-934fb792 Codex HTTP/Responses 剩余兼容行为（#141）、Kimi 原生 Responses upstream 路径（#144），以及 Codex GPT Image 2.5 registry/direct image routing（#146）。
 - Responses WebSocket ping/keepalive、Claude 协议/Claude OAuth、Home/Redis、仅 Gemini/Grok/Antigravity 专用变化、赞助和纯文档继续排除；推进 `upstream-ref` 只表示“已审阅并分类”，不表示这些能力已实现。
 
 ## 2. 对齐程度
@@ -53,7 +54,7 @@
 | 能力 | 程度 | CFlareAIProxy 状态 | 后续动作 |
 | --- | --- | --- | --- |
 | OpenAI Chat Completions | 已对齐 | 支持流式、非流式、tools、多账号路由和 OpenAI-compatible 上游 | 跟进上游新增字段和错误语义 |
-| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses、tool-output 文本/图片规范化、严格 SSE EOF/error 处理和可选 Multi-Agent V2；Chat function tool 缺省 `strict:false` 与 Codex tool-name sanitization 已同步 | 补齐 `response.done`、Codex reasoning_text、orphan delegation compatibility、schema-union/empty-incomplete、usage/service-tier details、namespace recovery 与剩余 custom tool 交错调用测试，跟进 Issue #115/#116/#134/#141/#38 |
+| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses、tool-output 文本/图片规范化、严格 SSE EOF/error 处理和可选 Multi-Agent V2；Chat function tool 缺省 `strict:false`、Codex tool-name sanitization 及不兼容 Unicode schema regex 清理已同步 | 补齐 `response.done`、Codex reasoning_text、orphan delegation compatibility、constant-union/empty-incomplete、usage/service-tier details、namespace recovery 与剩余 custom tool 交错调用测试，跟进 Issue #115/#116/#134/#141/#38 |
 | OpenAI Completions | 大体对齐 | 可路由 generic、Codex、Kimi | 保持兼容，不扩大旧协议特性 |
 | Kimi Chat 上游 | 已对齐 | 专用 adapter，当前生产路径固定走 Chat Completions；reasoning placeholder 与同轮 reasoning/tool 行为已补强 | 持续对比 `kimi_executor.go`；tool schema `$ref` normalization 跟进 Issue #112；原生 Responses upstream 评估见 #144 |
 | Kimi 模型名归一化 | 已对齐 | 去除 `[1m]` 后缀 | 跟进上游新增 suffix/alias 规则 |
@@ -61,29 +62,29 @@
 | Kimi 多轮工具消息修复 | 已对齐 | 删除无效空 assistant、补 `reasoning_content`、修复 `call_id/tool_call_id`，并保持 Responses 同轮 reasoning/tool 连续性 | 新增上游测试时同步移植测试语义 |
 | Kimi Responses/Completions 转换 | 大体对齐 | 当前 Responses 经 Chat bridge 转换，支持文字、图片、工具定义、tool choice、reasoning fallback、incomplete/content-filter 和 partial tool-call completion safety；尚未启用上游新增的原生 `/responses` wire path | 原生 Responses upstream 路径及 endpoint/stream/usage/error 边界跟进 Issue #144；其余 item/event 与 schema normalization 继续跟进 #112 |
 | Kimi 流式 usage | 大体对齐 | 自动请求 `include_usage` 并归集基础 Token；Responses detail 已规范化 | 接入更完整 canonical Token 质量模型；启用原生 Responses 前验证 usage detail 保真（#144） |
-| Codex Responses 请求归一化 | 大体对齐 | 清理不兼容 prompt-cache 字段、collision-safe input IDs、转换 tools/tool choice、function tool 缺省 `strict:false`、tool name 字符集/长度 sanitization 与可逆恢复，使用 canonical `Session-Id` 并透传 Codex 会话 header；当前不强制伪装官方 Codex `User-Agent`/`Originator` | 评估派生会话 UUID（Issue #35）、剩余 custom tool/name conflict（Issue #38）、原生 session signal 优先级（Issue #42）、HTTP 身份 header 策略（Issue #55）、orphan delegation（Issue #134）及 namespace/schema compatibility（Issue #141） |
-| Codex `response.failed/error` | 大体对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误；无 payload 的异常 EOF 不再伪装成功 | 对比上游新增 code/type 分类；`response.done` 跟进 #115；usage-limit credential scope/reset precedence 跟进 #138；retry-advising `server_error` bootstrap failover 跟进 #141 |
+| Codex Responses 请求归一化 | 大体对齐 | 清理不兼容 prompt-cache 字段、collision-safe input IDs、转换 tools/tool choice、function tool 缺省 `strict:false`、tool name 字符集/长度 sanitization 与可逆恢复，并按 schema 位置清理不兼容 Unicode property escape pattern/patternProperties key；使用 canonical `Session-Id` 并透传 Codex 会话 header；当前不强制伪装官方 Codex `User-Agent`/`Originator` | 评估派生会话 UUID（Issue #35）、剩余 custom tool/name conflict（Issue #38）、原生 session signal 优先级（Issue #42）、HTTP 身份 header 策略（Issue #55）、orphan delegation（Issue #134）及剩余 namespace/schema compatibility（Issue #141） |
+| Codex `response.failed/error` | 大体对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误；无 payload 的异常 EOF 不再伪装成功 | 对比上游新增 code/type 分类；`response.done` 跟进 #115；usage-limit credential scope/reset precedence 跟进 #138；retry-advising `server_error` bootstrap failover 跟进 #141；候选耗尽后的 terminal auth aggregate 跟进 #100 |
 | Codex 中断流检测 | 已对齐 | 未收到已知成功终止事件时视为失败，不伪造成功；严格处理 SSE EOF/error | 补齐 `response.done` 终止事件，跟进 Issue #115 |
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
-| Codex custom tool HTTP/SSE | 大体对齐 | function tool 基础转换、缺省 strict、名称字符集/长度规范化、碰撞安全和可逆恢复已覆盖；仍未完整验证复杂 custom tool、交错调用、done fallback、重复抑制与 orphan delegation | 跟进 Issue #38/#134/#141，不涉及 WebSocket |
+| Codex custom tool HTTP/SSE | 大体对齐 | function tool 基础转换、缺省 strict、名称字符集/长度规范化、碰撞安全和可逆恢复已覆盖；tool parameters 会清理下游不支持的 Unicode property escape regex 且不触碰 `default`/`enum` 用户数据；仍未完整验证复杂 custom tool、交错调用、done fallback、重复抑制与 orphan delegation | 跟进 Issue #38/#134/#141，不涉及 WebSocket |
 | Codex tool output 图片 | 大体对齐 | Responses tool-output 文本/图片已做结构化规范化；仍需覆盖复杂递归与混合内容 | 跟进 Issue #42，仅限 HTTP/SSE |
-| Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，覆盖 reasoning、modalities、context window、max completion token、visibility、search-tool、service tier、稳定 priority、V2 及新增 model message/schema 字段；builder 支持旧客户端过滤 max/ultra，并在无兼容 reasoning level 时显式保留 `supported_reasoning_levels: []` | `/v1/models` 的 client-version 透传仍跟进 Issue #110；默认内置目录与 `gpt-6-astra` capability 策略见 Issue #52 |
+| Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，覆盖 reasoning、modalities、context window、max completion token、visibility、search-tool、service tier、稳定 priority、V2 及新增 model message/schema 字段；builder 支持旧客户端过滤 max/ultra，并在无兼容 reasoning level 时显式保留 `supported_reasoning_levels: []` | `/v1/models` 的 client-version 透传仍跟进 Issue #110；默认内置目录策略保持保守；`gpt-image-2.5*` registry/visibility/direct images 见 #146 |
 | Codex Multi-Agent V2 | 大体对齐 | 默认关闭；按 route/provider 开启；仅目标 UA；支持 spawn/agent/namespace、非 Codex 转换及流式/非流式恢复 | orphan delegation compatibility 跟进 Issue #134；dotted collaboration name / namespace recovery 跟进 #141；LCP fork/subagent affinity 跟进 Issue #117；WebSocket 单独设计 |
 | Codex Live / WebRTC / sideband | 未对齐 | 当前仅实现 HTTP/SSE，不提供媒体 relay 或 TCP candidate proxy | 重大安全与生命周期设计，跟进 Issue #17 |
 | Codex reasoning replay/signature cache | 未对齐 | 尚未实现跨请求 reasoning/signature 重放缓存 | 评估 Workers KV/DO 实现 |
 | Codex Responses WebSocket | 未对齐 | Workers 网关当前仅实现 HTTP/SSE | 未单独批准前不自动移植；上游 ping/keepalive 等专用变化继续排除 |
 | Codex Alpha Search / 特殊路由插件 | 未对齐 | 尚未实现插件式模型选择 | 有真实使用需求后再跟进 |
-| 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | retry-round/exclusion、candidate filtering 公平性及 LCP hierarchy 分别跟进 Issue #94/#108/#117；registration epoch/refresh merge 跟进 #113；model-scoped cooldown 与 targeted model-state 更新跟进 #133；prevalidated candidate context 跟进 #138 |
-| 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断；request-scoped 401 invalid_request 不污染账号可用性；HTTP 402 已进入 credential cooldown/rebind；credential-wide 后续失败只延长、不缩短仍有效 cooldown deadline | request-scoped error action/disable-cooling 继承继续跟进 Issue #100；429 retry-round floor 见 #94；OpenAI-compatible TPM bounded wait 见 #136；model-scoped quota 见 #133；Codex credential-wide usage limit 与 transient/model scope 区分见 #138；retry-advising server-error failover 见 #141 |
-| Token/OAuth 刷新锁 | 大体对齐 | Durable Object 选出唯一 refresh 持有者；Codex 直连与账号级代理 refresh 使用独立 30 秒超时；Codex 超时/传输故障分类为 `OAUTH_REFRESH_FAILED` | JWT `exp`、refresh failure 保留未过期 token、已过期 credential selection 阻断及 24h proactive lead 跟进 Issue #131；refresh three-way state merge/epoch ordering 跟进 #113；Workers 不复制 Go singleflight/常驻 timer loop 等进程语义 |
+| 多账号调度 | 大体对齐 | D1 存账号，Durable Object 管租约、权重、优先级、并发和会话亲和；无进程内 executor 重绑定 | retry-round/exclusion、candidate filtering 公平性及 LCP hierarchy 分别跟进 Issue #94/#108/#117；registration epoch/refresh merge 跟进 #113；model-scoped cooldown 与 targeted model-state 更新跟进 #133；prevalidated candidate context 跟进 #138；候选全部永久认证失败后的 terminal aggregate 跟进 #100 |
+| 账号冷却与失败切换 | 大体对齐 | 认证/限额/服务错误分类后进入账号冷却或 provider 熔断；request-scoped 401 invalid_request 不污染账号可用性；HTTP 402 已进入 credential cooldown/rebind；credential-wide 后续失败只延长、不缩短仍有效 cooldown deadline | request-scoped error action/disable-cooling 与 terminal auth aggregate 继续跟进 Issue #100；429 retry-round floor 见 #94；OpenAI-compatible TPM bounded wait 见 #136；model-scoped quota 见 #133；Codex credential-wide usage limit 与 transient/model scope 区分见 #138；retry-advising server-error failover 见 #141 |
+| Token/OAuth 刷新锁 | 大体对齐 | Durable Object 选出唯一 refresh 持有者；Codex 直连与账号级代理 refresh 使用独立 30 秒超时；Codex 超时/传输故障分类为 `OAUTH_REFRESH_FAILED` | JWT `exp`、refresh failure 保留未过期 token、已过期 credential selection 阻断及 24h proactive lead 跟进 Issue #131；refresh three-way state merge/epoch ordering 跟进 #113；上游 auth-file force-refresh 管理 endpoint 不适用于 D1/Workers auth-file-free 生命周期；Workers 不复制 Go singleflight/常驻 timer loop 等进程语义 |
 | 账号级代理 | 大体对齐 | `proxy_url/proxyUrl` 覆盖 provider/system proxy；支持 `direct/none` | 补齐模型发现和额度刷新使用账号代理；request-scoped APICall proxy 见 Issue #96 |
 | Provider/System 代理 | 大体对齐 | 原生 HTTP CONNECT、SOCKS5、TLS；失败不静默直连；request-scoped custom header 已支持 | HTTPS proxy 双层 TLS/ALPN 需 Workers smoke，跟进 Issue #111 |
 | OpenAI-compatible 自定义上游 | 已对齐 | 可配置 base URL、API mode、模型、权重、Key、代理和 request-scoped dynamic headers | 配置型模型精确 thinking capability、优先级和热更新跟进 Issue #49；TPM bounded wait 跟进 Issue #136 |
-| 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名；当前不按 Codex API-key 隐式注入内置模型 | 明确默认目录、`gpt-6-astra` capability、默认图像模型、credential 匹配与陈旧目录清理策略，跟进 Issue #52；quota observation 见 #109 |
-| 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、max completion token、visibility、search-tool、priority 和模型名回写 | 跟进 Kimi K3/K3-256K 元数据、camelCase modality 兼容（Issue #95）及配置型 capability（Issue #49）；Home-dispatched capability 生命周期不适用当前 Workers 架构 |
-| Usage/Token 规范化 | 大体对齐 | 已记录 prompt/completion/cached/total/费用，并规范化 Responses `reasoning_tokens` 与 `cached_tokens` detail | canonical breakdown、partial/unclassified/inconsistent、Codex quota observation 继续跟进 Issue #109；JS safe-integer 与 D1 边界跟进 Issue #132；`service_tier` / cache-write token details 跟进 #141；session hierarchy 元数据传播不视为 token normalization |
+| 模型发现与公开别名 | 大体对齐 | 动态发现、静态路由和公开模型别名；当前不按 Codex API-key 隐式注入内置模型 | 保持“不宣传未验证 built-ins”的既有决策；`gpt-image-2.5*` discovered/explicit capability、visibility 与 direct image endpoint 评估见 #146；quota observation 见 #109 |
+| 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、max completion token、visibility、search-tool、priority 和模型名回写 | 跟进 Kimi K3/K3-256K 元数据、camelCase modality 兼容（Issue #95）及配置型 capability（Issue #49）；GPT Image 2.5 元数据见 #146；Home-dispatched capability 生命周期不适用当前 Workers 架构 |
+| Usage/Token 规范化 | 大体对齐 | 已记录 prompt/completion/cached/total/费用，并规范化 Responses `reasoning_tokens` 与 `cached_tokens` detail | canonical breakdown、partial/unclassified/inconsistent、Codex quota observation 继续跟进 Issue #109；JS safe-integer 与 D1 边界跟进 Issue #132；`service_tier` / cache-write token details 跟进 #141；GPT Image usage 若实施 direct image 路径需纳入 #146；session hierarchy 元数据传播不视为 token normalization |
 | 请求级日志与费用 | 项目差异 | 使用 D1/Queue 内建 | 不要求结构一致，只保证 Token 语义可靠 |
-| 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构；账号权重直接来自 D1 账号字段，不移植 auth-file 扫描响应拼装 |
+| 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构；账号权重直接来自 D1 账号字段，不移植 auth-file 扫描/force-refresh endpoint 的文件生命周期 |
 | Gemini / Interactions | 未对齐 | 当前仅有部分 Google adapter 基础 | 另立范围后实施 |
 | Grok/xAI | 未对齐 | 当前无完整 OAuth executor | 另立范围后实施 |
 | Claude 协议 | 暂不跟进 | 按当前决策暂不实施 Claude 请求/响应兼容 | 不因上游更新自动移植 |
@@ -110,10 +111,11 @@
 - `internal/client/codex/models/**`
 - `internal/client/codex/optimize-multi-agent-v2/**`
 - `internal/runtime/executor/helps/codex_multi_agent_v2.go`
+- `internal/runtime/executor/helps/codex_tool_schema.go`
 - `internal/client/codex/live/**`
 - `internal/config/codex_live.go`
 
-重点关键词：`response.failed`、`response.completed`、`response.done`、`response.output_item.done`、`response.reasoning_text`、`custom_tool_call`、`response.custom_tool_call_input`、`input_image`、`image_url`、incomplete/disconnected stream、usage limit、capacity、context length、reasoning replay/signature、`minimal` reasoning、`prompt_cache_key`、`Session-Id`、conversation identity、`spawn_agent`、`agent_message`、orphan delegation、model catalog、`User-Agent`、`Originator`、Codex cloaking、WebRTC、sideband、ICE/STUN/TCP candidate。
+重点关键词：`response.failed`、`response.completed`、`response.done`、`response.output_item.done`、`response.reasoning_text`、`custom_tool_call`、`response.custom_tool_call_input`、`input_image`、`image_url`、`patternProperties`、Unicode property escape、incomplete/disconnected stream、usage limit、capacity、context length、reasoning replay/signature、`minimal` reasoning、`prompt_cache_key`、`Session-Id`、conversation identity、`spawn_agent`、`agent_message`、orphan delegation、model catalog、`gpt-image-2.5`、`User-Agent`、`Originator`、Codex cloaking、WebRTC、sideband、ICE/STUN/TCP candidate。
 
 ### 通用 P1
 
@@ -160,6 +162,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-09-10 | `7fac6b15..d1a024e9` | `07d2bb6d`（PR #147）+ #100/#117/#133/#141/#146 | 已完成 10 个新增提交逐提交、逐文件审阅。`e56abd56`/`37ce368c` 的 Codex 通用 tool-schema Unicode property escape/patternProperties 防护已按 Workers 无状态请求规范化同步，覆盖 native Responses 与 Chat/custom-tool 路径并保留非 schema `default`/`enum` 数据。`b064b832` model-level cooling 补充 #133；`aedc9e6a` 候选耗尽后的 non-retryable terminal auth 补充 #100；`3bf787fc` canonical session/header 一致性补充 #117；`d1a024e9` GPT Image 2.5 built-in registry 与 direct image execution 建立 #146；`60e5b8bd` auth-file force-refresh 管理生命周期、`0796d6d1` pluginhost callback 不适用当前 Workers 架构；Claude/merge-only 变化按规则排除。PR #147 的验证结果以合入时 GitHub Actions 为准。 |
 | 2026-09-09 | `ba7e5583..7fac6b15` | 文档更新；Issue #144 | 已完成 28 个新增提交的逐提交、逐文件审阅并推进基线。`d4146bde` 为 Kimi 新增原生 OpenAI Responses upstream wire path：stream/non-stream 直接请求 Kimi `/v1/responses`，不再通过 Chat bridge；本地当前仍将 Responses 转成 Chat 后发 `/chat/completions`，该切换会改变 tool/reasoning/incomplete/usage/error 与 endpoint override 语义，因此创建 #144 做显式 Workers 兼容设计与验收，不直接合入。`48e5e9e0` 的 refresh-loop 30 秒最大 sleep 与 `1d5f7b2a` 的 Go monotonic clock 清理在 Workers 无对应运行时状态；`39058915`/`6b187e77`/`1119ef14` 的 session hierarchy/UUIDv8 继续归入 #117；`7fac6b15` 仅修改 Claude→Codex schema normalization，按 Claude 协议排除。其余 Gemini/Antigravity、Claude、plugin-store/Home/Redis、logging、赞助/文档变化按规则排除。本轮无运行时代码变更，`local-implementation-ref` 保持 `7e91167c`。 |
 | 2026-09-08 | `934fb792..ba7e5583` | `7e91167c`（PR #142）+ Issue #141 | 已完成该区间 Codex HTTP/Responses 逐提交、逐文件审阅并推进基线。`d01516c1` 的 function tool 缺省 `strict:false` 与 `bee20b99` 的 tool-name 字符集/长度 sanitization、碰撞安全和可逆恢复已同步到 Workers，测试覆盖 omitted/explicit strict、declarations/tool_choice/history 的非法字符传播和 sanitization collision；PR #142 CI 的 worker/web TypeScript typecheck、完整测试、production build、Wrangler dry-run 均通过。`bf20b999` constant-only `oneOf/anyOf` schema normalization 与空 `response.incomplete`、`8696585c` service-tier/cache-write token details、`82f4f370` Multi-Agent dotted-name 恢复、`03a054e3` namespace recovery、`ba7e5583` retry-advising `server_error` failover 继续由 #141 跟进。WebSocket、Claude、Gemini/Grok-only、赞助/文档按规则排除。 |
 | 2026-09-07 | `c76dfd4..934fb792` | `a7d6fd08`（PR #140）+ Issue #133 补充 | 已完成 14 个新增提交的逐提交/逐文件审阅并推进基线。`1c22598d` 的 credential/model cooldown deadline 单调性中，可独立适配 Workers 的 credential-wide 部分已同步：后续失败不会用更短 deadline 覆盖仍生效的长 cooldown，并以两个并发 lease 的 429 回归测试验证；GitHub Actions 的 worker/web typecheck、完整 tests、production build 和 Wrangler dry-run 全部通过。`fa01468e` 的 canonical model targeted scheduler shard update / supported-model registry-epoch cache 依赖 model-scoped pool state，已补充 #133 验收，不直接移植。`00c63a56` 为 pluginhost outbound HTTP wire profile，Workers 当前无 pluginhost HTTP bridge，因此不改 core proxy。Antigravity/Gemini、Grok/xAI WebSocket、Claude、赞助/README 变化按范围排除。 |
