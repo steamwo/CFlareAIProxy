@@ -86,11 +86,12 @@ describe("Codex tool schema normalization", () => {
     }]) as Array<Record<string, unknown>>;
     const params = tools[0]?.parameters as Record<string, unknown>;
     const properties = params.properties as Record<string, Record<string, unknown>>;
+    const metadata = properties.metadata as Record<string, unknown>;
 
     expect(properties.field).toEqual({ type: "string" });
     expect(properties.asset_id).toEqual({ type: "string", pattern: "^[0-9a-f]{32}$" });
-    expect(properties.metadata.default).toEqual({ pattern: "\\p{L}+" });
-    expect(properties.metadata.enum).toEqual([{ pattern: "\\p{N}+" }]);
+    expect(metadata.default).toEqual({ pattern: "\\p{L}+" });
+    expect(metadata.enum).toEqual([{ pattern: "\\p{N}+" }]);
   });
 
   it("drops unsupported patternProperties keys and recursively normalizes safe subschemas", () => {
