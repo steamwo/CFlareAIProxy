@@ -4,6 +4,13 @@ import { buildKimiRequest } from "./kimi";
 import { normalizeKimiUpstreamModel } from "./kimi-model";
 
 const cases: Array<[string, string]> = [
+  ["kimi-k2.8", "kimi-for-coding"],
+  ["k2.8", "kimi-for-coding"],
+  ["kimi-k2.8-code", "kimi-for-coding"],
+  ["k2.8-code", "kimi-for-coding"],
+  ["kimi-k2.8-preview", "kimi-for-coding"],
+  ["k2.8-preview", "kimi-for-coding"],
+  ["kimi-k2.8-code[1m](max)", "kimi-for-coding(max)"],
   ["kimi-k2.7-code", "kimi-for-coding"],
   ["kimi-k2.7-code-highspeed", "kimi-for-coding-highspeed"],
   ["Kimi-K2.7-Code", "kimi-for-coding"],
@@ -74,14 +81,14 @@ describe("Kimi upstream model canonicalization", () => {
     expect(normalizeKimiUpstreamModel(input)).toBe(expected);
   });
 
-  it("keeps non-K2.7 route spelling while stripping [1m] before a thinking suffix", () => {
+  it("keeps unrelated route spelling while stripping [1m] before a thinking suffix", () => {
     expect(normalizeKimiUpstreamModel("kimi-k2.6[1m](high)")).toBe("kimi-k2.6(high)");
     expect(normalizeKimiUpstreamModel("My-Custom-Kimi[1m](1024)")).toBe("My-Custom-Kimi(1024)");
   });
 
-  it("uses the canonical model in the actual Kimi request body", () => {
-    const request = buildKimiRequest(context("kimi-k2.7-code-highspeed[1m](high)"));
+  it("uses the canonical K2.8 model in the actual Kimi request body", () => {
+    const request = buildKimiRequest(context("kimi-k2.8-code[1m](max)"));
     const body = JSON.parse(String(request.init.body)) as Record<string, unknown>;
-    expect(body.model).toBe("kimi-for-coding-highspeed(high)");
+    expect(body.model).toBe("kimi-for-coding(max)");
   });
 });
