@@ -11,9 +11,9 @@ function parseTrailingThinkingSuffix(model: string): ParsedKimiModel {
 }
 
 /**
- * Canonicalizes the K2.7 Code aliases that Kimi now exposes under the official
- * Kimi-For-Coding IDs. Existing non-K2.7 route model spelling is preserved to avoid
- * widening this upstream alignment into a global model-name rewrite.
+ * Canonicalizes K2.8/K2.7 Code aliases that Kimi exposes under the official
+ * Kimi-For-Coding IDs. Existing non-K2.8/K2.7 route model spelling is preserved to
+ * avoid widening this upstream alignment into a global model-name rewrite.
  */
 export function normalizeKimiUpstreamModel(model: string): string {
   const parsed = parseTrailingThinkingSuffix(model);
@@ -23,6 +23,12 @@ export function normalizeKimiUpstreamModel(model: string): string {
   const key = base.toLowerCase();
   let normalized: string;
   switch (key) {
+    case "kimi-k2.8":
+    case "k2.8":
+    case "kimi-k2.8-code":
+    case "k2.8-code":
+    case "kimi-k2.8-preview":
+    case "k2.8-preview":
     case "kimi-k2.7-code":
     case "k2.7-code":
     case "kimi-for-coding":
