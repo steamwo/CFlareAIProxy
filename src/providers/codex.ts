@@ -367,6 +367,7 @@ export async function buildCodexRequest(context: ProxyRequestContext): Promise<U
   for (const name of [
     "x-codex-beta-features",
     "x-codex-turn-metadata",
+    "x-codex-turn-state",
     "x-client-request-id",
     "x-codex-window-id",
     "thread-id",
