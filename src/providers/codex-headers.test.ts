@@ -1,30 +1,37 @@
 import { describe, expect, it } from "vitest";
-import type { CredentialRecord, ProviderRecord, ProxyRequestContext } from "../types";
+import type { Credential, ProviderConfig, ProxyRequestContext } from "../types";
 import { buildCodexRequest } from "./codex";
 
-const provider: ProviderRecord = {
-  id: "provider-codex-headers",
-  name: "codex-headers",
+const provider: ProviderConfig = {
+  id: "codex",
+  name: "Codex",
   kind: "codex",
-  base_url: "https://codex.test",
-  endpoints: { responses: "/responses" },
-  models: [],
-  headers: {},
-  options: {},
-  auth_type: "oauth",
+  base_url: "https://chatgpt.com/backend-api/codex",
   enabled: 1,
+  pool_strategy: "round_robin",
+  endpoints_json: "{}",
+  auth_json: "{}",
+  headers_json: "{}",
+  options_json: "{}",
   created_at: 0,
   updated_at: 0,
+  endpoints: { responses: "/responses" },
+  auth: {},
+  headers: {},
+  options: {},
 };
 
-const credential: CredentialRecord = {
-  id: "credential-codex-headers",
-  provider_id: provider.id,
-  name: "codex-headers",
+const credential: Credential = {
+  id: "credential-1",
+  provider_id: "codex",
+  label: "one",
   auth_type: "oauth",
+  secret_ciphertext: "ciphertext",
+  refresh_ciphertext: null,
+  expires_at: null,
+  enabled: 1,
   priority: 0,
   weight: 1,
-  enabled: 1,
   max_concurrency: 1,
   metadata_json: "{}",
   last_error: null,
@@ -65,6 +72,6 @@ describe("Codex client header forwarding", () => {
   it("does not inject X-Codex-Turn-State when absent", async () => {
     const result = await buildCodexRequest(context());
     const headers = new Headers(result.init.headers);
-    expect(headers.get("x-codex-turn-state")).toBeNull();
+    expect(headers.has("x-codex-turn-state")).toBe(false);
   });
 });
