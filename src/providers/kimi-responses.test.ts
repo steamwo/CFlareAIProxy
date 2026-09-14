@@ -3,6 +3,7 @@ import { prepareKimiResponse } from "../kimi-response";
 import {
   rememberKimiResponseToolIdentities,
   responsesInputToMessages,
+  responsesToolChoiceToChat,
   responsesToolsToChat,
 } from "./kimi-responses";
 
@@ -74,6 +75,48 @@ describe("Kimi Responses tool declaration identity", () => {
     expect(translated.identities.shared).toEqual({ kind: "function", name: "shared" });
     expect(translated.identities.collision).toEqual({ kind: "custom", name: "collision" });
     expect(translated.identities.editor__apply_patch).toEqual({ kind: "custom", name: "apply_patch", namespace: "editor" });
+  });
+
+  it("aligns named and custom tool choices with translated chat declarations", () => {
+    const translated = responsesToolsToChat({
+      tools: [
+        { type: "function", name: "gateway_echo", parameters: { type: "object" } },
+        { type: "namespace", name: "service_tools", tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }] },
+        { type: "namespace", name: "editor", tools: [{ type: "custom", name: "apply_patch" }] },
+      ],
+    });
+
+    expect(responsesToolChoiceToChat({ type: "function", name: "gateway_echo" }, translated.identities)).toEqual({
+      type: "function",
+      function: { name: "gateway_echo" },
+    });
+    expect(responsesToolChoiceToChat({ type: "function", name: "lookup" }, translated.identities)).toEqual({
+      type: "function",
+      function: { name: "service_tools__lookup" },
+    });
+    expect(responsesToolChoiceToChat({ type: "function", name: "lookup", namespace: "service_tools" }, translated.identities)).toEqual({
+      type: "function",
+      function: { name: "service_tools__lookup" },
+    });
+    expect(responsesToolChoiceToChat({ type: "custom", custom: { name: "apply_patch", namespace: "editor" } }, translated.identities)).toEqual({
+      type: "function",
+      function: { name: "editor__apply_patch" },
+    });
+    expect(responsesToolChoiceToChat("auto", translated.identities)).toBe("auto");
+  });
+
+  it("does not guess a namespace when the same canonical name is ambiguous", () => {
+    const translated = responsesToolsToChat({
+      tools: [
+        { type: "namespace", name: "one", tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }] },
+        { type: "namespace", name: "two", tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }] },
+      ],
+    });
+
+    expect(responsesToolChoiceToChat({ type: "function", name: "lookup" }, translated.identities)).toEqual({
+      type: "function",
+      function: { name: "lookup" },
+    });
   });
 
   it("restores namespace custom-tool identity in non-streaming Responses output", async () => {
