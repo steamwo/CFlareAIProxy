@@ -1,37 +1,30 @@
 import { describe, expect, it } from "vitest";
-import type { Credential, ProviderConfig, ProxyRequestContext } from "../types";
+import type { CredentialRecord, ProviderRecord, ProxyRequestContext } from "../types";
 import { buildCodexRequest } from "./codex";
 
-const provider: ProviderConfig = {
-  id: "codex",
-  name: "Codex",
+const provider: ProviderRecord = {
+  id: "provider-codex-headers",
+  name: "codex-headers",
   kind: "codex",
-  base_url: "https://chatgpt.com/backend-api/codex",
-  enabled: 1,
-  pool_strategy: "round_robin",
-  endpoints_json: "{}",
-  auth_json: "{}",
-  headers_json: "{}",
-  options_json: "{}",
-  created_at: 0,
-  updated_at: 0,
+  base_url: "https://codex.test",
   endpoints: { responses: "/responses" },
-  auth: {},
+  models: [],
   headers: {},
   options: {},
+  auth_type: "oauth",
+  enabled: 1,
+  created_at: 0,
+  updated_at: 0,
 };
 
-const credential: Credential = {
-  id: "credential-1",
-  provider_id: "codex",
-  label: "one",
+const credential: CredentialRecord = {
+  id: "credential-codex-headers",
+  provider_id: provider.id,
+  name: "codex-headers",
   auth_type: "oauth",
-  secret_ciphertext: "ciphertext",
-  refresh_ciphertext: null,
-  expires_at: null,
-  enabled: 1,
   priority: 0,
   weight: 1,
+  enabled: 1,
   max_concurrency: 1,
   metadata_json: "{}",
   last_error: null,
@@ -43,6 +36,10 @@ const credential: Credential = {
 };
 
 function context(headers?: HeadersInit): ProxyRequestContext {
+  const forwardedHeaders: Record<string, string> = {};
+  new Headers(headers).forEach((value, key) => {
+    forwardedHeaders[key] = value;
+  });
   return {
     requestId: "request-codex-headers",
     endpoint: "responses",
@@ -51,7 +48,7 @@ function context(headers?: HeadersInit): ProxyRequestContext {
     body: { model: "public-model", input: "hello" },
     originalRequest: new Request("https://gateway.test/v1/responses", {
       method: "POST",
-      headers: { authorization: "Bearer gateway-key", ...Object.fromEntries(new Headers(headers)) },
+      headers: { authorization: "Bearer gateway-key", ...forwardedHeaders },
     }),
     provider,
     credential,
@@ -68,6 +65,6 @@ describe("Codex client header forwarding", () => {
   it("does not inject X-Codex-Turn-State when absent", async () => {
     const result = await buildCodexRequest(context());
     const headers = new Headers(result.init.headers);
-    expect(headers.has("x-codex-turn-state")).toBe(false);
+    expect(headers.get("x-codex-turn-state")).toBeNull();
   });
 });
