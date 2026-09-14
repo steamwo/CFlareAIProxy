@@ -194,16 +194,35 @@ export function responsesInputToMessages(body: Record<string, unknown>): Array<R
   return messages;
 }
 
-export function responsesToolChoiceToChat(value: unknown): unknown {
+function responseToolChoiceName(choice: Record<string, unknown>): string | undefined {
+  const nestedFunction = record(choice.function);
+  const nestedCustom = record(choice.custom);
+  return stringValue(nestedFunction.name) ?? stringValue(nestedCustom.name) ?? stringValue(choice.name);
+}
+
+function responseToolChoiceNamespace(choice: Record<string, unknown>): string | undefined {
+  const nestedFunction = record(choice.function);
+  const nestedCustom = record(choice.custom);
+  return stringValue(choice.namespace) ?? stringValue(nestedFunction.namespace) ?? stringValue(nestedCustom.namespace);
+}
+
+export function responsesToolChoiceToChat(
+  value: unknown,
+  identities: Record<string, KimiResponseToolIdentity> = {},
+): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const choice = record(value);
-  if (choice.type === "function" && typeof choice.name === "string") {
-    return { type: "function", function: { name: choice.name } };
+  if (choice.type !== "function" && choice.type !== "custom") return value;
+  const name = responseToolChoiceName(choice);
+  if (!name) return value;
+
+  const namespace = responseToolChoiceNamespace(choice);
+  let finalName = namespace ? `${namespace}__${name}` : name;
+  if (!namespace && !identities[finalName]) {
+    const matches = Object.entries(identities).filter(([, identity]) => identity.name === name);
+    if (matches.length === 1) finalName = matches[0]![0];
   }
-  if (choice.type === "custom" && typeof choice.name === "string") {
-    return { type: "function", function: { name: choice.name } };
-  }
-  return value;
+  return { type: "function", function: { name: finalName } };
 }
 
 function declarationCollections(body: Record<string, unknown>): unknown[][] {

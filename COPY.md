@@ -5,8 +5,8 @@
 > `COPY` 表示“参考、比较并按本项目架构移植”，不表示逐文件复制。CFlareAIProxy 运行在 Cloudflare Workers 上，必须优先遵守 Workers、D1、Durable Objects、KV、Queue 和原生 Socket 的约束。
 
 <!-- upstream-repository: router-for-me/CLIProxyAPI -->
-<!-- upstream-ref: 44e62bc8acc2f224bff9c62d222717d3f6723dea -->
-<!-- local-implementation-ref: 32229caa914b069c8602851e7192c3ea3a810603 -->
+<!-- upstream-ref: 7fa443dc8bf8ca2f1ffd81c2472deb31b097b697 -->
+<!-- local-implementation-ref: b5c166782d7de53c603c7ee6e3623e2c8472d9d6 -->
 <!-- last-reviewed: 2026-09-14 -->
 
 ## 1. 当前基线
@@ -15,12 +15,12 @@
 | --- | --- |
 | 上游仓库 | `router-for-me/CLIProxyAPI` |
 | 上游分支 | `main` |
-| 已审阅上游提交 | `44e62bc8acc2f224bff9c62d222717d3f6723dea` |
+| 已审阅上游提交 | `7fa443dc8bf8ca2f1ffd81c2472deb31b097b697` |
 | 本地分支 | `dev` |
-| 本地实现基线 | `32229caa914b069c8602851e7192c3ea3a810603` |
+| 本地实现基线 | `b5c166782d7de53c603c7ee6e3623e2c8472d9d6` |
 | 审阅日期 | 2026-09-14 |
 
-本轮累计审阅范围为 `41fc5e13..44e62bc8`：
+本轮累计审阅范围为 `41fc5e13..7fa443dc`：
 
 - 已在 PR #124 / merge `14bd81b4` 中同步可安全适配 Workers 的 HTTP 行为：request-scoped custom headers、空 Codex credential 认证头清理、Codex `Session-Id`/会话 header 透传、prompt-cache 字段清理、collision-safe Responses input IDs、Kimi reasoning/incomplete/partial tool-call 语义、Responses tool-output 文本/图片规范化、Responses usage detail normalization、401 request-scoped `invalid_request_error` 不冷却 credential、Codex client catalog 新字段与 max completion token、以及严格的 OpenAI-compatible Responses SSE EOF/error 处理。
 - PR #124 的 GitHub Actions 已通过 worker/web typecheck、完整测试、production web build 和 Wrangler dry-run；Cloudflare Workers build 也成功。`dev` 后续 PR #129 / merge `090183c8` 已补齐 HTTP 402 后 credential cooldown/rebind 行为。
@@ -36,6 +36,7 @@
 - `5b278561..ac02da6c` 的 4 个提交已逐提交、逐文件审阅：`b192f655` 新增 plugin/declarative quota 查询与 reset，并在上游 quota provider/probe 明确 reset 成功后清除对应 credential 的 core routing quota state；该行为涉及 credential/model scope、reset 与并发 late release 的 epoch/version 竞态及非 quota cooldown 隔离，本地当前只有 credential-wide AccountPool 状态，已补充 #133 的精确失效与并发验收，不直接移植管理面/pluginhost 代码。`e30de3d5` 为 Antigravity capability probe cache/singleflight，`3c3938fe` 为 plugin auth provider login metadata 透传，`ac02da6c` 为赞助链接文档，均不改变当前目标范围运行时。
 - `ac02da6c..30b2ac89` 的 50 个提交已逐提交、逐文件筛选：`e696ea47` 为 Codex HTTP executor 补充客户端提供的 `X-Codex-Turn-State` header 透传；本地已在 PR #153 / `32229caa` 同步同一无状态 allowlist 行为，并增加 header 存在/缺失回归测试，不改变 WebSocket。`f702bc1a` 对 native Responses-Lite 请求跳过 synthetic `instructions` normalization，并避免对 native terminal output 做代理补丁；HTTP/SSE 部分会改变原生客户端与翻译请求的 session/prompt-cache/wire fidelity 边界，已补充 #141 验收，WebSocket forwarding 部分继续排除。`1ca975df`/merge `d23ba5ee` 新增 management auth-file cooldown snapshot；本地 cooldown 真值位于 Durable Object，且 model-scoped/reset epoch 尚由 #133 设计，因此仅补充 #133 的原子 snapshot/epoch 验收，不复制 auth-file 管理状态。新增 Devin provider 及其 OAuth、模型目录、usage、transport/signature 等后续修复均为 Devin 专用的新供应商实现，不改变当前 Kimi/Codex/OpenAI-compatible core 行为；其余为 Gemini/Antigravity、Claude、WebSocket、plugin/config 文档或赞助内容，按当前范围排除。
 - `30b2ac89..44e62bc8` 的 5 个提交已逐提交、逐文件审阅：`294b7f5b` 首次为 CPA Codex catalog 暴露 `cpa_capabilities.web_search`；`4311ae87` 随即把判定从 provider 名推断改为显式 per-model/per-Responses-route `native_capabilities.web_search`，并按 `false > unknown > true` 保守三态聚合；`678da561` 仅为已验证 Codex/xAI/Claude 模型补充显式 native search metadata，`7e864ace` 为上述变化 merge、无额外运行时语义。该能力与本地 `src/codex-client-models.ts` 现有“capability=true 且所有 backing provider kind=codex”逻辑及 `src/model-capabilities.ts` 的 discovered/provider/route capability precedence 不一致，且与 canonical alias/provider capability intersection 共用同一真值来源，已补充 Issue #151 的设计与验收，不直接移植。`44e62bc8` 为 Devin 专用 OAuth 管理流程，按当前 provider 范围排除。
+- `44e62bc8..7fa443dc` 的 9 个提交已逐提交、逐文件审阅：`8c5f6e18` 修复 OpenAI Responses→Chat Completions 的 named/custom `tool_choice` 转换，要求 namespace/canonical tool name 与实际下发的 Chat tool declaration 一致；本地 Kimi Responses bridge 已有 named/custom 转换和 namespace declaration 展开，但此前 `tool_choice` 未使用同一 identity map，可能出现 `lookup` 与 `service_tools__lookup` 不匹配。本轮已按 Workers 无状态请求转换同步：显式 namespace 直接限定，未显式 namespace 时仅在 canonical 名唯一时映射，歧义时不猜测；新增 function/custom、显式/隐式 namespace、scalar passthrough 与歧义回归测试。`0719520f` 仅扩展 management `APICall` 的 `$TOKEN$` body 替换和 Devin token metadata fallback，不改变当前 provider runtime/代理传输；其余 `b4749cb2`、`01483310`、`db0b957c`、`4c331bb9`、`5f56ce92`、`cca35aee` 及 merge `7fa443dc` 均为 Devin 专用 wire/usage/model/OAuth 后续修复，按当前 provider 范围排除。
 - 仍需架构决策或单独验证的范围继续保留 Issue：credential retry-round 与 exclusion（#94）、request-scoped error action/cooldown 与终止型聚合认证错误（#100）、candidate filtering 后 RR/SWRR 公平性（#108）、Codex quota observation snapshot（#109）、旧 Codex client reasoning-level handler 透传（#110）、HTTPS proxy 双层 TLS/ALPN（#111）、Kimi tool schema `$ref` normalization（#112）、registration epoch/error precedence 与 refresh state merge（#113）、`response.done` HTTP/SSE 终止语义（#115）、Codex `reasoning_text` Chat 转换（#116）、LCP/parent-subagent/fork session affinity 与 canonical session/header 一致性（#117）、OAuth token expiry/refresh failure（#131）、usage/token safe-integer accounting（#132）、model-scoped quota cooldown/targeted scheduler state 与显式 quota reset 精确失效（#133）、orphan delegation compatibility（#134）、OpenAI-compatible 429/TPM bounded wait（#136）、Codex usage-limit credential scope/quota reset/candidate filtering（#138）、post-934fb792 Codex HTTP/Responses 剩余兼容行为（#141）、Kimi 原生 Responses upstream 路径（#144）、Codex GPT Image 2.5 registry/direct image routing（#146）、Kimi K2.8 capability/temperature（#149），以及 Codex alias canonical template/provider capability 与 native web-search capability truth source（#151）。
 - Responses WebSocket ping/keepalive、Claude 协议/Claude OAuth、Home/Redis、仅 Gemini/Grok/Antigravity 专用变化、赞助和纯文档继续排除；推进 `upstream-ref` 只表示“已审阅并分类”，不表示这些能力已实现。
 
@@ -59,13 +60,13 @@
 | 能力 | 程度 | CFlareAIProxy 状态 | 后续动作 |
 | --- | --- | --- | --- |
 | OpenAI Chat Completions | 已对齐 | 支持流式、非流式、tools、多账号路由和 OpenAI-compatible 上游 | 跟进上游新增字段和错误语义 |
-| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses、tool-output 文本/图片规范化、严格 SSE EOF/error 处理和可选 Multi-Agent V2；Chat function tool 缺省 `strict:false`、Codex tool-name sanitization 及不兼容 Unicode schema regex 清理已同步 | 补齐 `response.done`、Codex reasoning_text、orphan delegation compatibility、constant-union/empty-incomplete、usage/service-tier details、namespace recovery，以及 nested error/sequence/custom-field/safe-number framing；native Responses-Lite fidelity 跟进 #141；`fco_` output-item ID 与 reasoning/content SSE 顺序跟进 #141；跟进 Issue #115/#116/#132/#134/#141/#38 |
+| OpenAI Responses（HTTP） | 大体对齐 | 支持原生 Responses、Chat↔Responses、tool-output 文本/图片规范化、严格 SSE EOF/error 处理和可选 Multi-Agent V2；Chat function tool 缺省 `strict:false`、Codex tool-name sanitization 及不兼容 Unicode schema regex 清理已同步；Kimi Chat bridge 的 named/custom tool choice 会与展开后的 canonical/namespace declaration 对齐 | 补齐 `response.done`、Codex reasoning_text、orphan delegation compatibility、constant-union/empty-incomplete、usage/service-tier details、namespace recovery，以及 nested error/sequence/custom-field/safe-number framing；native Responses-Lite fidelity 跟进 #141；`fco_` output-item ID 与 reasoning/content SSE 顺序跟进 #141；跟进 Issue #115/#116/#132/#134/#141/#38 |
 | OpenAI Completions | 大体对齐 | 可路由 generic、Codex、Kimi | 保持兼容，不扩大旧协议特性 |
 | Kimi Chat 上游 | 已对齐 | 专用 adapter，当前生产路径固定走 Chat Completions；reasoning placeholder 与同轮 reasoning/tool 行为已补强 | 持续对比 `kimi_executor.go`；tool schema `$ref` normalization 跟进 Issue #112；原生 Responses upstream 评估见 #144 |
 | Kimi 模型名归一化 | 已对齐 | 去除 `[1m]` 后缀，并将 K2.7/K2.8 Code、K2.8 preview 等兼容 alias canonicalize 到 `kimi-for-coding`/`-highspeed` | 跟进上游新增 suffix/alias 规则 |
 | Kimi 模型目录与能力 | 大体对齐 | 公开模型来自 discovered models 与显式 routes，不复制上游静态目录 | K2.8/K3 `zero_allowed`、1M/64K metadata 与 temperature guard 跟进 #149；原有 K3/K3-256K metadata 持续验证 |
 | Kimi 多轮工具消息修复 | 已对齐 | 删除无效空 assistant、补 `reasoning_content`、修复 `call_id/tool_call_id`，并保持 Responses 同轮 reasoning/tool 连续性 | 新增上游测试时同步移植测试语义 |
-| Kimi Responses/Completions 转换 | 大体对齐 | 当前 Responses 经 Chat bridge 转换，支持文字、图片、工具定义、tool choice、reasoning fallback、incomplete/content-filter 和 partial tool-call completion safety；尚未启用上游新增的原生 `/responses` wire path | 原生 Responses upstream 路径及 endpoint/stream/usage/error 边界跟进 Issue #144；temperature/reasoning mapping 见 #149；其余 item/event 与 schema normalization 继续跟进 #112 |
+| Kimi Responses/Completions 转换 | 大体对齐 | 当前 Responses 经 Chat bridge 转换，支持文字、图片、工具定义、named/custom tool choice、namespace/canonical declaration 对齐、reasoning fallback、incomplete/content-filter 和 partial tool-call completion safety；尚未启用上游新增的原生 `/responses` wire path | 原生 Responses upstream 路径及 endpoint/stream/usage/error 边界跟进 Issue #144；temperature/reasoning mapping 见 #149；其余 item/event 与 schema normalization 继续跟进 #112 |
 | Kimi 流式 usage | 大体对齐 | 自动请求 `include_usage` 并归集基础 Token；Responses detail 已规范化 | 接入更完整 canonical Token 质量模型；启用原生 Responses 前验证 usage detail 保真（#144） |
 | Codex Responses 请求归一化 | 大体对齐 | 清理不兼容 prompt-cache 字段、collision-safe input IDs、转换 tools/tool choice、function tool 缺省 `strict:false`、tool name 字符集/长度 sanitization 与可逆恢复，并按 schema 位置清理不兼容 Unicode property escape pattern/patternProperties key；使用 canonical `Session-Id` 并透传 Codex 会话 header 与客户端 `X-Codex-Turn-State`；当前不强制伪装官方 Codex `User-Agent`/`Originator` | 评估派生会话 UUID（Issue #35）、剩余 custom tool/name conflict（Issue #38）、原生 session signal 优先级（Issue #42）、HTTP 身份 header 策略（Issue #55）、orphan delegation（Issue #134）、native Responses-Lite fidelity 及剩余 namespace/schema compatibility（Issue #141） |
 | Codex `response.failed/error` | 大体对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误；无 payload 的异常 EOF 不再伪装成功；官方 Codex-client framing 已保留部分嵌套 error/sequence 信息 | 对比上游新增 code/type 分类；`response.done` 跟进 #115；usage-limit credential scope/reset precedence 跟进 #138；nested error/custom fields/recursive redaction/sequence 与 retry-advising `server_error` bootstrap failover 跟进 #141；候选耗尽后的 terminal auth aggregate 跟进 #100；model-capacity/model-access scope 跟进 #133 |
@@ -89,7 +90,7 @@
 | 模型能力元数据 | 大体对齐 | 支持 tools、images、reasoning、service tiers、输入/输出模态、context window、max completion token、visibility、search-tool、priority 和模型名回写；capability 可来自 discovered/provider/route metadata，但 catalog 与 runtime 的 conservative per-route native search 真值尚未统一 | Kimi K2.8/K3 metadata/`zero_allowed` 见 #149；camelCase modality 兼容（Issue #95）及配置型 capability（Issue #49）；GPT Image 2.5 元数据见 #146；Codex alias capability intersection 与 CPA/native web-search 三态聚合见 #151；Home-dispatched capability 生命周期不适用当前 Workers 架构 |
 | Usage/Token 规范化 | 大体对齐 | 已记录 prompt/completion/cached/total/费用，并规范化 Responses `reasoning_tokens` 与 `cached_tokens` detail | canonical breakdown、partial/unclassified/inconsistent、Codex quota observation 继续跟进 Issue #109；JS safe-integer 与 D1 边界及 Responses 大整数保真跟进 Issue #132；`service_tier` / cache-write token details 跟进 #141；GPT Image usage 若实施 direct image 路径需纳入 #146；上游 reasoning-effort/base_url usage metadata 传播不视为 token normalization |
 | 请求级日志与费用 | 项目差异 | 使用 D1/Queue 内建 | 不要求结构一致，只保证 Token 语义可靠 |
-| 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构；账号权重直接来自 D1 账号字段，不移植 auth-file 扫描/force-refresh endpoint、plugin quota probe 或 auth-file cooldown snapshot 的 Go/pluginhost 生命周期；若展示 cooldown snapshot，必须直接派生自 DO routing state，语义单独在 #133 处理 |
+| 管理界面 | 项目差异 | 内建 Vue 管理端 | 不跟随 CLIProxyAPI 管理中心架构；账号权重直接来自 D1 账号字段，不移植 auth-file 扫描/force-refresh endpoint、plugin quota probe、management APICall `$TOKEN$` body 模板或 auth-file cooldown snapshot 的 Go/pluginhost 生命周期；若展示 cooldown snapshot，必须直接派生自 DO routing state，语义单独在 #133 处理 |
 | Gemini / Interactions | 未对齐 | 当前仅有部分 Google adapter 基础 | 另立范围后实施 |
 | Grok/xAI | 未对齐 | 当前无完整 OAuth executor | 另立范围后实施 |
 | Claude 协议 | 暂不跟进 | 按当前决策暂不实施 Claude 请求/响应兼容 | 不因上游更新自动移植 |
@@ -105,7 +106,7 @@
 - 与 OpenAI Chat/Responses 转换相关的 `sdk/translator/**`
 - `internal/registry/models/models.json` 中 Kimi 条目
 
-重点关键词：`normalizeKimiToolMessageLinks`、`reasoning_content`、`tool_call_id`、`stream_options`、`include_usage`、Kimi header、device ID、OAuth、模型 suffix、`kimi-k2.8`、`kimi-k3`、`kimi-k3-256k`、context length、thinking levels、temperature。
+重点关键词：`normalizeKimiToolMessageLinks`、`reasoning_content`、`tool_call_id`、`tool_choice`、namespace/canonical tool name、`stream_options`、`include_usage`、Kimi header、device ID、OAuth、模型 suffix、`kimi-k2.8`、`kimi-k3`、`kimi-k3-256k`、context length、thinking levels、temperature。
 
 ### Codex
 
@@ -166,6 +167,7 @@
 
 | 日期 | 上游范围 | 本地提交 | 结论 |
 | --- | --- | --- | --- |
+| 2026-09-14 | `44e62bc8..7fa443dc` | `b5c16678`（本轮实现分支） | 已完成 9 个新增提交逐提交、逐文件审阅。`8c5f6e18` 的 Responses named/custom `tool_choice`→Chat function-choice canonicalization 属范围内实质行为；本地 Kimi bridge 已按 translated tool identity map 同步显式 namespace、唯一 canonical namespace 和 custom 嵌套名称解析，并对歧义名称保持保守不猜测，增加对应回归测试。`0719520f` 仅扩展 management APICall 的 `$TOKEN$` body 替换/Devin token metadata，不改变 provider runtime/proxy transport；其余提交均为 Devin 专用 wire/usage/model/OAuth 后续修复，按当前 provider 范围排除。类型检查与测试结果以本轮 PR CI 为准。 |
 | 2026-09-14 | `30b2ac89..44e62bc8` | 文档更新；#151 补充 | 已完成 5 个新增提交逐提交、逐文件审阅并推进审阅基线。`294b7f5b`/`4311ae87`/`678da561`（merge `7e864ace`）为 CPA Codex catalog 引入显式 per-model/per-Responses-route native web-search capability，并按 `false > unknown > true` 保守聚合；本地 catalog 仍把 `supportsSearchTool` 限定为 capability=true 且所有 backing provider kind=codex，无法表达 non-Codex route 显式 true 与 mixed-route unknown/false 语义，且必须与 `model-capabilities.ts` 的 route/provider/discovered precedence 及 canonical alias capability intersection 共用真值，因此已补充 #151，不直接合入。`44e62bc8` 为 Devin 专用 OAuth 管理流程，按当前范围排除。本轮无运行时代码变化，`local-implementation-ref` 保持 `32229caa`；无需新增 TypeScript/Vitest。 |
 | 2026-09-13 | `ac02da6c..30b2ac89` | `32229caa`（PR #153）+ #133/#141 | 已完成 50 个新增提交逐提交、逐文件筛选并推进审阅基线。`e696ea47` 的 Codex HTTP `X-Codex-Turn-State` 客户端 header 透传已按 Workers 无状态 allowlist 安全同步，并增加 present/absent 回归测试；PR #153 的 worker/web typecheck、完整 tests、production web build 与 Wrangler dry-run 已通过，最终策略门禁在 COPY.md 尚未更新的首个提交上失败，文档补齐后重新验证。`f702bc1a` 的 native Responses-Lite HTTP fidelity 会改变 instructions/session/output patch 边界，已补充 #141，WebSocket 部分排除；`1ca975df`/`d23ba5ee` 的 auth-file cooldown snapshot 涉及 DO/model-scoped state 真值与 epoch，已补充 #133，不直接移植。新增 Devin provider 及其专用 OAuth/model/usage/transport 后续修复不改变当前目标 provider core；Claude、Gemini/Grok/Antigravity-only、WebSocket、赞助/纯文档按规则排除。 |
 | 2026-09-13 | `5b278561..ac02da6c` | 文档更新；#133 补充 | 已完成 4 个新增提交逐提交、逐文件审阅并推进审阅基线。`b192f655` 的 plugin/declarative quota reset 在上游明确 reset 成功后清除对应 credential 的 core routing quota state；该语义依赖 credential/model scope、reset epoch 与并发 late release 防护，本地当前 credential-wide AccountPool 无法安全机械移植，已补充 #133 的精确失效、失败不清状态和并发验收。`e30de3d5` 为 Antigravity-only capability probe cache，`3c3938fe` 为 plugin auth login metadata，`ac02da6c` 为赞助链接文档，按当前范围不改运行时。本轮无运行时代码变化，`local-implementation-ref` 保持 `67029a02`；因此无需新增 TypeScript/Vitest。 |

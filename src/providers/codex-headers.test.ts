@@ -43,6 +43,10 @@ const credential: Credential = {
 };
 
 function context(headers?: HeadersInit): ProxyRequestContext {
+  const forwardedHeaders: Record<string, string> = {};
+  new Headers(headers).forEach((value, key) => {
+    forwardedHeaders[key] = value;
+  });
   return {
     requestId: "request-codex-headers",
     endpoint: "responses",
@@ -51,7 +55,7 @@ function context(headers?: HeadersInit): ProxyRequestContext {
     body: { model: "public-model", input: "hello" },
     originalRequest: new Request("https://gateway.test/v1/responses", {
       method: "POST",
-      headers: { authorization: "Bearer gateway-key", ...Object.fromEntries(new Headers(headers)) },
+      headers: { authorization: "Bearer gateway-key", ...forwardedHeaders },
     }),
     provider,
     credential,
