@@ -192,7 +192,7 @@ function requestBody(context: ProxyRequestContext): Record<string, unknown> {
     const translatedTools = responsesToolsToChat(source);
     if (translatedTools.tools.length > 0) body.tools = translatedTools.tools;
     rememberKimiResponseToolIdentities(context.requestId, translatedTools.identities);
-    if (source.tool_choice !== undefined) body.tool_choice = responsesToolChoiceToChat(source.tool_choice);
+    if (source.tool_choice !== undefined) body.tool_choice = responsesToolChoiceToChat(source.tool_choice, translatedTools.identities);
     if (source.temperature !== undefined) body.temperature = source.temperature;
     if (source.top_p !== undefined) body.top_p = source.top_p;
     if (source.max_output_tokens !== undefined) body.max_tokens = source.max_output_tokens;
