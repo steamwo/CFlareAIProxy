@@ -20,6 +20,10 @@ const CONNECTION_LIFECYCLE_CODES = new Set([
   "CREDENTIAL_PROXY_CLOSED",
 ]);
 
+const TRANSIENT_TRANSPORT_CODES = new Set([
+  "UPSTREAM_TRANSIENT_TRANSPORT",
+]);
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -81,8 +85,18 @@ export function isConnectionLifecycleError(error: unknown): boolean {
   return /\bcontext cancelle?d\b|\brequest cancelle?d\b|\bunexpected\s+eof\b|(?:^|\s)eof(?:\s|$)|response (?:body )?ended early|chunked response ended early|connection (?:was )?closed/i.test(message);
 }
 
+export function isTransientTransportError(error: unknown): boolean {
+  if (error instanceof GatewayError && TRANSIENT_TRANSPORT_CODES.has(error.code)) return true;
+  const name = errorName(error);
+  const message = errorMessage(error);
+  if (name === "AbortError" || name === "TimeoutError") return false;
+  if (/\bcontext cancelle?d\b|\brequest cancelle?d\b/i.test(message)) return false;
+  if (/(?:unknown authority|certificate (?:verify|verification|validation)|self[- ]signed certificate|cert(?:ificate)? has expired)/i.test(message)) return false;
+  return /tls(?:\s|:).*handshake|handshake timeout|connection refused|connection reset|connection aborted|network is unreachable|no route to host|no such host|dns|broken pipe|use of closed network connection|unexpected\s+eof|(?:^|\s)eof(?:\s|$)/i.test(message);
+}
+
 export function credentialCooldownEligible(error: unknown): boolean {
-  return !isConnectionLifecycleError(error);
+  return !isConnectionLifecycleError(error) && !isTransientTransportError(error);
 }
 
 export function providerFailureEligible(error: unknown): boolean {
@@ -157,6 +171,9 @@ export function classifyTransportError(error: unknown, providerName: string, tim
   }
   if (isConnectionLifecycleError(error)) {
     return new GatewayError(502, "UPSTREAM_CONNECTION_LIFECYCLE", `${providerName} connection ended before the request completed: ${message}`, "upstream_error");
+  }
+  if (isTransientTransportError(error)) {
+    return new GatewayError(502, "UPSTREAM_TRANSIENT_TRANSPORT", `${providerName} transient transport failure: ${message}`, "upstream_error");
   }
   const timedOut = name === "TimeoutError" || /timed?\s*out|timeout/i.test(message);
   return new GatewayError(

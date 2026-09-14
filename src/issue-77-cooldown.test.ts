@@ -95,6 +95,26 @@ describe("Issue #77 transport classification", () => {
     expect(providerFailureEligible(error)).toBe(true);
   });
 
+  it.each([
+    "tls: TLS handshake timeout",
+    "dial tcp: connection refused",
+    "read: connection reset by peer",
+    "lookup api.openai.com: no such host",
+    "network is unreachable",
+    "write: broken pipe",
+  ])("keeps transient pre-HTTP transport failures retryable without credential cooldown: %s", (message) => {
+    const error = classifyTransportError(new Error(message), "Upstream", 10_000);
+    expect(error.status).toBe(502);
+    expect(error.code).toBe("UPSTREAM_TRANSIENT_TRANSPORT");
+    expect(credentialCooldownEligible(error)).toBe(false);
+  });
+
+  it("does not treat certificate validation failures as transient transport errors", () => {
+    const error = classifyTransportError(new Error("certificate verify failed: unknown authority"), "Upstream", 10_000);
+    expect(error.code).toBe("UPSTREAM_UNAVAILABLE");
+    expect(credentialCooldownEligible(error)).toBe(true);
+  });
+
   it("keeps actual timeouts eligible for cooldown", () => {
     const error = classifyTransportError(new DOMException("timed out", "TimeoutError"), "Upstream", 10_000);
     expect(error.status).toBe(504);
