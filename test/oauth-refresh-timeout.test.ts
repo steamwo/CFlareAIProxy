@@ -104,7 +104,7 @@ describe("Codex OAuth refresh transport failures", () => {
       status: 502,
       code: "OAUTH_REFRESH_FAILED",
       type: "upstream_error",
-      message: "Codex OAuth refresh request failed: network connection reset",
+      message: "Codex OAuth refresh transient transport failure: network connection reset",
     });
   });
 });
