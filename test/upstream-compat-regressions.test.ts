@@ -238,9 +238,11 @@ describe("upstream compatibility regression batch", () => {
     const model = { id: "gpt-test", x_cflare_endpoints: ["responses"], x_cflare_capabilities: capabilities };
     const [oldEntry] = buildCodexClientModels([model], undefined, "0.143.99");
     const [newEntry] = buildCodexClientModels([model], undefined, "0.144.0");
+    const [emptyEntry] = buildCodexClientModels([model], undefined, "");
     const [unknownEntry] = buildCodexClientModels([model], undefined, "future-build");
     expect((oldEntry!.supported_reasoning_levels as Array<{ effort: string }>).map((entry) => entry.effort)).toEqual(["low"]);
     expect((newEntry!.supported_reasoning_levels as Array<{ effort: string }>).map((entry) => entry.effort)).toEqual(["low", "max", "ultra"]);
+    expect((emptyEntry!.supported_reasoning_levels as Array<{ effort: string }>).map((entry) => entry.effort)).toEqual(["low", "max", "ultra"]);
     expect((unknownEntry!.supported_reasoning_levels as Array<{ effort: string }>).map((entry) => entry.effort)).toEqual(["low", "max", "ultra"]);
     expect(newEntry).toMatchObject({
       max_tokens: 4096,
