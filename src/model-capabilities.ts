@@ -19,6 +19,7 @@ export interface ModelCapabilities {
   serviceTiers?: string[];
   contextWindow?: number;
   maxCompletionTokens?: number;
+  useMaxCompletionTokens?: boolean;
   visibility?: "list" | "hide";
   priority?: number;
   supportsTools?: boolean;
@@ -96,6 +97,7 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
       raw.max_context_window,
     ),
     maxCompletionTokens: positiveNumber(raw.maxCompletionTokens, raw.max_completion_tokens, raw.maxOutputTokens, raw.max_output_tokens),
+    useMaxCompletionTokens: booleanValue(raw.useMaxCompletionTokens, raw.use_max_completion_tokens, raw["use-max-completion-tokens"]),
     visibility: rawVisibility === "hide" || rawVisibility === "list" ? rawVisibility : undefined,
     priority: positiveNumber(raw.priority),
     supportsTools: booleanValue(raw.supportsTools, raw.supports_tools),
@@ -138,6 +140,7 @@ export function mergeModelCapabilities(primary: ModelCapabilities, fallback: Mod
     serviceTiers: primary.serviceTiers ?? fallback.serviceTiers,
     contextWindow: primary.contextWindow ?? fallback.contextWindow,
     maxCompletionTokens: primary.maxCompletionTokens ?? fallback.maxCompletionTokens,
+    useMaxCompletionTokens: primary.useMaxCompletionTokens ?? fallback.useMaxCompletionTokens,
     visibility: primary.visibility ?? fallback.visibility,
     priority: primary.priority ?? fallback.priority,
     supportsTools: primary.supportsTools ?? fallback.supportsTools,
@@ -162,26 +165,71 @@ function modelIdentifier(value: Record<string, unknown>): string {
   return "";
 }
 
-function configuredModelDefinition(options: Record<string, unknown>, modelId: string): unknown {
-  for (const value of [options.model_capabilities, options.modelCapabilities]) {
-    const map = record(value);
-    if (Object.prototype.hasOwnProperty.call(map, modelId)) return map[modelId];
-  }
+function normalizedConfiguredModelName(model: string): string {
+  const trimmed = model.trim();
+  if (!trimmed) return "";
+  const lastOpen = trimmed.lastIndexOf("(");
+  const withoutSuffix = lastOpen >= 0 && trimmed.endsWith(")") ? trimmed.slice(0, lastOpen).trim() : trimmed;
+  return withoutSuffix.toLowerCase();
+}
 
-  for (const value of [options.models, options.configured_models, options.configuredModels]) {
-    if (Array.isArray(value)) {
-      const match = value.find((entry) => modelIdentifier(record(entry)) === modelId);
-      if (match !== undefined) return match;
-      continue;
-    }
-    const map = record(value);
-    if (Object.prototype.hasOwnProperty.call(map, modelId)) return map[modelId];
+function configuredModelMapValue(value: unknown, modelId: string): unknown {
+  const map = record(value);
+  if (Object.prototype.hasOwnProperty.call(map, modelId)) return map[modelId];
+  const normalized = normalizedConfiguredModelName(modelId);
+  if (!normalized) return undefined;
+  for (const [key, entry] of Object.entries(map)) {
+    if (normalizedConfiguredModelName(key) === normalized) return entry;
   }
   return undefined;
 }
 
-export function configuredModelCapabilities(options: Record<string, unknown>, modelId: string): ModelCapabilities {
-  const definition = record(configuredModelDefinition(options, modelId));
+function configuredModelDefinition(options: Record<string, unknown>, modelId: string, requestedModelId?: string): unknown {
+  if (requestedModelId === undefined) {
+    for (const value of [options.model_capabilities, options.modelCapabilities]) {
+      const map = record(value);
+      if (Object.prototype.hasOwnProperty.call(map, modelId)) return map[modelId];
+    }
+    for (const value of [options.models, options.configured_models, options.configuredModels]) {
+      if (Array.isArray(value)) {
+        const match = value.find((entry) => modelIdentifier(record(entry)) === modelId);
+        if (match !== undefined) return match;
+        continue;
+      }
+      const map = record(value);
+      if (Object.prototype.hasOwnProperty.call(map, modelId)) return map[modelId];
+    }
+    return undefined;
+  }
+
+  const candidates = [...new Set([modelId, requestedModelId].filter((value): value is string => typeof value === "string" && value.trim().length > 0))];
+  for (const candidate of candidates) {
+    for (const value of [options.model_capabilities, options.modelCapabilities]) {
+      const match = configuredModelMapValue(value, candidate);
+      if (match !== undefined) return match;
+    }
+
+    for (const value of [options.models, options.configured_models, options.configuredModels]) {
+      if (Array.isArray(value)) {
+        const normalized = normalizedConfiguredModelName(candidate);
+        const byName = value.find((entry) => normalizedConfiguredModelName(modelIdentifier(record(entry))) === normalized);
+        if (byName !== undefined) return byName;
+        const byAlias = value.find((entry) => {
+          const alias = record(entry).alias;
+          return typeof alias === "string" && normalizedConfiguredModelName(alias) === normalized;
+        });
+        if (byAlias !== undefined) return byAlias;
+        continue;
+      }
+      const match = configuredModelMapValue(value, candidate);
+      if (match !== undefined) return match;
+    }
+  }
+  return undefined;
+}
+
+export function configuredModelCapabilities(options: Record<string, unknown>, modelId: string, requestedModelId?: string): ModelCapabilities {
+  const definition = record(configuredModelDefinition(options, modelId, requestedModelId));
   if (!Object.keys(definition).length) return {};
   return normalizeCapabilities(
     definition.capabilities
@@ -216,7 +264,9 @@ export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoi
     ? discoveredCapabilities(row.capabilities_json ?? undefined, row.raw_json ?? undefined)
     : {};
   const providerOptions = row ? parseJson<Record<string, unknown>>(row.provider_options_json, {}) : {};
-  const providerConfigured = configuredModelCapabilities(providerOptions, route.upstream_model);
+  const providerConfigured = row?.provider_kind === "openai-compatible"
+    ? configuredModelCapabilities(providerOptions, route.upstream_model, route.public_model)
+    : configuredModelCapabilities(providerOptions, route.upstream_model);
   const routeConfigured = normalizeCapabilities(options.capabilities ?? options.model_capabilities);
   const capabilities = mergeModelCapabilities(
     routeConfigured,

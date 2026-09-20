@@ -313,6 +313,7 @@ export interface ProxyRequestContext {
   endpoint: GatewayEndpoint;
   publicModel: string;
   upstreamModel: string;
+  useMaxCompletionTokens?: boolean;
   body: Record<string, unknown>;
   originalRequest: Request;
   provider: ProviderConfig;
