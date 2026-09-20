@@ -185,6 +185,23 @@ function configuredModelMapValue(value: unknown, modelId: string): unknown {
 }
 
 function configuredModelDefinition(options: Record<string, unknown>, modelId: string, requestedModelId?: string): unknown {
+  if (requestedModelId === undefined) {
+    for (const value of [options.model_capabilities, options.modelCapabilities]) {
+      const map = record(value);
+      if (Object.prototype.hasOwnProperty.call(map, modelId)) return map[modelId];
+    }
+    for (const value of [options.models, options.configured_models, options.configuredModels]) {
+      if (Array.isArray(value)) {
+        const match = value.find((entry) => modelIdentifier(record(entry)) === modelId);
+        if (match !== undefined) return match;
+        continue;
+      }
+      const map = record(value);
+      if (Object.prototype.hasOwnProperty.call(map, modelId)) return map[modelId];
+    }
+    return undefined;
+  }
+
   const candidates = [...new Set([modelId, requestedModelId].filter((value): value is string => typeof value === "string" && value.trim().length > 0))];
   for (const candidate of candidates) {
     for (const value of [options.model_capabilities, options.modelCapabilities]) {
@@ -247,7 +264,9 @@ export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoi
     ? discoveredCapabilities(row.capabilities_json ?? undefined, row.raw_json ?? undefined)
     : {};
   const providerOptions = row ? parseJson<Record<string, unknown>>(row.provider_options_json, {}) : {};
-  const providerConfigured = configuredModelCapabilities(providerOptions, route.upstream_model, route.public_model);
+  const providerConfigured = row?.provider_kind === "openai-compatible"
+    ? configuredModelCapabilities(providerOptions, route.upstream_model, route.public_model)
+    : configuredModelCapabilities(providerOptions, route.upstream_model);
   const routeConfigured = normalizeCapabilities(options.capabilities ?? options.model_capabilities);
   const capabilities = mergeModelCapabilities(
     routeConfigured,
