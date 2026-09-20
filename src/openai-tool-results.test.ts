@@ -64,6 +64,119 @@ describe("OpenAI-compatible text-only tool results", () => {
     expect(body.messages[1]?.content).toBeInstanceOf(Array);
   });
 
+  it("drops a relay-only synthetic user message and marks the preceding tool", () => {
+    const normalized = normalizeOpenAiToolResultsTextOnly({
+      messages: [
+        { role: "tool", tool_call_id: "call_1", content: "image inspected" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Images returned by the preceding tool call(s):" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+          ],
+        },
+      ],
+    });
+    const messages = normalized.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.content).toBe(`image inspected\n\n${OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT}`);
+  });
+
+  it("replaces the known relay placeholder without duplicating the omission marker", () => {
+    const normalized = normalizeOpenAiToolResultsTextOnly({
+      messages: [
+        { role: "tool", tool_call_id: "call_1", content: "[Tool returned image content; the images follow in the next user message.]" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Images returned by the preceding tool call(s):" },
+            { type: "image_url", image_url: { url: "https://example.com/tool.png" } },
+          ],
+        },
+      ],
+    });
+    const messages = normalized.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.content).toBe(OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT);
+  });
+
+  it("preserves real user parts while stripping the relay notice and relayed images", () => {
+    const normalized = normalizeOpenAiToolResultsTextOnly({
+      messages: [
+        { role: "tool", tool_call_id: "call_1", content: "image inspected" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Images returned by the preceding tool call(s):" },
+            { type: "image_url", image_url: { url: "https://example.com/tool.png" } },
+            { type: "text", text: "What color is the car?" },
+          ],
+        },
+      ],
+    });
+    const messages = normalized.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.content).toBe(`image inspected\n\n${OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT}`);
+    expect(messages[1]?.content).toEqual([{ type: "text", text: "What color is the car?" }]);
+  });
+
+  it("marks only the nearest contiguous preceding tool when no placeholder was already marked", () => {
+    const normalized = normalizeOpenAiToolResultsTextOnly({
+      messages: [
+        { role: "tool", tool_call_id: "call_1", content: "first result" },
+        { role: "tool", tool_call_id: "call_2", content: "second result" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Images returned by the preceding tool call(s):" },
+            { type: "input_image", image_url: "https://example.com/tool.png" },
+          ],
+        },
+      ],
+    });
+    const messages = normalized.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.content).toBe("first result");
+    expect(messages[1]?.content).toBe(`second result\n\n${OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT}`);
+  });
+
+  it("does not strip ordinary user images without the exact relay notice", () => {
+    const userContent = [
+      { type: "text", text: "Please inspect this image" },
+      { type: "image_url", image_url: { url: "https://example.com/user.png" } },
+    ];
+    const normalized = normalizeOpenAiToolResultsTextOnly({
+      messages: [{ role: "user", content: userContent }],
+    });
+    expect((normalized.messages as Array<Record<string, unknown>>)[0]?.content).toBe(userContent);
+  });
+
+  it("restores a stripped relay message before retrying an image-capable route", () => {
+    const textOnly = { inputModalities: ["text"] } satisfies ModelCapabilities;
+    const imageCapable = { inputModalities: ["text", "image"] } satisfies ModelCapabilities;
+    markOpenAiTextOnlyToolResultNormalization(textOnly);
+    markOpenAiTextOnlyToolResultNormalization(imageCapable);
+
+    const originalMessages = [
+      { role: "tool", tool_call_id: "call_1", content: "image inspected" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Images returned by the preceding tool call(s):" },
+          { type: "image_url", image_url: { url: "https://example.com/tool.png" } },
+        ],
+      },
+    ];
+    const body: Record<string, unknown> = { messages: originalMessages };
+
+    prepareOpenAiToolResultsForValidation(body, textOnly);
+    expect(body.messages).not.toBe(originalMessages);
+    expect(body.messages as unknown[]).toHaveLength(1);
+
+    prepareOpenAiToolResultsForValidation(body, imageCapable);
+    expect(body.messages).toBe(originalMessages);
+  });
+
   it("serializes unknown JSON content and replaces image-shaped objects", () => {
     const normalized = normalizeOpenAiToolResultsTextOnly({
       messages: [
