@@ -32,8 +32,8 @@
 
 以下比例是工程估算，用来表达工作量和行为覆盖，不是官方兼容认证，也不是逐测试用例通过率。
 
-- **当前目标范围（暂不包含 Claude 协议和未批准的 Codex Live）：约 85%，属于“大体对齐”。**
-- **相对 CLIProxyAPI 全部产品能力：约 50%，属于“部分对齐”。**
+- **当前目标范围（暂不包含 Claude 协议和未批准的 Codex Live）：约 82%，属于“大体对齐”。**
+- **相对 CLIProxyAPI 全部产品能力：约 48%，属于“部分对齐”。**
 
 等级定义：
 
@@ -60,7 +60,7 @@
 | Codex `response.failed/error` | 已对齐 | SSE 内嵌错误会分类为认证、权限、限额、参数或服务错误；无 payload 的异常 EOF 不再伪装成功；`response.done` 作为成功 terminal 处理 | 对比上游新增 code/type 分类 |
 | Codex 中断流检测 | 已对齐 | `response.completed/incomplete/done` 均为已知成功终止事件；其余 clean EOF 视为失败，不伪造成功 | 保持终止事件与错误优先级回归测试 |
 | Codex 最终 output 重建 | 已对齐 | 从 `response.output_item.done` 重建空的 `response.output` | 保持事件顺序测试 |
-| Codex custom tool HTTP/SSE | 大体对齐 | 已覆盖 function/custom tool 基础转换、交错调用、done-only arguments、lookup miss current-state fallback 与重复 identity 抑制 | 继续跟进 Issue #38 的名称冲突和更复杂 mixed-output 边界；不涉及 WebSocket |
+| Codex custom tool HTTP/SSE | 部分对齐 | 已覆盖 function/custom tool 基础转换、交错调用、done-only arguments、lookup miss current-state fallback 与重复 identity 抑制 | 继续跟进 Issue #38 的名称冲突和更复杂 mixed-output 边界；不涉及 WebSocket |
 | Codex tool output 图片 | 大体对齐 | Responses tool-output 文本/图片已做结构化规范化；仍需覆盖复杂递归与混合内容 | 跟进 Issue #42，仅限 HTTP/SSE |
 | Codex client model catalog | 大体对齐 | 动态生成 Codex 客户端响应，覆盖 reasoning、modalities、context window、max completion token、visibility、search-tool、service tier、稳定 priority、V2 及新增 model message/schema 字段；builder 已支持旧客户端过滤 max/ultra | `/v1/models` 的 client-version 透传仍跟进 Issue #110；默认内置目录策略见 Issue #52 |
 | Codex Multi-Agent V2 | 大体对齐 | 默认关闭；按 route/provider 开启；仅目标 UA；支持 spawn/agent/namespace、非 Codex 转换及流式/非流式恢复 | 真实 Codex 客户端 smoke；WebSocket 单独设计 |
