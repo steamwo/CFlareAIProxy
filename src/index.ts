@@ -63,7 +63,8 @@ app.get("/v1/models", async (c) => {
     const allowedModels = parseJson<string[]>(gatewayKey.allowed_models_json, []);
     await ensureOpenCodeAnonymousModels(c.env).catch(() => null);
     const enriched = await enrichModelsWithCapabilities(c.env, await listModels(c.env, allowedModels));
-    if (c.req.query("client_version") !== undefined) return c.json(await buildCodexClientModelsResponse(c.env, enriched));
+    const clientVersion = c.req.query("client_version");
+    if (clientVersion !== undefined) return c.json(await buildCodexClientModelsResponse(c.env, enriched, clientVersion));
     return c.json({ object: "list", data: enriched });
   } catch (error) {
     return errorResponse(error);
