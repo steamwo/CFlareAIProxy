@@ -34,10 +34,10 @@ describe("Codex pure const union schema normalization", () => {
 
     const parameters = normalized[0]?.parameters as Record<string, unknown>;
     const properties = parameters.properties as Record<string, Record<string, unknown>>;
-    expect(properties.action.enum).toEqual(values);
-    expect(properties.action.oneOf).toBeUndefined();
-    expect(properties.action.type).toBe("string");
-    expect(properties.action.description).toBe("Action to perform");
+    expect(properties.action!.enum).toEqual(values);
+    expect(properties.action!.oneOf).toBeUndefined();
+    expect(properties.action!.type).toBe("string");
+    expect(properties.action!.description).toBe("Action to perform");
     expect(properties.sibling).toEqual({ type: "string" });
     expect(parameters.required).toEqual(["action"]);
   });
@@ -47,7 +47,7 @@ describe("Codex pure const union schema normalization", () => {
     const normalized = normalizeCodexToolSchemas(toolWithProperty("mode", {
       anyOf: constBranches(values),
     })) as Array<Record<string, unknown>>;
-    const property = ((normalized[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode;
+    const property = ((normalized[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode!;
     expect(property.enum).toEqual(values);
     expect(property.anyOf).toBeUndefined();
   });
@@ -58,7 +58,7 @@ describe("Codex pure const union schema normalization", () => {
       enum: [...values].reverse(),
       oneOf: constBranches(values),
     })) as Array<Record<string, unknown>>;
-    const property = ((normalized[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode;
+    const property = ((normalized[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode!;
     expect(property.enum).toEqual([...values].reverse());
     expect(property.oneOf).toBeUndefined();
 
@@ -66,7 +66,7 @@ describe("Codex pure const union schema normalization", () => {
       enum: [...values.slice(0, 7), "other"],
       oneOf: constBranches(values),
     })) as Array<Record<string, unknown>>;
-    const mismatchedProperty = ((mismatched[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode;
+    const mismatchedProperty = ((mismatched[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode!;
     expect(mismatchedProperty.oneOf).toHaveLength(8);
   });
 
@@ -74,22 +74,22 @@ describe("Codex pure const union schema normalization", () => {
     const small = normalizeCodexToolSchemas(toolWithProperty("mode", {
       oneOf: constBranches(["a", "b", "c", "d", "e", "f", "g"]),
     })) as Array<Record<string, unknown>>;
-    expect((((small[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode).oneOf).toHaveLength(7);
+    expect((((small[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode!).oneOf).toHaveLength(7);
 
     const mixedBranches = constBranches(["a", "b", "c", "d", "e", "f", "g", "h"]);
     mixedBranches[3] = { ...mixedBranches[3], type: "string" } as typeof mixedBranches[number];
     const mixed = normalizeCodexToolSchemas(toolWithProperty("mode", { oneOf: mixedBranches })) as Array<Record<string, unknown>>;
-    expect((((mixed[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode).oneOf).toHaveLength(8);
+    expect((((mixed[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode!).oneOf).toHaveLength(8);
 
     const duplicateValues = ["a", "b", "c", "d", "e", "f", "g", "a"];
     const duplicate = normalizeCodexToolSchemas(toolWithProperty("mode", { oneOf: constBranches(duplicateValues) })) as Array<Record<string, unknown>>;
-    expect((((duplicate[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode).oneOf).toHaveLength(8);
+    expect((((duplicate[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode!).oneOf).toHaveLength(8);
 
     const compound = normalizeCodexToolSchemas(toolWithProperty("mode", {
       oneOf: constBranches(["a", "b", "c", "d", "e", "f", "g", "h"]),
       anyOf: constBranches(["a", "b", "c", "d", "e", "f", "g", "h"]),
     })) as Array<Record<string, unknown>>;
-    const compoundProperty = ((compound[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode;
+    const compoundProperty = ((compound[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode!;
     expect(compoundProperty.oneOf).toHaveLength(8);
     expect(compoundProperty.anyOf).toHaveLength(8);
   });
@@ -103,7 +103,7 @@ describe("Codex pure const union schema normalization", () => {
         oneOf: constBranches(["a", "b", "c", "d", "e", "f", "g", "h"]),
       }])),
     };
-    const [normalized] = normalizeCodexToolSchemas([{ type: "function", name: "lookup", parameters }]) as Array<Record<string, unknown>>;
+    const normalized = (normalizeCodexToolSchemas([{ type: "function", name: "lookup", parameters }]) as Array<Record<string, unknown>>)[0]!;
     const properties = (normalized.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>;
 
     expect(Object.keys(properties)).toEqual(names);
@@ -118,7 +118,7 @@ describe("Codex pure const union schema normalization", () => {
     const normalized = normalizeCodexToolSchemas(toolWithProperty("mode", {
       oneOf: constBranches(values),
     })) as Array<Record<string, unknown>>;
-    const property = ((normalized[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode;
+    const property = ((normalized[0]?.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).mode!;
     expect(property.enum).toEqual(values);
   });
 });
