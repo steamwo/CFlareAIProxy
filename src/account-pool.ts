@@ -10,6 +10,14 @@ interface PoolStat {
   last_used: number;
 }
 
+interface ModelCooldownRow {
+  [key: string]: SqlStorageValue;
+  credential_id: string;
+  model: string;
+  cooldown_until: number;
+  failures: number;
+}
+
 interface SmoothWeightRow {
   [key: string]: SqlStorageValue;
   credential_id: string;
@@ -90,6 +98,13 @@ export class AccountPool extends DurableObject<Env> {
           lock_id TEXT NOT NULL,
           expires_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS model_cooldowns (
+          credential_id TEXT NOT NULL,
+          model TEXT NOT NULL,
+          cooldown_until INTEGER NOT NULL DEFAULT 0,
+          failures INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (credential_id, model)
+        );
       `);
     });
   }
@@ -107,6 +122,8 @@ export class AccountPool extends DurableObject<Env> {
           statusCode?: number;
           cooldownMs?: number;
           cooldownEligible?: boolean;
+          cooldownScope?: "credential" | "model";
+          model?: string;
         };
         this.release(payload);
         return Response.json({ ok: true });
@@ -121,7 +138,7 @@ export class AccountPool extends DurableObject<Env> {
         return Response.json({ ok: true });
       }
       if (request.method === "POST" && url.pathname === "/reset") {
-        this.ctx.storage.sql.exec("DELETE FROM pool_stats; DELETE FROM leases; DELETE FROM affinities; DELETE FROM round_robin_state; DELETE FROM smooth_weights; DELETE FROM scheduler_membership; DELETE FROM refresh_locks;");
+        this.ctx.storage.sql.exec("DELETE FROM pool_stats; DELETE FROM leases; DELETE FROM affinities; DELETE FROM round_robin_state; DELETE FROM smooth_weights; DELETE FROM scheduler_membership; DELETE FROM refresh_locks; DELETE FROM model_cooldowns;");
         return Response.json({ ok: true });
       }
       return new Response("Not found", { status: 404 });
@@ -147,6 +164,7 @@ export class AccountPool extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM leases WHERE expires_at <= ?", now);
     this.ctx.storage.sql.exec("DELETE FROM affinities WHERE expires_at <= ?", now);
     this.ctx.storage.sql.exec("DELETE FROM refresh_locks WHERE expires_at <= ?", now);
+    this.ctx.storage.sql.exec("DELETE FROM model_cooldowns WHERE cooldown_until <= ? AND failures = 0", now);
 
     const staleBefore = now - SCHEDULER_STATE_RETENTION_MS;
     // Only providers that have entered the new membership tracker are eligible for
@@ -206,7 +224,24 @@ export class AccountPool extends DurableObject<Env> {
         .map((row) => [row.credential_id, row] as const),
     );
 
-    const affinityKeys = sessionKeys(payload.sessionKey);
+    const model = typeof payload.model === "string" ? payload.model.trim() : "";
+    const modelCooldowns = new Map<string, ModelCooldownRow>();
+    if (model) {
+      const rows = this.ctx.storage.sql
+        .exec<ModelCooldownRow>(
+          `SELECT credential_id, model, cooldown_until, failures
+           FROM model_cooldowns
+           WHERE model=? AND credential_id IN (${candidates.map(() => "?").join(",")})`,
+          model,
+          ...candidates.map((candidate) => candidate.id),
+        )
+        .toArray();
+      for (const row of rows) modelCooldowns.set(row.credential_id, row);
+    }
+    const modelAvailable = (credentialId: string): boolean =>
+      !model || (modelCooldowns.get(credentialId)?.cooldown_until ?? 0) <= now;
+
+        const affinityKeys = sessionKeys(payload.sessionKey);
     for (const sessionKey of affinityKeys) {
       const affinity = this.ctx.storage.sql
         .exec<{ credential_id: string }>(
@@ -218,7 +253,7 @@ export class AccountPool extends DurableObject<Env> {
       if (!affinity) continue;
       const candidate = candidates.find((entry) => entry.id === affinity.credential_id);
       const stat = candidate ? stats.get(candidate.id) : undefined;
-      if (candidate && stat && stat.cooldown_until <= now && stat.inflight < candidate.maxConcurrency) {
+      if (candidate && stat && stat.cooldown_until <= now && modelAvailable(candidate.id) && stat.inflight < candidate.maxConcurrency) {
         // Sticky sessions intentionally bypass scheduler advancement. Affinity is a routing
         // constraint, not another weighted selection event.
         return this.createLease(candidate.id, affinityKeys, payload.leaseTtlMs ?? 600_000, now);
@@ -227,10 +262,9 @@ export class AccountPool extends DurableObject<Env> {
 
     const available = candidates.filter((candidate) => {
       const stat = stats.get(candidate.id);
-      return stat && stat.cooldown_until <= now && stat.inflight < candidate.maxConcurrency;
+      return stat && stat.cooldown_until <= now && modelAvailable(candidate.id) && stat.inflight < candidate.maxConcurrency;
     });
     if (available.length === 0) {
-      const model = typeof payload.model === "string" ? payload.model.trim() : "";
       throw new Error(model
         ? `All credentials are busy or cooling down for model ${JSON.stringify(model)}`
         : "All credentials are busy or cooling down");
@@ -397,7 +431,15 @@ export class AccountPool extends DurableObject<Env> {
     return { leaseId, credentialId, expiresAt };
   }
 
-  private release(payload: { leaseId: string; success: boolean; statusCode?: number; cooldownMs?: number; cooldownEligible?: boolean }): void {
+  private release(payload: {
+    leaseId: string;
+    success: boolean;
+    statusCode?: number;
+    cooldownMs?: number;
+    cooldownEligible?: boolean;
+    cooldownScope?: "credential" | "model";
+    model?: string;
+  }): void {
     const lease = this.ctx.storage.sql
       .exec<{ credential_id: string }>("SELECT credential_id FROM leases WHERE lease_id = ?", payload.leaseId)
       .toArray()[0];
@@ -413,26 +455,59 @@ export class AccountPool extends DurableObject<Env> {
         "UPDATE pool_stats SET failures = 0, cooldown_until = 0 WHERE credential_id = ?",
         lease.credential_id,
       );
+      const model = typeof payload.model === "string" ? payload.model.trim() : "";
+      if (model) {
+        this.ctx.storage.sql.exec(
+          "UPDATE model_cooldowns SET failures=0,cooldown_until=0 WHERE credential_id=? AND model=?",
+          lease.credential_id,
+          model,
+        );
+      }
       return;
     }
 
     const status = payload.statusCode ?? 500;
     const shouldCooldown = payload.cooldownEligible !== false
       && (status === 401 || status === 402 || status === 403 || status === 408 || status === 429 || status >= 500);
-    if (shouldCooldown) {
-      const stat = this.ctx.storage.sql
-        .exec<{ failures: number }>("SELECT failures FROM pool_stats WHERE credential_id = ?", lease.credential_id)
+    if (!shouldCooldown) return;
+
+    const model = typeof payload.model === "string" ? payload.model.trim() : "";
+    if (payload.cooldownScope === "model" && model) {
+      const row = this.ctx.storage.sql
+        .exec<{ failures: number }>(
+          "SELECT failures FROM model_cooldowns WHERE credential_id=? AND model=?",
+          lease.credential_id,
+          model,
+        )
         .toArray()[0];
-      const failures = (stat?.failures ?? 0) + 1;
+      const failures = (row?.failures ?? 0) + 1;
       const base = payload.cooldownMs ?? 60_000;
       const cooldown = Math.min(15 * 60_000, base * 2 ** Math.min(4, failures - 1));
       this.ctx.storage.sql.exec(
-        "UPDATE pool_stats SET failures = ?, cooldown_until = MAX(cooldown_until, ?) WHERE credential_id = ?",
-        failures,
-        Date.now() + cooldown,
+        `INSERT INTO model_cooldowns(credential_id,model,cooldown_until,failures) VALUES(?,?,?,?)
+         ON CONFLICT(credential_id,model) DO UPDATE SET
+           failures=excluded.failures,
+           cooldown_until=MAX(model_cooldowns.cooldown_until,excluded.cooldown_until)`,
         lease.credential_id,
+        model,
+        Date.now() + cooldown,
+        failures,
       );
+      return;
     }
+
+    const stat = this.ctx.storage.sql
+      .exec<{ failures: number }>("SELECT failures FROM pool_stats WHERE credential_id = ?", lease.credential_id)
+      .toArray()[0];
+    const failures = (stat?.failures ?? 0) + 1;
+    const base = payload.cooldownMs ?? 60_000;
+    const cooldown = Math.min(15 * 60_000, base * 2 ** Math.min(4, failures - 1));
+    this.ctx.storage.sql.exec(
+      "UPDATE pool_stats SET failures = ?, cooldown_until = MAX(cooldown_until, ?) WHERE credential_id = ?",
+      failures,
+      Date.now() + cooldown,
+      lease.credential_id,
+    );
   }
 
   private acquireRefreshLock(credentialId: string, ttlMs: number): { acquired: boolean; lockId?: string } {
