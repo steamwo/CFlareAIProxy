@@ -54,7 +54,9 @@ export async function refreshCredentialForInference(
   requestProxyOverride?: string,
 ): Promise<Credential> {
   if (!requestProxyOverride && !credentialProxyUrl(credential)) return refreshCredential(env, provider, credential);
-  if (provider.kind !== "kimi" && provider.kind !== "codex") return refreshCredential(env, provider, credential);
+  if (provider.kind !== "kimi" && provider.kind !== "codex") {
+    return refreshCredential(env, provider, credential, { requestProxyOverride });
+  }
   if (!credential.refreshToken) return credential;
   const tokenUrl = stringValue(provider.auth, "token_url");
   const clientId = stringValue(provider.auth, "client_id");
