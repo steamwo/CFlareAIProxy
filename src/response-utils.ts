@@ -1,4 +1,10 @@
 import { GatewayError } from "./errors";
+import {
+  canonicalUsage,
+  emptyCanonicalUsage,
+  mergeCanonicalUsage,
+  safeNonNegativeInteger,
+} from "./usage-numbers";
 import type { Usage } from "./types";
 
 export const responseEncoder = new TextEncoder();
@@ -9,35 +15,31 @@ export function responseRecord(value: unknown): Record<string, unknown> {
 }
 
 export function emptyResponseUsage(): Usage {
-  return { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 };
+  return emptyCanonicalUsage();
 }
 
-function numberField(object: Record<string, unknown>, ...keys: string[]): number {
+function numberField(object: Record<string, unknown>, ...keys: string[]): number | undefined {
   for (const key of keys) {
-    const value = object[key];
-    if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+    const value = safeNonNegativeInteger(object[key]);
+    if (value !== undefined) return value;
   }
-  return 0;
+  return undefined;
 }
 
 export function responseUsage(value: unknown): Usage {
   const root = responseRecord(value);
   const raw = responseRecord(root.usage ?? root);
-  const promptTokens = numberField(raw, "prompt_tokens", "input_tokens", "promptTokens", "inputTokens");
-  const completionTokens = numberField(raw, "completion_tokens", "output_tokens", "completionTokens", "outputTokens");
   const details = responseRecord(raw.prompt_tokens_details ?? raw.input_tokens_details);
-  const cachedTokens = Math.min(promptTokens, numberField(details, "cached_tokens", "cachedTokens"));
-  const totalTokens = numberField(raw, "total_tokens", "totalTokens") || promptTokens + completionTokens;
-  return { promptTokens, completionTokens, cachedTokens, totalTokens };
+  return canonicalUsage(
+    numberField(raw, "prompt_tokens", "input_tokens", "promptTokens", "inputTokens"),
+    numberField(raw, "completion_tokens", "output_tokens", "completionTokens", "outputTokens"),
+    numberField(details, "cached_tokens", "cachedTokens"),
+    numberField(raw, "total_tokens", "totalTokens"),
+  );
 }
 
 export function mergeResponseUsage(left: Usage, right: Usage): Usage {
-  return {
-    promptTokens: Math.max(left.promptTokens, right.promptTokens),
-    completionTokens: Math.max(left.completionTokens, right.completionTokens),
-    cachedTokens: Math.max(left.cachedTokens, right.cachedTokens),
-    totalTokens: Math.max(left.totalTokens, right.totalTokens, right.promptTokens + right.completionTokens),
-  };
+  return mergeCanonicalUsage(left, right);
 }
 
 function withResponsesUsageDetails(value: Record<string, unknown>): Record<string, unknown> {
