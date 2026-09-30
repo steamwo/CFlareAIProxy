@@ -1,3 +1,8 @@
+import {
+  calculateUsageCostMicros,
+  canonicalUsage,
+  MAX_SAFE_USAGE_INTEGER,
+} from "./usage-numbers";
 import type { Env, Usage, UsageAggregateEvent, UsageErrorEvent, UsageQueueEvent } from "./types";
 
 interface PriceRow {
@@ -14,13 +19,11 @@ function priceKey(providerId: string, model: string): string {
 
 function costMicros(usage: Usage, price?: PriceRow): number {
   if (!price) return 0;
-  const cachedTokens = Math.min(usage.promptTokens, usage.cachedTokens);
-  const uncachedInputTokens = Math.max(0, usage.promptTokens - cachedTokens);
-  return Math.max(0, Math.ceil(
-    (uncachedInputTokens * price.input_micros_per_million
-      + cachedTokens * price.cache_micros_per_million
-      + usage.completionTokens * price.output_micros_per_million) / 1_000_000,
-  ));
+  return calculateUsageCostMicros(usage, {
+    inputMicrosPerMillion: price.input_micros_per_million,
+    outputMicrosPerMillion: price.output_micros_per_million,
+    cacheMicrosPerMillion: price.cache_micros_per_million,
+  });
 }
 
 const ACTIVITY_COLUMNS = `bucket,source_id,gateway_key_id,provider_id,credential_id,public_model,upstream_model,endpoint,
@@ -47,11 +50,11 @@ const ACTIVITY_DELTA_SQL = `INSERT INTO request_activity_5m (${ACTIVITY_COLUMNS}
        requests=request_activity_5m.requests+excluded.requests,
        successes=request_activity_5m.successes+excluded.successes,
        failures=request_activity_5m.failures+excluded.failures,
-       prompt_tokens=request_activity_5m.prompt_tokens+excluded.prompt_tokens,
-       completion_tokens=request_activity_5m.completion_tokens+excluded.completion_tokens,
-       cached_tokens=request_activity_5m.cached_tokens+excluded.cached_tokens,
-       total_tokens=request_activity_5m.total_tokens+excluded.total_tokens,
-       cost_micros=request_activity_5m.cost_micros+excluded.cost_micros,
+       prompt_tokens=MIN(9007199254740991,request_activity_5m.prompt_tokens+excluded.prompt_tokens),
+       completion_tokens=MIN(9007199254740991,request_activity_5m.completion_tokens+excluded.completion_tokens),
+       cached_tokens=MIN(9007199254740991,request_activity_5m.cached_tokens+excluded.cached_tokens),
+       total_tokens=MIN(9007199254740991,request_activity_5m.total_tokens+excluded.total_tokens),
+       cost_micros=MIN(9007199254740991,request_activity_5m.cost_micros+excluded.cost_micros),
        latency_sum_ms=request_activity_5m.latency_sum_ms+excluded.latency_sum_ms,
        first_token_sum_ms=request_activity_5m.first_token_sum_ms+excluded.first_token_sum_ms,
        first_token_samples=request_activity_5m.first_token_samples+excluded.first_token_samples,
@@ -83,12 +86,13 @@ const FLUSH_DEDUPE_PRUNE_EVERY = 50;
 let flushDedupeBatchCounter = 0;
 
 function aggregateStatements(env: Env, event: UsageAggregateEvent, price?: PriceRow): D1PreparedStatement[] {
-  const cost = costMicros({
-    promptTokens: event.promptTokens,
-    completionTokens: event.completionTokens,
-    cachedTokens: event.cachedTokens,
-    totalTokens: event.totalTokens,
-  }, price);
+  const usage = canonicalUsage(
+    event.promptTokens,
+    event.completionTokens,
+    event.cachedTokens,
+    event.totalTokens,
+  );
+  const cost = costMicros(usage, price);
   const values = [
     event.bucket,
     event.sourceId,
@@ -101,10 +105,10 @@ function aggregateStatements(env: Env, event: UsageAggregateEvent, price?: Price
     event.requests,
     event.successes,
     event.failures,
-    event.promptTokens,
-    event.completionTokens,
-    event.cachedTokens,
-    event.totalTokens,
+    usage.promptTokens,
+    usage.completionTokens,
+    usage.cachedTokens,
+    usage.totalTokens,
     cost,
     event.latencySumMs,
     event.firstTokenSumMs,
@@ -122,7 +126,13 @@ function aggregateStatements(env: Env, event: UsageAggregateEvent, price?: Price
 
 function errorStatement(env: Env, message: UsageErrorEvent, price?: PriceRow): D1PreparedStatement {
   const event = message.event;
-  const cost = costMicros(event.usage, price);
+  const usage = canonicalUsage(
+    usage.promptTokens,
+    usage.completionTokens,
+    usage.cachedTokens,
+    usage.totalTokens,
+  );
+  const cost = costMicros(usage, price);
   return env.DB.prepare(
     `INSERT OR REPLACE INTO request_logs
       (request_id,gateway_key_id,provider_id,credential_id,public_model,upstream_model,
