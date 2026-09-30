@@ -51,8 +51,9 @@ export async function refreshCredentialForInference(
   env: Env,
   provider: ProviderConfig,
   credential: Credential,
+  requestProxyOverride?: string,
 ): Promise<Credential> {
-  if (!credentialProxyUrl(credential)) return refreshCredential(env, provider, credential);
+  if (!requestProxyOverride && !credentialProxyUrl(credential)) return refreshCredential(env, provider, credential);
   if (provider.kind !== "kimi" && provider.kind !== "codex") return refreshCredential(env, provider, credential);
   if (!credential.refreshToken) return credential;
   const tokenUrl = stringValue(provider.auth, "token_url");
@@ -77,7 +78,7 @@ export async function refreshCredentialForInference(
         credential,
         tokenUrl,
         { method: "POST", headers, body },
-        { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS },
+        { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS, requestProxyOverride },
       );
     } catch (error) {
       throw oauthRefreshTransportError(provider, error);
@@ -89,7 +90,7 @@ export async function refreshCredentialForInference(
       credential,
       tokenUrl,
       { method: "POST", headers, body },
-      { purpose: "oauth", timeoutMs: 30_000 },
+      { purpose: "oauth", timeoutMs: 30_000, requestProxyOverride },
     );
   }
   const text = await response.text();
