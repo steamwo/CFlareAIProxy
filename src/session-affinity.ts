@@ -180,18 +180,25 @@ export function qoderClientSessionKey(request: Request, body: Record<string, unk
 
   if (path === "/v1/responses" || path === "/v1/chat/completions") {
     const metadata = parseCodexTurnMetadata(headers.get("x-codex-turn-metadata"));
+    const nested = nestedRequest(body);
+    const agentId = metadataIdentity(record(body.metadata)) ?? metadataIdentity(record(nested.metadata));
+    const withAgent = (value: string): string => agentId ? `${value}/agent/${agentId}` : value;
     const threadId = firstHeaderValue(headers, "thread-id", "thread_id") ?? metadata.threadId;
-    if (threadId) return `codex/thread/${threadId}`;
+    if (threadId) return withAgent(`codex/thread/${threadId}`);
     const windowId = normalizeExplicitId(headers.get("x-codex-window-id"));
-    if (windowId) return `codex/window/${windowId}`;
-    const sessionId = firstHeaderValue(headers, "session-id", "session_id");
-    if (sessionId) return `codex/session/${sessionId}`;
+    if (windowId) return withAgent(`codex/window/${windowId}`);
+    const sessionId = firstHeaderValue(headers, "session-id", "session_id")
+      ?? metadata.sessionId
+      ?? normalizeExplicitId(body.session_id)
+      ?? normalizeExplicitId(body.sessionId)
+      ?? normalizeExplicitId(nested.session_id)
+      ?? normalizeExplicitId(nested.sessionId);
+    if (sessionId) return withAgent(`codex/session/${sessionId}`);
     const openAiSessionId = normalizeExplicitId(headers.get("x-session-id"));
-    if (openAiSessionId) return `openai/session/${openAiSessionId}`;
-    if (metadata.sessionId) return `codex/session/${metadata.sessionId}`;
+    if (openAiSessionId) return withAgent(`openai/session/${openAiSessionId}`);
     if (path === "/v1/responses") {
-      const promptCacheKey = normalizeExplicitId(body.prompt_cache_key);
-      if (promptCacheKey) return `openai-responses/prompt-cache/${promptCacheKey}`;
+      const promptCacheKey = normalizeExplicitId(body.prompt_cache_key) ?? normalizeExplicitId(nested.prompt_cache_key);
+      if (promptCacheKey) return withAgent(`openai-responses/prompt-cache/${promptCacheKey}`);
     }
   }
 
