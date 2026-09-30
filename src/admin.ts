@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { BUILTIN_CHANNELS, getBuiltinChannel, isBuiltinChannelId, standardOpenAiConfig } from "./builtin-channels";
+import { workerClientIp } from "./client-ip";
 import { encryptSecret } from "./crypto";
 import {
   createCredential, createGatewayKey, deleteProviderProxyConfig, deleteSystemProxyUrl, getCredential, getProvider,
@@ -105,8 +106,7 @@ const LOGIN_THROTTLE_DO_NAME = "admin-login";
  * an attacker a trivial way to lock the real operator out by name.
  */
 function loginScopes(request: Request): string[] {
-  const ip = request.headers.get("cf-connecting-ip")?.trim();
-  return [`ip:${ip || "unknown"}`, "global"];
+  return [`ip:${workerClientIp(request) ?? "unknown"}`, "global"];
 }
 
 async function callLoginThrottle<T>(env: Env, path: string, scopes: string[]): Promise<T | null> {
