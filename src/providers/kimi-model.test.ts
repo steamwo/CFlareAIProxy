@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProxyRequestContext } from "../types";
-import { buildKimiRequest } from "./kimi";
-import { normalizeKimiUpstreamModel } from "./kimi-model";
+import { buildKimiRequest, normalizeKimiTemperature } from "./kimi";
+import { kimiKnownModelCapabilities, normalizeKimiUpstreamModel } from "./kimi-model";
 
 const cases: Array<[string, string]> = [
   ["kimi-k2.8", "kimi-for-coding"],
@@ -84,6 +84,57 @@ describe("Kimi upstream model canonicalization", () => {
   it("keeps unrelated route spelling while stripping [1m] before a thinking suffix", () => {
     expect(normalizeKimiUpstreamModel("kimi-k2.6[1m](high)")).toBe("kimi-k2.6(high)");
     expect(normalizeKimiUpstreamModel("My-Custom-Kimi[1m](1024)")).toBe("My-Custom-Kimi(1024)");
+  });
+
+
+  it("guards Kimi temperature according to thinking mode", () => {
+    expect(normalizeKimiTemperature({ model: "kimi", temperature: 1 })).toEqual({ model: "kimi", temperature: 1 });
+    expect(normalizeKimiTemperature({ model: "kimi", temperature: 0.6 })).toEqual({ model: "kimi" });
+    expect(normalizeKimiTemperature({ model: "kimi", thinking: { type: "enabled" }, temperature: 1 })).toEqual({
+      model: "kimi", thinking: { type: "enabled" }, temperature: 1,
+    });
+    expect(normalizeKimiTemperature({ model: "kimi", thinking: { type: "enabled" }, temperature: 0.7 })).toEqual({
+      model: "kimi", thinking: { type: "enabled" },
+    });
+    expect(normalizeKimiTemperature({ model: "kimi", thinking: { type: "disabled" }, temperature: 0.6 })).toEqual({
+      model: "kimi", thinking: { type: "disabled" }, temperature: 0.6,
+    });
+    expect(normalizeKimiTemperature({ model: "kimi", thinking: { type: "disabled" }, temperature: 1 })).toEqual({
+      model: "kimi", thinking: { type: "disabled" },
+    });
+    expect(normalizeKimiTemperature({ model: "kimi", thinking: { type: "disabled" }, temperature: "0.6" })).toEqual({
+      model: "kimi", thinking: { type: "disabled" },
+    });
+  });
+
+  it("applies the safety guard after request overrides", () => {
+    const value = context("kimi-k2.8");
+    value.endpoint = "chat";
+    value.body = {
+      model: "public-kimi",
+      messages: [{ role: "user", content: "hello" }],
+      thinking: { type: "disabled" },
+    };
+    value.provider.options.request_overrides = { temperature: 0.7 };
+    const request = buildKimiRequest(value);
+    const body = JSON.parse(String(request.init.body)) as Record<string, unknown>;
+    expect(body.temperature).toBeUndefined();
+  });
+
+  it("enriches known discovered K2.8/K3 models without inventing unknown models", () => {
+    expect(kimiKnownModelCapabilities("kimi-k2.8")).toMatchObject({
+      context_window: 1048576,
+      max_completion_tokens: 65536,
+      reasoning_levels: ["low", "high", "max"],
+      reasoning_zero_allowed: true,
+      input_modalities: ["text", "image", "video"],
+      output_modalities: ["text"],
+    });
+    expect(kimiKnownModelCapabilities("kimi-k3-256k")).toMatchObject({
+      context_window: 262144,
+      reasoning_zero_allowed: true,
+    });
+    expect(kimiKnownModelCapabilities("custom-model")).toEqual({});
   });
 
   it("uses the canonical K2.8 model in the actual Kimi request body", () => {
