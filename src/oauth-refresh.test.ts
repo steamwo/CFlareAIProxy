@@ -73,6 +73,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function jwtWithExp(exp: number): string {
+  const encode = (value: unknown) => btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return `${encode({ alg: "none" })}.${encode({ exp })}.sig`;
+}
+
 describe("Codex OAuth refresh transport", () => {
   it("uses a bounded 30 second request and exposes timeout as an OAuth refresh failure", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit): Promise<Response> => {
@@ -98,6 +103,26 @@ describe("Codex OAuth refresh transport", () => {
     const body = fetchMock.mock.calls[0]?.[1]?.body;
     expect(body).toBeInstanceOf(URLSearchParams);
     expect((body as URLSearchParams).get("grant_type")).toBe("refresh_token");
+  });
+
+  it("uses refreshed access-token JWT exp ahead of OAuth expiry fields", async () => {
+    const jwtExpiry = Math.floor(Date.now() / 1000) + 7200;
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      access_token: jwtWithExp(jwtExpiry),
+      expires_in: 60,
+    })));
+
+    const refreshed = await refreshCredential(env, codexProvider(), expiredCredential());
+
+    expect(refreshed.expires_at).toBe(jwtExpiry);
+    expect(dbMocks.updateCredentialTokens).toHaveBeenCalledWith(
+      env,
+      "credential-codex",
+      expect.any(String),
+      "refresh-token",
+      jwtExpiry,
+      expect.any(Object),
+    );
   });
 
   it("does not inherit cancellation from an unrelated request waiter", async () => {
