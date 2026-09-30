@@ -199,6 +199,27 @@ export function qoderClientSessionKey(request: Request, body: Record<string, unk
   return signal ? `cflare/${signal.source}/${signal.value}` : undefined;
 }
 
+function nestedRequest(body: Record<string, unknown>): Record<string, unknown> {
+  return record(body.request);
+}
+
+function metadataIdentity(metadata: Record<string, unknown>): string | undefined {
+  return normalizeExplicitId(metadata.subagent_id)
+    ?? normalizeExplicitId(metadata.subagentId)
+    ?? normalizeExplicitId(metadata.agent_id)
+    ?? normalizeExplicitId(metadata.agentId);
+}
+
+function hierarchicalSignal(
+  source: string,
+  value: string,
+  agentId: string | undefined,
+): SessionSignal {
+  return agentId
+    ? { source: `${source}-agent`, value: JSON.stringify([value, agentId]) }
+    : { source, value };
+}
+
 export function extractSessionAffinitySignals(request: Request, body: Record<string, unknown>): SessionSignal[] {
   const headers = request.headers;
   const claude = claudeSessionSignal(request, body);
@@ -211,8 +232,12 @@ export function extractSessionAffinitySignals(request: Request, body: Record<str
   const codex = codexSessionSignal(request);
   if (codex) return codexSignalAliases(codex);
 
-  const promptCacheKey = normalizeExplicitId(body.prompt_cache_key);
-  const responsesConversation = conversationId(body);
+  const nested = nestedRequest(body);
+  const topMetadata = record(body.metadata);
+  const nestedMetadata = record(nested.metadata);
+  const agentId = metadataIdentity(topMetadata) ?? metadataIdentity(nestedMetadata);
+  const promptCacheKey = normalizeExplicitId(body.prompt_cache_key) ?? normalizeExplicitId(nested.prompt_cache_key);
+  const responsesConversation = conversationId(body) ?? conversationId(nested);
   const clientRequest = headerSignal(headers, "x-client-request-id", "client-request");
   const explicit = [
     headerSignal(headers, "session-id", "codex"),
@@ -234,20 +259,22 @@ export function extractSessionAffinitySignals(request: Request, body: Record<str
   }
 
   for (const [field, source] of [["session_id", "session"], ["sessionId", "session"]] as const) {
-    const value = normalizeExplicitId(body[field]);
-    if (value) return [{ source, value }];
+    const value = normalizeExplicitId(body[field]) ?? normalizeExplicitId(nested[field]);
+    if (value) return [hierarchicalSignal(source, value, agentId)];
   }
 
   if (promptCacheKey) {
-    const signals: SessionSignal[] = [{ source: "prompt-cache", value: promptCacheKey }];
-    if (responsesConversation) signals.push({ source: "conversation", value: responsesConversation });
+    const signals: SessionSignal[] = [hierarchicalSignal("prompt-cache", promptCacheKey, agentId)];
+    if (responsesConversation && !agentId) signals.push({ source: "conversation", value: responsesConversation });
     return signals;
   }
 
-  if (responsesConversation) return [{ source: "conversation", value: responsesConversation }];
+  if (responsesConversation) return [hierarchicalSignal("conversation", responsesConversation, agentId)];
 
-  const metadataUser = normalizeExplicitId(record(body.metadata).user_id);
-  if (metadataUser) return [{ source: "metadata-user", value: metadataUser }];
+  const metadataUser = normalizeExplicitId(topMetadata.user_id) ?? normalizeExplicitId(nestedMetadata.user_id);
+  if (metadataUser) return [hierarchicalSignal("metadata-user", metadataUser, agentId)];
+
+  if (agentId) return [{ source: "agent", value: agentId }];
 
   const legacyConversation = normalizeExplicitId(body.conversation_id);
   if (legacyConversation) return [{ source: "conversation", value: legacyConversation }];
