@@ -183,7 +183,7 @@ function normalizeCodexSchemaNode(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
 
   const schema = value as Record<string, unknown>;
-  const output: Record<string, unknown> = normalizeCodexConstUnion(schema);
+  const output: Record<string, unknown> = { ...normalizeCodexConstUnion(schema) };
   if (typeof schema.pattern === "string" && hasUnsupportedUnicodePropertyEscape(schema.pattern)) delete output.pattern;
 
   const patternProperties = record(schema.patternProperties);
