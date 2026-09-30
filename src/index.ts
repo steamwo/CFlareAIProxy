@@ -18,6 +18,7 @@ import { refreshCredentialQuota } from "./quota";
 import { RateLimiter } from "./rate-limiter";
 import type { CredentialRow, Env, GatewayEndpoint, GatewayKeyRow, LogLevel, QuotaSnapshot, QuotaSnapshotRow, UsageQueueEvent } from "./types";
 import { persistUsageQueueBatch } from "./usage-storage";
+import { validateProxyUrl } from "./upstream-fetch";
 import { parseJson } from "./utils";
 
 export { AccountPool, RateLimiter };
@@ -27,6 +28,14 @@ const ACCOUNT_POOL_PROVIDER_IDS = BUILTIN_CHANNELS.map((channel) => channel.id);
 const ACTIVITY_BUCKET_SECONDS = 5 * 60;
 const ACTIVITY_BUCKET_COUNT = 24;
 const LOG_LEVELS = new Set<LogLevel>(["error", "warn", "info", "debug"]);
+
+function trustedPlaygroundProxyOverride(request: Request): string | undefined {
+  const raw = request.headers.get("x-cflare-request-proxy")?.trim();
+  if (!raw) return undefined;
+  if (raw.toLowerCase() === "direct" || raw.toLowerCase() === "none") return "direct";
+  validateProxyUrl(raw);
+  return raw;
+}
 
 app.use("/v1/*", cors({
   origin: "*",
@@ -93,7 +102,9 @@ adminApp.post("/api/playground/:endpoint/:keyId", async (c) => {
   if (!gatewayKey || (gatewayKey.expires_at !== null && gatewayKey.expires_at <= now)) {
     throw new GatewayError(404, "PLAYGROUND_KEY_UNAVAILABLE", "所选网关 Key 不存在、已停用或已过期", "invalid_request_error");
   }
-  return proxyGeneration(c, endpoint, gatewayKey);
+  return proxyGeneration(c, endpoint, gatewayKey, {
+    requestProxyOverride: trustedPlaygroundProxyOverride(c.req.raw),
+  });
 });
 
 adminApp.get("/api/settings/logging", async (c) => c.json({ data: await getLoggingSettings(c.env) }));

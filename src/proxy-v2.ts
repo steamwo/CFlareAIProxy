@@ -107,10 +107,15 @@ function requestMemo<T>(load: (key: string) => Promise<T>): (key: string) => Pro
   };
 }
 
+export interface ProxyGenerationOptions {
+  requestProxyOverride?: string;
+}
+
 export async function proxyGeneration(
   c: Context<{ Bindings: Env }>,
   endpoint: GatewayEndpoint,
   preauthenticatedGatewayKey?: GatewayKeyRow,
+  options: ProxyGenerationOptions = {},
 ): Promise<Response> {
   const requestId = crypto.randomUUID();
   const startedAt = Date.now();
@@ -295,7 +300,7 @@ export async function proxyGeneration(
           const lock = await postDo<{ acquired: boolean; lockId?: string }>(poolStub!, "/lock", { credentialId: credential.id, ttlMs: 60_000 });
           if (lock.acquired && lock.lockId) {
             try {
-              credential = await refreshCredentialForInference(c.env, provider, credential);
+              credential = await refreshCredentialForInference(c.env, provider, credential, options.requestProxyOverride);
             } finally {
               await postDo(poolStub!, "/unlock", { credentialId: credential.id, lockId: lock.lockId }).catch(() => undefined);
             }
@@ -343,7 +348,11 @@ export async function proxyGeneration(
               }
             }
           } else {
-            upstream = await providerFetchForCredential(c.env, provider, credential, upstreamRequest.url, upstreamRequest.init, { purpose: "inference", timeoutMs });
+            upstream = await providerFetchForCredential(c.env, provider, credential, upstreamRequest.url, upstreamRequest.init, {
+              purpose: "inference",
+              timeoutMs,
+              requestProxyOverride: options.requestProxyOverride,
+            });
           }
         } catch (error) {
           const normalized = classifyTransportError(error, provider.name, timeoutMs);
