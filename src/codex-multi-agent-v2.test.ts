@@ -4,6 +4,7 @@ import {
   isCodexMultiAgentClient,
   optimizeCodexMultiAgentV2Body,
   restoreCollaborationNamespaceValue,
+  rewriteCodexOrphanDelegationInput,
 } from "./codex-multi-agent-v2";
 
 const models = [
@@ -115,6 +116,49 @@ describe("Codex multi-agent v2", () => {
     const message = requiredRecord(input[0], "normalized agent message");
     const content = requiredRecord((message.content as Array<Record<string, unknown>>)[0], "normalized agent content");
     expect(content).toEqual({ type: "input_text", text: "agent payload" });
+  });
+
+  it("rewrites only orphan codex_app delegation outputs behind the explicit compatibility gate", () => {
+    const body = {
+      input: [
+        { type: "function_call", call_id: "paired", namespace: "codex_app", name: "create_thread" },
+        { type: "function_call_output", call_id: "paired", namespace: "codex_app", name: "create_thread", output: "paired output" },
+        { type: "function_call_output", call_id: "missing", namespace: "codex_app", name: "send_message_to_thread", output: { ok: true } },
+        { type: "function_call_output", namespace: "codex_app", name: "create_thread", output: "blank id" },
+        { type: "function_call_output", call_id: "other", namespace: "other", name: "create_thread", output: "untouched" },
+      ],
+    };
+
+    expect(rewriteCodexOrphanDelegationInput(body, false, "collab_spawn")).toBe(body);
+    expect(rewriteCodexOrphanDelegationInput(body, true, "other")).toBe(body);
+
+    const rewritten = rewriteCodexOrphanDelegationInput(body, true, "COLLAB_SPAWN");
+    const input = rewritten.input as Array<Record<string, unknown>>;
+    expect(input[1]).toEqual(body.input[1]);
+    expect(input[2]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: 'Tool output from codex_app__send_message_to_thread:\n{"ok":true}' }],
+    });
+    expect(input[3]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Tool output from codex_app__create_thread:\nblank id" }],
+    });
+    expect(input[4]).toEqual(body.input[4]);
+  });
+
+  it("consumes duplicate matching call ids deterministically and rewrites only excess outputs", () => {
+    const rewritten = rewriteCodexOrphanDelegationInput({
+      input: [
+        { type: "function_call", call_id: "dup", namespace: "codex_app", name: "create_thread" },
+        { type: "function_call_output", call_id: "dup", namespace: "codex_app", name: "create_thread", output: "first" },
+        { type: "function_call_output", call_id: "dup", namespace: "codex_app", name: "create_thread", output: "second" },
+      ],
+    }, true, "collab_spawn");
+    const input = rewritten.input as Array<Record<string, unknown>>;
+    expect(input[1]?.type).toBe("function_call_output");
+    expect(input[2]?.type).toBe("message");
   });
 
   it("restores optimized collaboration names without rewriting tool arguments", () => {
