@@ -2,6 +2,7 @@ import { getCredential, getProvider, getProviderProxyConfig, loadCachedProvider 
 import type { ProviderCache } from "./db";
 import { GatewayError } from "./errors";
 import { providerAuthHeaders } from "./providers/headers";
+import { kimiKnownModelCapabilities } from "./providers/kimi-model";
 import { buildQoderHeaders } from "./providers/qoder-crypto";
 import { openCodeGatewayEndpoints } from "./providers/opencode";
 import { fetchOpenCodeWithFailover } from "./providers/opencode-failover";
@@ -287,6 +288,11 @@ function endpointsForModel(provider: ProviderConfig, modelId: string): GatewayEn
   return endpointsForProvider(provider);
 }
 
+function discoveredModelCapabilities(provider: ProviderConfig, model: ModelCandidate): Record<string, unknown> {
+  if (provider.kind !== "kimi") return model.capabilities;
+  return { ...kimiKnownModelCapabilities(model.id), ...model.capabilities };
+}
+
 async function fetchModelPayload(
   env: Env,
   provider: ProviderConfig,
@@ -522,7 +528,7 @@ export async function refreshCredentialModels(
             display_name: model.displayName,
             endpoint,
             owned_by: model.ownedBy || provider.id,
-            capabilities_json: JSON.stringify(model.capabilities),
+            capabilities_json: JSON.stringify(discoveredModelCapabilities(provider, model)),
             raw_json: JSON.stringify(model.raw),
             discovered_at: now,
           });
