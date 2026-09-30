@@ -119,7 +119,11 @@ export function classifyUpstreamResponse(
     ?? stringAt(payload, "error_description")
     ?? (body.trim() || `Upstream returned HTTP ${status}`);
   const lower = `${upstreamCode} ${upstreamType} ${message} ${body}`.toLowerCase();
-  const retryAfterMs = retryAfterFromHeaders(headers) ?? retryAfterFromPayload(payload);
+  const retryAfterHintMs = retryAfterFromHeaders(headers) ?? retryAfterFromPayload(payload);
+  const compactUpstreamCode = upstreamCode.replace(/[^a-z0-9]/g, "");
+  const explicitTpmLimit = compactUpstreamCode.includes("tpmratelimitexceeded")
+    || /(?:tokens?\s+per\s+minute|tokens?\s*\/\s*min(?:ute)?).*(?:limit|exceed)|(?:limit|exceed).*(?:tokens?\s+per\s+minute|tokens?\s*\/\s*min(?:ute)?)/i.test(message);
+  const retryAfterMs = retryAfterHintMs ?? (status === 429 && explicitTpmLimit ? 60_000 : undefined);
 
   if (status === 413 || upstreamCode === "context_length_exceeded" || upstreamCode === "context_too_large"
     || /context (?:window|length)|maximum context|too many tokens/.test(lower)) {
