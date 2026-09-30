@@ -180,23 +180,51 @@ export function qoderClientSessionKey(request: Request, body: Record<string, unk
 
   if (path === "/v1/responses" || path === "/v1/chat/completions") {
     const metadata = parseCodexTurnMetadata(headers.get("x-codex-turn-metadata"));
+    const nested = nestedRequest(body);
+    const agentId = metadataIdentity(record(body.metadata)) ?? metadataIdentity(record(nested.metadata));
+    const withAgent = (value: string): string => agentId ? `${value}/agent/${agentId}` : value;
     const threadId = firstHeaderValue(headers, "thread-id", "thread_id") ?? metadata.threadId;
-    if (threadId) return `codex/thread/${threadId}`;
+    if (threadId) return withAgent(`codex/thread/${threadId}`);
     const windowId = normalizeExplicitId(headers.get("x-codex-window-id"));
-    if (windowId) return `codex/window/${windowId}`;
-    const sessionId = firstHeaderValue(headers, "session-id", "session_id");
-    if (sessionId) return `codex/session/${sessionId}`;
+    if (windowId) return withAgent(`codex/window/${windowId}`);
+    const sessionId = firstHeaderValue(headers, "session-id", "session_id")
+      ?? metadata.sessionId
+      ?? normalizeExplicitId(body.session_id)
+      ?? normalizeExplicitId(body.sessionId)
+      ?? normalizeExplicitId(nested.session_id)
+      ?? normalizeExplicitId(nested.sessionId);
+    if (sessionId) return withAgent(`codex/session/${sessionId}`);
     const openAiSessionId = normalizeExplicitId(headers.get("x-session-id"));
-    if (openAiSessionId) return `openai/session/${openAiSessionId}`;
-    if (metadata.sessionId) return `codex/session/${metadata.sessionId}`;
+    if (openAiSessionId) return withAgent(`openai/session/${openAiSessionId}`);
     if (path === "/v1/responses") {
-      const promptCacheKey = normalizeExplicitId(body.prompt_cache_key);
-      if (promptCacheKey) return `openai-responses/prompt-cache/${promptCacheKey}`;
+      const promptCacheKey = normalizeExplicitId(body.prompt_cache_key) ?? normalizeExplicitId(nested.prompt_cache_key);
+      if (promptCacheKey) return withAgent(`openai-responses/prompt-cache/${promptCacheKey}`);
     }
   }
 
   const signal = extractSessionAffinitySignal(request, body);
   return signal ? `cflare/${signal.source}/${signal.value}` : undefined;
+}
+
+function nestedRequest(body: Record<string, unknown>): Record<string, unknown> {
+  return record(body.request);
+}
+
+function metadataIdentity(metadata: Record<string, unknown>): string | undefined {
+  return normalizeExplicitId(metadata.subagent_id)
+    ?? normalizeExplicitId(metadata.subagentId)
+    ?? normalizeExplicitId(metadata.agent_id)
+    ?? normalizeExplicitId(metadata.agentId);
+}
+
+function hierarchicalSignal(
+  source: string,
+  value: string,
+  agentId: string | undefined,
+): SessionSignal {
+  return agentId
+    ? { source: `${source}-agent`, value: JSON.stringify([value, agentId]) }
+    : { source, value };
 }
 
 export function extractSessionAffinitySignals(request: Request, body: Record<string, unknown>): SessionSignal[] {
@@ -211,8 +239,12 @@ export function extractSessionAffinitySignals(request: Request, body: Record<str
   const codex = codexSessionSignal(request);
   if (codex) return codexSignalAliases(codex);
 
-  const promptCacheKey = normalizeExplicitId(body.prompt_cache_key);
-  const responsesConversation = conversationId(body);
+  const nested = nestedRequest(body);
+  const topMetadata = record(body.metadata);
+  const nestedMetadata = record(nested.metadata);
+  const agentId = metadataIdentity(topMetadata) ?? metadataIdentity(nestedMetadata);
+  const promptCacheKey = normalizeExplicitId(body.prompt_cache_key) ?? normalizeExplicitId(nested.prompt_cache_key);
+  const responsesConversation = conversationId(body) ?? conversationId(nested);
   const clientRequest = headerSignal(headers, "x-client-request-id", "client-request");
   const explicit = [
     headerSignal(headers, "session-id", "codex"),
@@ -234,20 +266,22 @@ export function extractSessionAffinitySignals(request: Request, body: Record<str
   }
 
   for (const [field, source] of [["session_id", "session"], ["sessionId", "session"]] as const) {
-    const value = normalizeExplicitId(body[field]);
-    if (value) return [{ source, value }];
+    const value = normalizeExplicitId(body[field]) ?? normalizeExplicitId(nested[field]);
+    if (value) return [hierarchicalSignal(source, value, agentId)];
   }
 
   if (promptCacheKey) {
-    const signals: SessionSignal[] = [{ source: "prompt-cache", value: promptCacheKey }];
-    if (responsesConversation) signals.push({ source: "conversation", value: responsesConversation });
+    const signals: SessionSignal[] = [hierarchicalSignal("prompt-cache", promptCacheKey, agentId)];
+    if (responsesConversation && !agentId) signals.push({ source: "conversation", value: responsesConversation });
     return signals;
   }
 
-  if (responsesConversation) return [{ source: "conversation", value: responsesConversation }];
+  if (responsesConversation) return [hierarchicalSignal("conversation", responsesConversation, agentId)];
 
-  const metadataUser = normalizeExplicitId(record(body.metadata).user_id);
-  if (metadataUser) return [{ source: "metadata-user", value: metadataUser }];
+  const metadataUser = normalizeExplicitId(topMetadata.user_id) ?? normalizeExplicitId(nestedMetadata.user_id);
+  if (metadataUser) return [hierarchicalSignal("metadata-user", metadataUser, agentId)];
+
+  if (agentId) return [{ source: "agent", value: agentId }];
 
   const legacyConversation = normalizeExplicitId(body.conversation_id);
   if (legacyConversation) return [{ source: "conversation", value: legacyConversation }];
