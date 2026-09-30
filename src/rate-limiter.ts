@@ -1,6 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { runModelRefreshSweep, runProviderModelRefreshPage } from "./models";
-import { canonicalUsage, safeNonNegativeInteger } from "./usage-numbers";
+import {
+  canonicalUsage,
+  checkedSafeUsageAdd,
+  MAX_SAFE_USAGE_INTEGER,
+  safeNonNegativeInteger,
+} from "./usage-numbers";
 import type { Env, RateLease, UsageAggregateEvent, UsageEvent } from "./types";
 
 interface AcquirePayload {
@@ -425,7 +430,7 @@ export class RateLimiter extends DurableObject<Env> {
       .one()!;
 
     let minuteCount = state.minute_count;
-    let monthTokens = state.month_tokens;
+    let monthTokens = safeNonNegativeInteger(state.month_tokens) ?? MAX_SAFE_USAGE_INTEGER;
     if (state.minute_window !== minuteWindow) minuteCount = 0;
     if (state.month_window !== monthWindow) monthTokens = 0;
 
@@ -436,7 +441,8 @@ export class RateLimiter extends DurableObject<Env> {
       return { leaseId: "", allowed: false, reason: "CONCURRENCY_LIMIT_EXCEEDED", retryAfterMs: 1000 };
     }
     const reservation = safeNonNegativeInteger(payload.estimatedTokens) ?? 0;
-    if (payload.monthlyTokenLimit > 0 && monthTokens + reservation > payload.monthlyTokenLimit) {
+    const nextMonthTokens = checkedSafeUsageAdd(monthTokens, reservation);
+    if (payload.monthlyTokenLimit > 0 && (nextMonthTokens === undefined || nextMonthTokens > payload.monthlyTokenLimit)) {
       return { leaseId: "", allowed: false, reason: "TOKEN_QUOTA_EXCEEDED" };
     }
 
@@ -447,7 +453,7 @@ export class RateLimiter extends DurableObject<Env> {
       minuteWindow,
       minuteCount + 1,
       monthWindow,
-      monthTokens + reservation,
+      nextMonthTokens ?? MAX_SAFE_USAGE_INTEGER,
     );
     this.ctx.storage.sql.exec(
       "INSERT INTO leases(lease_id, reserved_tokens, expires_at) VALUES (?, ?, ?)",
@@ -466,7 +472,7 @@ export class RateLimiter extends DurableObject<Env> {
       this.ctx.storage.sql.exec("DELETE FROM leases WHERE lease_id = ?", leaseId);
       const chargedTokens = safeNonNegativeInteger(actualTokens) ?? lease.reserved_tokens;
       this.ctx.storage.sql.exec(
-        "UPDATE state SET inflight = MAX(0, inflight - 1), month_tokens = MAX(0, month_tokens + ?) WHERE singleton = 1",
+        "UPDATE state SET inflight = MAX(0, inflight - 1), month_tokens = MIN(9007199254740991, MAX(0, month_tokens + ?)) WHERE singleton = 1",
         chargedTokens - lease.reserved_tokens,
       );
       if (activity) await this.recordActivity(activity);
@@ -483,7 +489,7 @@ export class RateLimiter extends DurableObject<Env> {
       const chargedTokens = safeNonNegativeInteger(actualTokens) ?? tombstone.refunded_tokens;
       if (chargedTokens > 0) {
         this.ctx.storage.sql.exec(
-          "UPDATE state SET month_tokens = MAX(0, month_tokens + ?) WHERE singleton = 1",
+          "UPDATE state SET month_tokens = MIN(9007199254740991, MAX(0, month_tokens + ?)) WHERE singleton = 1",
           chargedTokens,
         );
       }
