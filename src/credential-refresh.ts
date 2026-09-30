@@ -2,6 +2,7 @@ import { updateCredentialTokens } from "./db";
 import { GatewayError } from "./errors";
 import { credentialProxyUrl, providerFetchForCredential } from "./credential-fetch";
 import { OAUTH_REFRESH_TIMEOUT_MS, oauthRefreshTransportError, refreshCredential } from "./oauth";
+import { jwtAccessTokenExpiry } from "./token-expiry";
 import type { Credential, Env, ProviderConfig } from "./types";
 import { classifyUpstreamResponse, gatewayErrorFromClassification } from "./upstream-errors";
 
@@ -101,7 +102,7 @@ export async function refreshCredentialForInference(
   const accessToken = stringValue(payload, "access_token") ?? stringValue(payload, "token");
   if (!accessToken) throw new GatewayError(502, "OAUTH_REFRESH_INVALID", `${provider.name} refresh response did not include an access token`, "upstream_error");
   const refreshToken = stringValue(payload, "refresh_token") ?? credential.refreshToken;
-  const expiresAt = tokenExpiry(payload) ?? credential.expires_at ?? undefined;
+  const expiresAt = jwtAccessTokenExpiry(accessToken) ?? tokenExpiry(payload) ?? credential.expires_at ?? undefined;
   await updateCredentialTokens(env, credential.id, accessToken, refreshToken, expiresAt, credential.metadata);
   return { ...credential, secret: accessToken, refreshToken, expires_at: expiresAt ?? credential.expires_at };
 }
