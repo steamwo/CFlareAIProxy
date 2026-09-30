@@ -3,7 +3,7 @@ import { createCredential, getProvider, updateCredentialTokens } from "./db";
 import { GatewayError } from "./errors";
 import type { Credential, Env, ProviderConfig } from "./types";
 import { decodeJwtPayload, nowSeconds, parseJson, pickString, pkceChallenge, randomToken } from "./utils";
-import { providerFetch } from "./upstream-fetch";
+import { providerFetch, type ProviderFetchOptions } from "./upstream-fetch";
 
 interface OAuthSessionRow {
   id: string;
@@ -500,7 +500,12 @@ export async function exchangeOAuthCode(
   return finalizeCredential(env, provider, session.row.id, payload);
 }
 
-export async function refreshCredential(env: Env, provider: ProviderConfig, credential: Credential): Promise<Credential> {
+export async function refreshCredential(
+  env: Env,
+  provider: ProviderConfig,
+  credential: Credential,
+  fetchOptions: Pick<ProviderFetchOptions, "requestProxyOverride"> = {},
+): Promise<Credential> {
   if (!credential.refreshToken || !credential.expires_at || credential.expires_at > nowSeconds() + 300) return credential;
   let payload: Record<string, unknown>;
   if (provider.kind === "qoder") {
@@ -509,7 +514,7 @@ export async function refreshCredential(env: Env, provider: ProviderConfig, cred
       method: "POST",
       headers: { authorization: `Bearer ${credential.secret}`, accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify({ refreshToken: credential.refreshToken }),
-    }, { purpose: "oauth", timeoutMs: 30_000 });
+    }, { purpose: "oauth", timeoutMs: 30_000, ...fetchOptions });
     payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
     if (!response.ok) return credential;
   } else {
@@ -533,7 +538,7 @@ export async function refreshCredential(env: Env, provider: ProviderConfig, cred
           method: "POST",
           headers,
           body,
-        }, { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS });
+        }, { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS, ...fetchOptions });
       } catch (error) {
         throw oauthRefreshTransportError(provider, error);
       }
@@ -542,7 +547,7 @@ export async function refreshCredential(env: Env, provider: ProviderConfig, cred
         method: "POST",
         headers,
         body,
-      }, { purpose: "oauth", timeoutMs: 30_000 });
+      }, { purpose: "oauth", timeoutMs: 30_000, ...fetchOptions });
     }
     payload = await (response.json() as Promise<Record<string, unknown>>).catch(() => ({}));
     if (!response.ok) throw new GatewayError(502, "OAUTH_REFRESH_FAILED", oauthEndpointError(provider, "refresh", response.status, payload));
