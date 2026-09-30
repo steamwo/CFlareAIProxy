@@ -173,7 +173,7 @@ function normalizeCodexConstUnion(schema: Record<string, unknown>): Record<strin
     return output;
   }
 
-  const output = { ...schema, enum: values };
+  const output: Record<string, unknown> = { ...schema, enum: values };
   delete output[unionName];
   return output;
 }
