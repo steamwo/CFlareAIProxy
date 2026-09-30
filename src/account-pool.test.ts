@@ -63,19 +63,27 @@ function acquire(
   pool: AccountPool,
   sessionKey: string | string[],
   candidates: PoolCandidate[] = CANDIDATES,
+  model?: string,
 ): Promise<PoolLease> {
   return post(pool, "/acquire", {
     providerId: PROVIDER_ID,
     strategy: "round_robin",
     candidates,
     sessionKey,
+    model,
   });
 }
 
 function release(
   pool: AccountPool,
   lease: PoolLease,
-  result: { success: boolean; statusCode?: number; cooldownMs?: number } = { success: true },
+  result: {
+    success: boolean;
+    statusCode?: number;
+    cooldownMs?: number;
+    cooldownScope?: "credential" | "model";
+    model?: string;
+  } = { success: true },
 ): Promise<{ ok: true }> {
   return post(pool, "/release", { leaseId: lease.leaseId, ...result });
 }
@@ -204,6 +212,96 @@ describe("AccountPool session affinity aliases", () => {
     const rebound = await acquire(pool, promptCacheKey);
     expect(rebound.credentialId).toBe("credential-b");
     await release(pool, rebound);
+    close();
+  });
+});
+
+
+describe("AccountPool model-scoped cooldown", () => {
+  it("blocks only the failed model for a credential", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { pool, close } = await createPool();
+
+    const modelX = await acquire(pool, "session-x", CANDIDATES, "target-x");
+    expect(modelX.credentialId).toBe("credential-a");
+    await release(pool, modelX, {
+      success: false,
+      statusCode: 429,
+      cooldownMs: 60_000,
+      cooldownScope: "model",
+      model: "target-x",
+    });
+
+    const modelY = await acquire(pool, "session-y", CANDIDATES, "target-y");
+    expect(modelY.credentialId).toBe("credential-a");
+    await release(pool, modelY, { success: true, model: "target-y" });
+
+    const retryX = await acquire(pool, "session-x", CANDIDATES, "target-x");
+    expect(retryX.credentialId).toBe("credential-b");
+    await release(pool, retryX, { success: true, model: "target-x" });
+    close();
+  });
+
+  it("does not let sticky affinity bypass model cooldown", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { pool, close } = await createPool();
+
+    const initial = await acquire(pool, "sticky-model", CANDIDATES, "target-x");
+    expect(initial.credentialId).toBe("credential-a");
+    await release(pool, initial, {
+      success: false,
+      statusCode: 429,
+      cooldownMs: 60_000,
+      cooldownScope: "model",
+      model: "target-x",
+    });
+
+    const replacement = await acquire(pool, "sticky-model", CANDIDATES, "target-x");
+    expect(replacement.credentialId).toBe("credential-b");
+    await release(pool, replacement, { success: true, model: "target-x" });
+    close();
+  });
+
+  it("keeps credential-wide cooldown blocking sibling models", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { pool, close } = await createPool();
+
+    const initial = await acquire(pool, "wide", CANDIDATES, "target-x");
+    expect(initial.credentialId).toBe("credential-a");
+    await release(pool, initial, {
+      success: false,
+      statusCode: 429,
+      cooldownMs: 60_000,
+      cooldownScope: "credential",
+      model: "target-x",
+    });
+
+    const sibling = await acquire(pool, "wide-y", CANDIDATES, "target-y");
+    expect(sibling.credentialId).toBe("credential-b");
+    await release(pool, sibling, { success: true, model: "target-y" });
+    close();
+  });
+
+  it("restores a model independently when its cooldown expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const { pool, close } = await createPool();
+
+    const initial = await acquire(pool, "expire", CANDIDATES, "target-x");
+    await release(pool, initial, {
+      success: false,
+      statusCode: 429,
+      cooldownMs: 1_000,
+      cooldownScope: "model",
+      model: "target-x",
+    });
+    vi.advanceTimersByTime(1_001);
+    const recovered = await acquire(pool, "new-session", CANDIDATES, "target-x");
+    expect(recovered.credentialId).toBe("credential-a");
+    await release(pool, recovered, { success: true, model: "target-x" });
     close();
   });
 });
