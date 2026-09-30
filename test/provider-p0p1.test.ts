@@ -98,6 +98,78 @@ describe("P0/P1 provider runtime", () => {
       .toMatchObject({ code: "UPSTREAM_UNAVAILABLE", retryable: true, providerFailure: true });
   });
 
+  it("scopes Codex usage limits to credentials and transient 429s to models", () => {
+    const nested = classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { type: "usage_limit_reached", message: "usage limit reached", resets_in_seconds: 45 } }),
+      new Headers(),
+      "codex",
+    );
+    expect(nested).toMatchObject({
+      code: "RATE_LIMIT_EXCEEDED",
+      credentialFailure: true,
+      cooldownScope: "credential",
+      retryAfterMs: 45_000,
+    });
+
+    const topLevel = classifyUpstreamResponse(
+      429,
+      JSON.stringify({ type: " USAGE_LIMIT_REACHED ", message: "limit", resets_at: Math.floor(Date.now() / 1000) + 60 }),
+      new Headers(),
+      "codex",
+    );
+    expect(topLevel.credentialFailure).toBe(true);
+    expect(topLevel.cooldownScope).toBe("credential");
+    expect(topLevel.retryAfterMs).toBeGreaterThan(0);
+
+    const transient = classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { type: "rate_limit_error", message: "temporary rate limit" } }),
+      new Headers(),
+      "codex",
+    );
+    expect(transient).toMatchObject({
+      credentialFailure: false,
+      cooldownScope: "model",
+    });
+
+    const providerHint = classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { type: "usage_limit_reached", message: "limit", resets_in_seconds: 90 } }),
+      new Headers({ "retry-after": "7" }),
+      "codex",
+    );
+    expect(providerHint.retryAfterMs).toBe(7_000);
+  });
+
+  it("falls back from expired Codex resets_at to positive resets_in_seconds", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T00:00:00.000Z"));
+    const classified = classifyUpstreamResponse(
+      429,
+      JSON.stringify({
+        error: {
+          type: "usage_limit_reached",
+          message: "usage limit",
+          resets_at: Math.floor(Date.now() / 1000) - 10,
+          resets_in_seconds: 30,
+        },
+      }),
+      new Headers(),
+      "codex",
+    );
+    expect(classified.retryAfterMs).toBe(30_000);
+
+    const noPositiveFallback = classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { type: "usage_limit_reached", message: "usage limit", resets_in_seconds: 0 } }),
+      new Headers(),
+      "codex",
+    );
+    expect(noPositiveFallback.retryAfterMs).toBeUndefined();
+    vi.useRealTimers();
+  });
+
   it("validates model capabilities before upstream execution", () => {
     expect(normalizeCapabilities({ input_modalities: ["text", "image"], reasoning_levels: ["low", "high"], supports_tools: true }))
       .toMatchObject({ inputModalities: ["text", "image"], reasoningLevels: ["low", "high"], supportsTools: true });
