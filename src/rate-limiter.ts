@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { runModelRefreshSweep, runProviderModelRefreshPage } from "./models";
+import { canonicalUsage, safeNonNegativeInteger } from "./usage-numbers";
 import type { Env, RateLease, UsageAggregateEvent, UsageEvent } from "./types";
 
 interface AcquirePayload {
@@ -434,7 +435,7 @@ export class RateLimiter extends DurableObject<Env> {
     if (payload.maxConcurrency > 0 && state.inflight >= payload.maxConcurrency) {
       return { leaseId: "", allowed: false, reason: "CONCURRENCY_LIMIT_EXCEEDED", retryAfterMs: 1000 };
     }
-    const reservation = Math.max(0, payload.estimatedTokens);
+    const reservation = safeNonNegativeInteger(payload.estimatedTokens) ?? 0;
     if (payload.monthlyTokenLimit > 0 && monthTokens + reservation > payload.monthlyTokenLimit) {
       return { leaseId: "", allowed: false, reason: "TOKEN_QUOTA_EXCEEDED" };
     }
@@ -463,7 +464,7 @@ export class RateLimiter extends DurableObject<Env> {
       .toArray()[0];
     if (lease) {
       this.ctx.storage.sql.exec("DELETE FROM leases WHERE lease_id = ?", leaseId);
-      const chargedTokens = typeof actualTokens === "number" ? Math.max(0, actualTokens) : lease.reserved_tokens;
+      const chargedTokens = safeNonNegativeInteger(actualTokens) ?? lease.reserved_tokens;
       this.ctx.storage.sql.exec(
         "UPDATE state SET inflight = MAX(0, inflight - 1), month_tokens = MAX(0, month_tokens + ?) WHERE singleton = 1",
         chargedTokens - lease.reserved_tokens,
@@ -479,7 +480,7 @@ export class RateLimiter extends DurableObject<Env> {
       // cleanup() already released the inflight slot and refunded the reservation, so only
       // the tokens actually consumed are re-billed here.
       this.ctx.storage.sql.exec("DELETE FROM lease_tombstones WHERE lease_id = ?", leaseId);
-      const chargedTokens = typeof actualTokens === "number" ? Math.max(0, actualTokens) : tombstone.refunded_tokens;
+      const chargedTokens = safeNonNegativeInteger(actualTokens) ?? tombstone.refunded_tokens;
       if (chargedTokens > 0) {
         this.ctx.storage.sql.exec(
           "UPDATE state SET month_tokens = MAX(0, month_tokens + ?) WHERE singleton = 1",
@@ -596,6 +597,12 @@ export class RateLimiter extends DurableObject<Env> {
     const endpoint = event.endpoint ?? "";
     const firstTokenMs = typeof event.firstTokenMs === "number" ? Math.max(0, event.firstTokenMs) : 0;
     const firstTokenSamples = typeof event.firstTokenMs === "number" ? 1 : 0;
+    const usage = canonicalUsage(
+      event.usage.promptTokens,
+      event.usage.completionTokens,
+      event.usage.cachedTokens,
+      event.usage.totalTokens,
+    );
     this.ctx.storage.sql.exec(
       `INSERT INTO activity_buckets
         (bucket,gateway_key_id,provider_id,credential_id,public_model,upstream_model,endpoint,
@@ -606,10 +613,10 @@ export class RateLimiter extends DurableObject<Env> {
          requests=requests+1,
          successes=successes+excluded.successes,
          failures=failures+excluded.failures,
-         prompt_tokens=prompt_tokens+excluded.prompt_tokens,
-         completion_tokens=completion_tokens+excluded.completion_tokens,
-         cached_tokens=cached_tokens+excluded.cached_tokens,
-         total_tokens=total_tokens+excluded.total_tokens,
+         prompt_tokens=MIN(9007199254740991,prompt_tokens+excluded.prompt_tokens),
+         completion_tokens=MIN(9007199254740991,completion_tokens+excluded.completion_tokens),
+         cached_tokens=MIN(9007199254740991,cached_tokens+excluded.cached_tokens),
+         total_tokens=MIN(9007199254740991,total_tokens+excluded.total_tokens),
          latency_sum_ms=latency_sum_ms+excluded.latency_sum_ms,
          first_token_sum_ms=first_token_sum_ms+excluded.first_token_sum_ms,
          first_token_samples=first_token_samples+excluded.first_token_samples,
@@ -623,10 +630,10 @@ export class RateLimiter extends DurableObject<Env> {
       endpoint,
       success ? 1 : 0,
       success ? 0 : 1,
-      Math.max(0, event.usage.promptTokens),
-      Math.max(0, event.usage.completionTokens),
-      Math.max(0, event.usage.cachedTokens),
-      Math.max(0, event.usage.totalTokens),
+      usage.promptTokens,
+      usage.completionTokens,
+      usage.cachedTokens,
+      usage.totalTokens,
       Math.max(0, event.latencyMs),
       firstTokenMs,
       firstTokenSamples,
