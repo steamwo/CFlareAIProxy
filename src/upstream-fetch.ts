@@ -11,6 +11,8 @@ export interface ProviderFetchOptions {
   purpose?: "inference" | "models" | "quota" | "oauth" | "test";
   /** Preloaded by bounded batch jobs so repeated attempts do not re-read D1 proxy settings. */
   proxyConfig?: ProviderProxyConfig | null;
+  /** Trusted execution-scoped override. Never populate this from public client input. */
+  requestProxyOverride?: string;
 }
 
 function errorMessage(error: unknown): string {
