@@ -1,8 +1,4 @@
-import {
-  calculateUsageCostMicros,
-  canonicalUsage,
-  MAX_SAFE_USAGE_INTEGER,
-} from "./usage-numbers";
+import { calculateUsageCostMicros, canonicalUsage } from "./usage-numbers";
 import type { Env, Usage, UsageAggregateEvent, UsageErrorEvent, UsageQueueEvent } from "./types";
 
 interface PriceRow {
@@ -127,10 +123,10 @@ function aggregateStatements(env: Env, event: UsageAggregateEvent, price?: Price
 function errorStatement(env: Env, message: UsageErrorEvent, price?: PriceRow): D1PreparedStatement {
   const event = message.event;
   const usage = canonicalUsage(
-    usage.promptTokens,
-    usage.completionTokens,
-    usage.cachedTokens,
-    usage.totalTokens,
+    event.usage.promptTokens,
+    event.usage.completionTokens,
+    event.usage.cachedTokens,
+    event.usage.totalTokens,
   );
   const cost = costMicros(usage, price);
   return env.DB.prepare(
@@ -148,10 +144,10 @@ function errorStatement(env: Env, message: UsageErrorEvent, price?: PriceRow): D
     event.upstreamModel ?? null,
     event.endpoint ?? null,
     event.statusCode,
-    event.usage.promptTokens,
-    event.usage.completionTokens,
-    event.usage.cachedTokens,
-    event.usage.totalTokens,
+    usage.promptTokens,
+    usage.completionTokens,
+    usage.cachedTokens,
+    usage.totalTokens,
     cost,
     event.latencyMs,
     event.firstTokenMs ?? null,
