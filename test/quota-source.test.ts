@@ -358,6 +358,47 @@ describe("header captures merged onto an API snapshot", () => {
     expect((await availability(db, "qoder"))[0]?.available).toBe(false);
   });
 
+  it("replaces the previous response-header subset instead of unioning stale windows", async () => {
+    const db = new FakeDatabase();
+    const previous: QuotaSnapshot = {
+      provider: "codex",
+      status: "ok",
+      source: "api",
+      windows: [
+        { key: "weekly", label: "Weekly", remaining: 40, source: "api" },
+        { key: "requests", label: "请求", limit: 60, remaining: 10, source: "headers" },
+        { key: "tokens", label: "Token", limit: 1000, remaining: 500, source: "headers" },
+      ],
+    };
+    db.snapshot = {
+      status: "ok",
+      quota_json: JSON.stringify(previous),
+      error_message: null,
+      fetched_at: NOW_SECONDS - 10,
+      expires_at: NOW_SECONDS + 290,
+    };
+
+    await captureQuotaHeaders(envWith(db), "cred-a", "codex", rateLimitHeaders(55));
+
+    const stored = db.storedSnapshot();
+    expect(stored.windows.map((window) => window.key)).toEqual(["weekly", "requests"]);
+    expect(stored.windows.find((window) => window.key === "requests")?.remaining).toBe(55);
+    expect(stored.windows.find((window) => window.key === "tokens")).toBeUndefined();
+  });
+
+  it("leaves an existing observation untouched when a response has no quota headers", async () => {
+    const db = new FakeDatabase();
+    seedSnapshot(db, "codex", "headers", [
+      { key: "requests", label: "请求", limit: 60, remaining: 10, source: "headers" },
+    ]);
+    const before = db.snapshot?.quota_json;
+
+    await captureQuotaHeaders(envWith(db), "cred-a", "codex", new Headers({ "content-type": "application/json" }));
+
+    expect(db.snapshot?.quota_json).toBe(before);
+    expect(db.snapshotWrites).toBe(0);
+  });
+
   it("does not resurrect an errored quota-API snapshot as ok", async () => {
     const db = new FakeDatabase();
     const errored: QuotaSnapshot = { provider: "generic", status: "error", source: "api", windows: [] };
