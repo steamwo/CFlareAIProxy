@@ -105,6 +105,30 @@ describe("P0/P1 provider runtime", () => {
     expect(() => validateModelCapabilities({ messages: [{ content: [{ type: "image_url", image_url: { url: "https://example.com/a.png" } }] }] }, { inputModalities: ["text"] })).toThrow(/image input/i);
   });
 
+  it("gives a trusted execution proxy override precedence over credential proxy metadata", async () => {
+    const fetchMock = vi.fn(async () => new Response("direct"));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = {
+      id: "provider", name: "Provider", kind: "openai-compatible", base_url: "https://example.com/v1",
+      endpoints: {}, auth: {}, headers: {}, options: {},
+    } as unknown as ProviderConfig;
+    const credential = {
+      metadata: { proxy_url: "socks5://127.0.0.1:1080" },
+    } as unknown as Credential;
+
+    const response = await providerFetchForCredential(
+      {} as Env,
+      provider,
+      credential,
+      "https://example.com/v1/models",
+      { method: "GET" },
+      { timeoutMs: 5000, requestProxyOverride: "direct" },
+    );
+
+    expect(await response.text()).toBe("direct");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("supports credential proxy override and explicit direct bypass", async () => {
     expect(credentialProxyUrl({ metadata: { proxy_url: "socks5://127.0.0.1:1080" } } as unknown as Credential)).toBe("socks5://127.0.0.1:1080");
     const fetchMock = vi.fn(async () => new Response("ok"));
