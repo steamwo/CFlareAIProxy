@@ -12,7 +12,10 @@ function sse(...events: Array<Record<string, unknown> | "[DONE]">): Response {
   return new Response(text, { headers: { "content-type": "text/event-stream" } });
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("P0/P1 provider runtime", () => {
   it("repairs Kimi tool messages and routes Responses through chat completions", () => {
@@ -96,6 +99,53 @@ describe("P0/P1 provider runtime", () => {
       .toMatchObject({ code: "RATE_LIMIT_EXCEEDED", retryable: true, credentialFailure: true, retryAfterMs: 12_000 });
     expect(classifyUpstreamResponse(503, "overloaded", new Headers(), "openai-compatible"))
       .toMatchObject({ code: "UPSTREAM_UNAVAILABLE", retryable: true, providerFailure: true });
+  });
+
+  it("applies a bounded TPM retry wait only to explicit 429 TPM limits", () => {
+    expect(classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { code: "TpmRateLimitExceeded", message: "rate limited" } }),
+      new Headers(),
+      "openai-compatible",
+    )).toMatchObject({ code: "RATE_LIMIT_EXCEEDED", retryAfterMs: 60_000 });
+
+    expect(classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { message: "Tokens per minute limit exceeded for this model" } }),
+      new Headers(),
+      "openai-compatible",
+    )).toMatchObject({ code: "RATE_LIMIT_EXCEEDED", retryAfterMs: 60_000 });
+
+    expect(classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { code: "TpmRateLimitExceeded", message: "Tokens per minute limit exceeded" } }),
+      new Headers({ "retry-after": "17" }),
+      "openai-compatible",
+    )).toMatchObject({ code: "RATE_LIMIT_EXCEEDED", retryAfterMs: 17_000 });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T00:00:00.000Z"));
+    expect(classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { code: "TpmRateLimitExceeded", message: "Tokens per minute limit exceeded" } }),
+      new Headers({ "retry-after": "Wed, 30 Sep 2026 00:00:20 GMT" }),
+      "openai-compatible",
+    )).toMatchObject({ code: "RATE_LIMIT_EXCEEDED", retryAfterMs: 20_000 });
+    vi.useRealTimers();
+
+    expect(classifyUpstreamResponse(
+      429,
+      JSON.stringify({ error: { message: "generic rate limit" } }),
+      new Headers(),
+      "openai-compatible",
+    ).retryAfterMs).toBeUndefined();
+
+    expect(classifyUpstreamResponse(
+      400,
+      JSON.stringify({ error: { code: "TpmRateLimitExceeded", message: "Tokens per minute limit exceeded" } }),
+      new Headers(),
+      "openai-compatible",
+    ).retryAfterMs).toBeUndefined();
   });
 
   it("validates model capabilities before upstream execution", () => {
