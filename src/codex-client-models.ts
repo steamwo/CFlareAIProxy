@@ -1,3 +1,4 @@
+import { configuredModelCapabilities, mergeModelCapabilities, normalizeCapabilities } from "./model-capabilities";
 import type { Env, ProviderKind } from "./types";
 import { parseJson } from "./utils";
 
@@ -7,6 +8,7 @@ const EXTENDED_REASONING_MIN_VERSION = [0, 144, 0] as const;
 export interface CodexClientCatalogContext {
   multiAgentModels: Set<string>;
   providerKinds: Map<string, ProviderKind>;
+  searchSupport: Map<string, boolean>;
 }
 
 export interface CodexClientProviderSource {
@@ -18,7 +20,11 @@ export interface CodexClientProviderSource {
 export interface CodexClientRouteSource {
   public_model: string;
   provider_id: string;
+  upstream_model?: string;
   route_options_json: string;
+  provider_options_json?: string;
+  capabilities_json?: string | null;
+  raw_json?: string | null;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -111,6 +117,26 @@ function featureFlag(options: Record<string, unknown>): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function routeSearchCapability(route: CodexClientRouteSource): boolean | undefined {
+  const routeOptions = parseJson<Record<string, unknown>>(route.route_options_json, {});
+  const routeCapabilities = normalizeCapabilities(routeOptions.capabilities ?? routeOptions.model_capabilities);
+  if (routeCapabilities.supportsSearchTool !== undefined) return routeCapabilities.supportsSearchTool;
+
+  const providerOptions = parseJson<Record<string, unknown>>(route.provider_options_json ?? "{}", {});
+  const providerCapabilities = route.upstream_model
+    ? configuredModelCapabilities(providerOptions, route.upstream_model)
+    : {};
+  if (providerCapabilities.supportsSearchTool !== undefined) return providerCapabilities.supportsSearchTool;
+
+  const rawCapabilities = route.raw_json
+    ? normalizeCapabilities(parseJson<Record<string, unknown>>(route.raw_json, {}))
+    : {};
+  const discoveredCapabilities = route.capabilities_json
+    ? normalizeCapabilities(parseJson<Record<string, unknown>>(route.capabilities_json, {}))
+    : {};
+  return mergeModelCapabilities(discoveredCapabilities, rawCapabilities).supportsSearchTool;
+}
+
 export function resolveCodexClientCatalogContext(
   models: Array<Record<string, unknown>>,
   providers: CodexClientProviderSource[],
@@ -130,18 +156,31 @@ export function resolveCodexClientCatalogContext(
     routeFlags.set(route.public_model, flags);
   }
   const multiAgentModels = new Set<string>();
+  const searchSupport = new Map<string, boolean>();
+  const searchFlags = new Map<string, Array<boolean | undefined>>();
+  for (const route of routes) {
+    const flags = searchFlags.get(route.public_model) ?? [];
+    flags.push(routeSearchCapability(route));
+    searchFlags.set(route.public_model, flags);
+  }
   for (const model of models) {
     const id = typeof model.id === "string" ? model.id.trim() : "";
     if (!id) continue;
     const flags = routeFlags.get(id);
     if (flags?.length) {
       if (flags.every(Boolean)) multiAgentModels.add(id);
-      continue;
+    } else {
+      const [modelProviderId] = modelProviders(model);
+      if (modelProviderId && providerFlags.get(modelProviderId) === true) multiAgentModels.add(id);
     }
-    const [modelProviderId] = modelProviders(model);
-    if (modelProviderId && providerFlags.get(modelProviderId) === true) multiAgentModels.add(id);
+
+    const routeSearchFlags = searchFlags.get(id);
+    // Conservative aggregation: false > unknown > true. The public bool is true
+    // only when every backing Responses route has explicit support.
+    if (routeSearchFlags?.length) searchSupport.set(id, routeSearchFlags.every((flag) => flag === true));
+    else searchSupport.set(id, false);
   }
-  return { multiAgentModels, providerKinds };
+  return { multiAgentModels, providerKinds, searchSupport };
 }
 
 export async function loadCodexClientCatalogContext(env: Env, models: Array<Record<string, unknown>>): Promise<CodexClientCatalogContext> {
@@ -149,18 +188,23 @@ export async function loadCodexClientCatalogContext(env: Env, models: Array<Reco
     env.DB.prepare("SELECT id,kind,options_json FROM providers WHERE enabled=1")
       .all<CodexClientProviderSource>().catch(() => ({ results: [] })),
     env.DB.prepare(
-      `SELECT r.public_model,r.provider_id,r.options_json AS route_options_json
-       FROM model_routes r JOIN providers p ON p.id=r.provider_id AND p.enabled=1
-       WHERE r.enabled=1 AND r.endpoint='responses' ORDER BY r.public_model,r.priority,r.created_at`,
+      `SELECT r.public_model,r.provider_id,r.upstream_model,r.options_json AS route_options_json,
+              p.options_json AS provider_options_json,d.capabilities_json,d.raw_json
+       FROM model_routes r
+       JOIN providers p ON p.id=r.provider_id AND p.enabled=1
+       LEFT JOIN discovered_models d
+         ON d.provider_id=r.provider_id AND d.model_id=r.upstream_model
+        AND d.endpoint='responses' AND d.enabled=1
+       WHERE r.enabled=1 AND r.endpoint='responses'
+       ORDER BY r.public_model,r.priority,r.created_at,d.discovered_at DESC`,
     ).all<CodexClientRouteSource>().catch(() => ({ results: [] })),
   ]);
   return resolveCodexClientCatalogContext(models, providerResult.results, routeResult.results);
 }
 
-function supportsSearchTool(model: Record<string, unknown>, capabilities: Record<string, unknown>, providerKinds: Map<string, ProviderKind>): boolean {
-  if (capabilities.supportsSearchTool !== true && capabilities.supports_search_tool !== true) return false;
-  const providers = modelProviders(model);
-  return providers.length > 0 && providers.every((providerId) => providerKinds.get(providerId) === "codex");
+function supportsSearchTool(model: Record<string, unknown>, context: CodexClientCatalogContext): boolean {
+  const id = typeof model.id === "string" ? model.id.trim() : "";
+  return id ? context.searchSupport.get(id) === true : false;
 }
 
 function buildEntry(
@@ -223,7 +267,7 @@ function buildEntry(
     model_messages: modelMessages,
     experimental_supported_tools: [],
     available_in_plans: [],
-    supports_search_tool: supportsSearchTool(model, capabilities, context.providerKinds),
+    supports_search_tool: supportsSearchTool(model, context),
     default_service_tier: null,
     service_tiers: tiers,
     additional_speed_tiers: [],
@@ -247,7 +291,7 @@ function buildEntry(
 
 export function buildCodexClientModels(
   models: Array<Record<string, unknown>>,
-  context: CodexClientCatalogContext = { multiAgentModels: new Set(), providerKinds: new Map() },
+  context: CodexClientCatalogContext = { multiAgentModels: new Set(), providerKinds: new Map(), searchSupport: new Map() },
   clientVersion?: string,
 ): Array<Record<string, unknown>> {
   const candidates = models.map((model) => ({
