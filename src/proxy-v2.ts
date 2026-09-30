@@ -279,7 +279,7 @@ export async function proxyGeneration(
             providerId: provider.id,
             strategy: provider.pool_strategy,
             candidates,
-            model: publicModel,
+            model: route.upstream_model,
             sessionKey: provider.options.session_affinity === false
               ? undefined
               : await buildSessionAffinityKey(c.req.raw, routeBody, gatewayKey.id, provider.id),
@@ -362,8 +362,12 @@ export async function proxyGeneration(
             leaseId: poolLease.leaseId,
             success: false,
             statusCode: classified.status,
-            cooldownMs: classified.credentialFailure ? credentialCooldownMs(c.env, credential.id, classified.retryAfterMs) : 0,
-            cooldownEligible: classified.credentialFailure,
+            cooldownMs: classified.cooldownScope
+              ? credentialCooldownMs(c.env, credential.id, classified.retryAfterMs)
+              : 0,
+            cooldownEligible: classified.cooldownScope !== undefined,
+            cooldownScope: classified.cooldownScope,
+            model: route.upstream_model,
           }).catch(() => undefined);
           poolLease = undefined;
           if (classified.credentialFailure) await setCredentialError(c.env, credential.id, `${classified.code}: ${classified.message}`).catch(() => undefined);
@@ -420,6 +424,8 @@ export async function proxyGeneration(
                   ? credentialCooldownMs(c.env, credential.id, mirrorCredentialFailure.retryAfterMs)
                   : 0,
               cooldownEligible: streamError ? streamCooldownEligible : mirrorCredentialFailure?.credentialFailure === true,
+              cooldownScope: streamError ? "credential" : mirrorCredentialFailure?.cooldownScope,
+              model: route.upstream_model,
             }),
             postDo(rateStub!, "/release", {
               leaseId: rateLeaseId!,
@@ -457,6 +463,8 @@ export async function proxyGeneration(
             statusCode: error instanceof GatewayError ? error.status : 500,
             cooldownMs: credentialCooldownMs(c.env, poolLease.credentialId),
             cooldownEligible: credentialCooldownEligible(error),
+            cooldownScope: "credential",
+            model: route.upstream_model,
           }).catch(() => undefined);
         }
         if (error instanceof GatewayError && error.status < 500 && error.code !== "AUTH_UNAVAILABLE" && error.code !== "RATE_LIMIT_EXCEEDED") throw error;
