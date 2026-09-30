@@ -22,6 +22,7 @@ interface CodexState {
   items: Map<number, Record<string, unknown>>;
   fallbackItems: Record<string, unknown>[];
   nextSequenceNumber: number;
+  sawOutputDelta: boolean;
 }
 
 function eventErrorPayload(event: Record<string, unknown>): Record<string, unknown> {
@@ -52,6 +53,36 @@ function eventError(event: Record<string, unknown>): GatewayError | undefined {
 
 function isSuccessfulTerminalType(type: unknown): boolean {
   return type === "response.completed" || type === "response.incomplete" || type === "response.done";
+}
+
+function rememberMeaningfulOutputDelta(event: Record<string, unknown>, state: CodexState): void {
+  if (state.sawOutputDelta || typeof event.delta !== "string" || !event.delta.trim()) return;
+  if (event.type === "response.output_text.delta"
+    || event.type === "response.reasoning_text.delta"
+    || event.type === "response.reasoning_summary_text.delta"
+    || event.type === "response.function_call_arguments.delta") {
+    state.sawOutputDelta = true;
+  }
+}
+
+function isEmptyIncomplete(event: Record<string, unknown>, state: CodexState): boolean {
+  if (event.type !== "response.incomplete" || state.sawOutputDelta) return false;
+  if (state.items.size + state.fallbackItems.length > 0) return false;
+  const response = responseRecord(event.response);
+  if (Array.isArray(response.output) && response.output.length > 0) return false;
+  const usage = responseRecord(response.usage);
+  return typeof usage.output_tokens === "number"
+    && Number.isInteger(usage.output_tokens)
+    && usage.output_tokens === 0;
+}
+
+function emptyIncompleteError(): GatewayError {
+  return new GatewayError(
+    502,
+    "CODEX_EMPTY_INCOMPLETE",
+    "Codex upstream terminated with an incomplete empty response (0 output tokens)",
+    "upstream_error",
+  );
 }
 
 function trackSequence(event: Record<string, unknown>, state: CodexState): void {
@@ -137,7 +168,7 @@ function patchStartResponseModel(event: Record<string, unknown>, model: string):
 
 function strictResponsesStream(context: CodexResponseContext): Response {
   if (!context.upstream.body) throw new GatewayError(502, "CODEX_STREAM_EMPTY", "Codex returned an empty stream", "upstream_error");
-  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0, sawOutputDelta: false };
   const officialCodexClient = isRememberedOfficialCodexClient(context.requestId);
   const body = transformResponseSse(context.upstream.body, (data, controller) => {
     if (state.failed) return;
@@ -161,8 +192,22 @@ function strictResponsesStream(context: CodexResponseContext): Response {
       return;
     }
     trackSequence(event, state);
+    rememberMeaningfulOutputDelta(event, state);
     rememberItem(event, state);
     event = patchStartResponseModel(event, context.model);
+    if (isEmptyIncomplete(event, state)) {
+      const incomplete = emptyIncompleteError();
+      state.failed = true;
+      state.terminal = true;
+      if (officialCodexClient) {
+        const payload = responseFailedPayload(event, incomplete, state.nextSequenceNumber);
+        controller.enqueue(responseEncoder.encode(`event: response.failed\ndata: ${JSON.stringify(payload)}\n\n`));
+      } else {
+        controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify({ error: { message: incomplete.message, type: incomplete.type, code: incomplete.code } })}\n\n`));
+        controller.error(incomplete);
+      }
+      return;
+    }
     if (isSuccessfulTerminalType(event.type)) {
       state.terminal = true;
       event = patchTerminal(event, state);
@@ -186,7 +231,7 @@ function chatChunk(requestId: string, model: string, delta: Record<string, unkno
 
 function strictChatStream(context: CodexResponseContext): Response {
   if (!context.upstream.body) throw new GatewayError(502, "CODEX_STREAM_EMPTY", "Codex returned an empty stream", "upstream_error");
-  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0, sawOutputDelta: false };
   let roleSent = false;
   let finishReason = "stop";
   const emittedToolItems = new Set<number>();
@@ -201,7 +246,16 @@ function strictChatStream(context: CodexResponseContext): Response {
       return;
     }
     trackSequence(event, state);
+    rememberMeaningfulOutputDelta(event, state);
     rememberItem(event, state);
+    if (isEmptyIncomplete(event, state)) {
+      const incomplete = emptyIncompleteError();
+      state.failed = true;
+      state.terminal = true;
+      controller.enqueue(responseEncoder.encode(`data: ${JSON.stringify({ error: { message: incomplete.message, type: incomplete.type, code: incomplete.code } })}\n\n`));
+      controller.error(incomplete);
+      return;
+    }
     if ((event.type === "response.reasoning_summary_text.delta" || event.type === "response.reasoning_text.delta") && typeof event.delta === "string") {
       const delta: Record<string, unknown> = { reasoning_content: event.delta };
       if (!roleSent) { delta.role = "assistant"; roleSent = true; }
@@ -297,7 +351,7 @@ function chatFromResponse(payload: Record<string, unknown>, model: string, reque
 }
 
 function parseSse(text: string): Record<string, unknown> {
-  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0 };
+  const state: CodexState = { terminal: false, failed: false, items: new Map(), fallbackItems: [], nextSequenceNumber: 0, sawOutputDelta: false };
   let terminal: Record<string, unknown> | undefined;
   for (const frame of text.split(/\r?\n\r?\n/)) {
     const data = responseFrameData(frame);
@@ -307,7 +361,9 @@ function parseSse(text: string): Record<string, unknown> {
     const failure = eventError(event);
     if (failure) throw failure;
     trackSequence(event, state);
+    rememberMeaningfulOutputDelta(event, state);
     rememberItem(event, state);
+    if (isEmptyIncomplete(event, state)) throw emptyIncompleteError();
     if (isSuccessfulTerminalType(event.type)) {
       state.terminal = true;
       const patched = patchTerminal(event, state);
@@ -328,6 +384,17 @@ export async function prepareCodexResponse(context: CodexResponseContext): Promi
       ? gatewayErrorFromClassification(classifyUpstreamResponse(context.upstream.status >= 400 ? context.upstream.status : 400, JSON.stringify(parsed), context.upstream.headers, "codex"))
       : undefined);
     if (failure) throw failure;
+    if (parsed.type === "response.incomplete") {
+      const state: CodexState = {
+        terminal: false,
+        failed: false,
+        items: new Map(),
+        fallbackItems: [],
+        nextSequenceNumber: 0,
+        sawOutputDelta: false,
+      };
+      if (isEmptyIncomplete(parsed, state)) throw emptyIncompleteError();
+    }
     payload = parsed.response && typeof parsed.response === "object" ? responseRecord(parsed.response) : parsed;
   } else payload = parseSse(text);
   const output = context.endpoint === "responses" ? payload : chatFromResponse(payload, context.model, context.requestId);
