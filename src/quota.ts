@@ -457,11 +457,12 @@ async function saveSnapshot(
     // A quota-API error is authoritative; a display-only header capture must neither mask it nor
     // spend a write refreshing its timestamps.
     if (previous.status === "error") return { ...previous, windows: taggedWindows(previous) };
-    const windows = new Map(taggedWindows(previous).map((window) => [window.key, window]));
-    for (const window of stored.windows) windows.set(window.key, window);
-    const merged = [...windows.values()];
-    // Keep the real provenance of a snapshot that still carries API/configured windows.
-    const headersOnly = merged.every((window) => window.source === "headers") && !previous.plan && !previous.credits;
+    // Header signals are a point-in-time observation, not a cumulative namespace.
+    // Preserve API/configured windows but replace the entire previous header subset so
+    // a header omitted by the current response does not survive as stale telemetry.
+    const durableWindows = taggedWindows(previous).filter((window) => window.source !== "headers");
+    const merged = [...durableWindows, ...stored.windows];
+    const headersOnly = durableWindows.length === 0 && !previous.plan && !previous.credits;
     stored = {
       ...previous,
       plan: snapshot.plan ?? previous.plan,
