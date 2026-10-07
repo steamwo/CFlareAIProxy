@@ -25,6 +25,27 @@ describe("explicit nested session hierarchy", () => {
     expect(await buildSessionAffinityKey(req(), childBody, "gateway", "provider")).toEqual(childKey);
   });
 
+  it("scopes Codex header aliases by subagent identity instead of retaining the parent binding", async () => {
+    const request = req("/v1/responses", { "session-id": "parent-session" });
+    const parentSignals = extractSessionAffinitySignals(request, {});
+    const childBody = { metadata: { subagent_id: "child-header" } };
+    const childSignals = extractSessionAffinitySignals(request, childBody);
+
+    expect(parentSignals).toEqual([
+      { source: "codex", value: "parent-session" },
+      { source: "codex-session", value: "parent-session" },
+    ]);
+    expect(childSignals).toEqual([
+      { source: "codex-agent", value: JSON.stringify(["parent-session", "child-header"]) },
+      { source: "codex-session-agent", value: JSON.stringify(["parent-session", "child-header"]) },
+    ]);
+    expect(childSignals).not.toContainEqual({ source: "codex", value: "parent-session" });
+
+    const parentKey = await buildSessionAffinityKey(request, {}, "gateway", "provider");
+    const childKey = await buildSessionAffinityKey(request, childBody, "gateway", "provider");
+    expect(childKey).not.toEqual(parentKey);
+  });
+
   it("uses nested prompt_cache_key and metadata.user_id without content-derived fallback", () => {
     expect(extractSessionAffinitySignals(req(), { request: { prompt_cache_key: "cache-1" } }))
       .toEqual([{ source: "prompt-cache", value: "cache-1" }]);
