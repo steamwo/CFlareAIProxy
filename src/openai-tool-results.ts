@@ -1,6 +1,8 @@
 import type { ModelCapabilities } from "./model-capabilities";
 
 export const OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT = "[image omitted: unsupported by upstream]";
+const CLAUDE_TOOL_RESULT_IMAGE_RELAY_NOTICE = "Images returned by the preceding tool call(s):";
+const CLAUDE_TOOL_RESULT_IMAGE_PLACEHOLDER = "[Tool returned image content; the images follow in the next user message.]";
 
 const textOnlyOpenAiCapabilities = new WeakSet<ModelCapabilities>();
 const originalMessagesByBody = new WeakMap<Record<string, unknown>, { hadMessages: boolean; value: unknown }>();
@@ -53,13 +55,75 @@ export function markOpenAiTextOnlyToolResultNormalization(capabilities: ModelCap
 
 export function normalizeOpenAiToolResultsTextOnly(body: Record<string, unknown>): Record<string, unknown> {
   if (!Array.isArray(body.messages)) return body;
+
   let changed = false;
-  const messages = body.messages.map((raw) => {
+  const messages: unknown[] = [];
+  let replacedPlaceholderInCurrentTurn = false;
+
+  for (const raw of body.messages) {
     const message = record(raw);
-    if (message.role !== "tool" || !Object.prototype.hasOwnProperty.call(message, "content") || typeof message.content === "string") return raw;
-    changed = true;
-    return { ...message, content: flattenToolResultContent(message.content) };
-  });
+    const role = message.role;
+
+    if (role === "tool") {
+      let next = raw;
+      if (Object.prototype.hasOwnProperty.call(message, "content")) {
+        if (typeof message.content !== "string") {
+          next = { ...message, content: flattenToolResultContent(message.content) };
+          changed = true;
+        } else if (message.content === CLAUDE_TOOL_RESULT_IMAGE_PLACEHOLDER) {
+          next = { ...message, content: OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT };
+          replacedPlaceholderInCurrentTurn = true;
+          changed = true;
+        }
+      }
+      messages.push(next);
+      continue;
+    }
+
+    if (role === "user" && Array.isArray(message.content)) {
+      let hasRelayNotice = false;
+      let hasImages = false;
+      const remaining = message.content.filter((part) => {
+        const value = record(part);
+        if (value.type === "text" && value.text === CLAUDE_TOOL_RESULT_IMAGE_RELAY_NOTICE) {
+          hasRelayNotice = true;
+          return false;
+        }
+        if (isImagePart(part)) {
+          hasImages = true;
+          return false;
+        }
+        return true;
+      });
+
+      if (hasRelayNotice && hasImages) {
+        if (!replacedPlaceholderInCurrentTurn) {
+          for (let index = messages.length - 1; index >= 0; index--) {
+            const previous = record(messages[index]);
+            if (previous.role !== "tool") break;
+            const previousContent = typeof previous.content === "string" ? previous.content : "";
+            if (!previousContent.includes(OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT)) {
+              messages[index] = {
+                ...previous,
+                content: previousContent
+                  ? `${previousContent}\n\n${OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT}`
+                  : OPENAI_TOOL_RESULT_IMAGE_OMITTED_TEXT,
+              };
+            }
+            break;
+          }
+        }
+        replacedPlaceholderInCurrentTurn = false;
+        changed = true;
+        if (remaining.length) messages.push({ ...message, content: remaining });
+        continue;
+      }
+    }
+
+    replacedPlaceholderInCurrentTurn = false;
+    messages.push(raw);
+  }
+
   return changed ? { ...body, messages } : body;
 }
 
