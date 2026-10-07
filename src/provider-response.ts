@@ -27,7 +27,11 @@ export async function prepareProviderResponse(context: ProviderResponseContext):
   else {
     response = await prepareDownstreamResponse(context.upstream, context.mode, context.requestedStream, context.model, context.requestId);
     if (context.providerKind === "openai-compatible" && context.mode === "passthrough" && context.requestedStream) {
-      response = stopOpenAiCompatibleSseAfterDone(response, context.endpoint === "responses");
+      response = stopOpenAiCompatibleSseAfterDone(
+        response,
+        context.endpoint === "responses",
+        context.endpoint === "chat" || context.endpoint === "completions",
+      );
     }
     if (context.forceResponseModelMapping) response = await rewriteResponseModels(response, context.model);
   }

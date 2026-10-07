@@ -49,7 +49,36 @@ function frameFailure(frame: string): GatewayError | undefined {
   return undefined;
 }
 
-export function stopOpenAiCompatibleSseAfterDone(response: Response, requireDone = false): Response {
+function frameHasFinishReason(frame: string): boolean {
+  const data = sseFrameData(frame).trim();
+  if (!data || data === "[DONE]") return false;
+  try {
+    const payload = JSON.parse(data) as Record<string, unknown>;
+    if (!Array.isArray(payload.choices)) return false;
+    return payload.choices.some((rawChoice) => {
+      if (!rawChoice || typeof rawChoice !== "object" || Array.isArray(rawChoice)) return false;
+      const finishReason = (rawChoice as Record<string, unknown>).finish_reason;
+      return typeof finishReason === "string" && finishReason.trim().length > 0;
+    });
+  } catch {
+    return false;
+  }
+}
+
+function truncatedChatError(): GatewayError {
+  return new GatewayError(
+    502,
+    "UPSTREAM_STREAM_INCOMPLETE",
+    "OpenAI-compatible Chat/Completions stream closed without a finish_reason",
+    "upstream_error",
+  );
+}
+
+export function stopOpenAiCompatibleSseAfterDone(
+  response: Response,
+  requireDone = false,
+  requireFinishReason = false,
+): Response {
   if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) return response;
 
   const decoder = new TextDecoder();
@@ -57,6 +86,7 @@ export function stopOpenAiCompatibleSseAfterDone(response: Response, requireDone
   let buffer = "";
   let done = false;
   let failed = false;
+  let sawFinishReason = false;
 
   const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
@@ -72,8 +102,17 @@ export function stopOpenAiCompatibleSseAfterDone(response: Response, requireDone
         const wireFrame = buffer.slice(0, end);
         buffer = buffer.slice(end);
 
+        const frameDone = sseFrameData(frame).trim() === "[DONE]";
+        if (frameDone && requireFinishReason && !sawFinishReason) {
+          failed = true;
+          buffer = "";
+          controller.error(truncatedChatError());
+          return;
+        }
+
         controller.enqueue(encoder.encode(wireFrame));
-        if (sseFrameData(frame).trim() === "[DONE]") {
+        if (frameHasFinishReason(frame)) sawFinishReason = true;
+        if (frameDone) {
           done = true;
           buffer = "";
           return;
@@ -94,7 +133,13 @@ export function stopOpenAiCompatibleSseAfterDone(response: Response, requireDone
       buffer += decoder.decode();
       if (buffer) {
         const finalFrameIsDone = sseFrameData(buffer).trim() === "[DONE]";
+        if (finalFrameIsDone && requireFinishReason && !sawFinishReason) {
+          failed = true;
+          controller.error(truncatedChatError());
+          return;
+        }
         controller.enqueue(encoder.encode(buffer));
+        if (frameHasFinishReason(buffer)) sawFinishReason = true;
         const separator = eofFrameSeparator(buffer);
         if (separator) controller.enqueue(encoder.encode(separator));
         if (finalFrameIsDone) {
@@ -112,6 +157,10 @@ export function stopOpenAiCompatibleSseAfterDone(response: Response, requireDone
       }
       if (requireDone) {
         controller.error(new GatewayError(502, "UPSTREAM_STREAM_INCOMPLETE", "OpenAI-compatible Responses stream closed before [DONE]", "upstream_error"));
+        return;
+      }
+      if (requireFinishReason && !sawFinishReason) {
+        controller.error(truncatedChatError());
         return;
       }
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
