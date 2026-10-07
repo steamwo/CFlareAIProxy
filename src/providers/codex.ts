@@ -129,6 +129,55 @@ function hasUnsupportedUnicodePropertyEscape(value: string): boolean {
   return /\\[pP]\{[^}]+\}/.test(value);
 }
 
+const CODEX_COMPLEX_UNION_BRANCH_THRESHOLD = 8;
+
+function canonicalConstValue(value: unknown): string | undefined {
+  if (value === null) return "null";
+  if (typeof value === "string") return `s:${value}`;
+  if (typeof value === "boolean") return value ? "b:true" : "b:false";
+  if (typeof value === "number" && Number.isFinite(value)) return `n:${Object.is(value, -0) ? 0 : value}`;
+  return undefined;
+}
+
+function normalizeCodexConstUnion(schema: Record<string, unknown>): Record<string, unknown> {
+  const hasOneOf = Object.prototype.hasOwnProperty.call(schema, "oneOf");
+  const hasAnyOf = Object.prototype.hasOwnProperty.call(schema, "anyOf");
+  if (hasOneOf === hasAnyOf) return schema;
+
+  const unionName = hasOneOf ? "oneOf" : "anyOf";
+  const union = schema[unionName];
+  if (!Array.isArray(union) || union.length < CODEX_COMPLEX_UNION_BRANCH_THRESHOLD) return schema;
+
+  const values: unknown[] = [];
+  const keys = new Set<string>();
+  for (const rawBranch of union) {
+    const branch = record(rawBranch);
+    if (!Object.prototype.hasOwnProperty.call(branch, "const")) return schema;
+    if (Object.keys(branch).some((key) => key !== "const" && key !== "description" && key !== "title")) return schema;
+    const key = canonicalConstValue(branch.const);
+    if (key === undefined || keys.has(key)) return schema;
+    keys.add(key);
+    values.push(branch.const);
+  }
+
+  if (Array.isArray(schema.enum)) {
+    const enumKeys = new Set<string>();
+    for (const enumValue of schema.enum) {
+      const key = canonicalConstValue(enumValue);
+      if (key === undefined || enumKeys.has(key)) return schema;
+      enumKeys.add(key);
+    }
+    if (enumKeys.size !== keys.size || [...keys].some((key) => !enumKeys.has(key))) return schema;
+    const output = { ...schema };
+    delete output[unionName];
+    return output;
+  }
+
+  const output: Record<string, unknown> = { ...schema, enum: values };
+  delete output[unionName];
+  return output;
+}
+
 function normalizeCodexSchemaNode(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => normalizeCodexSchemaNode(item));
   if (!value || typeof value !== "object") return value;
@@ -156,7 +205,7 @@ function normalizeCodexSchemaNode(value: unknown): unknown {
     if (!Object.prototype.hasOwnProperty.call(schema, keyword)) continue;
     output[keyword] = normalizeCodexSchemaNode(schema[keyword]);
   }
-  return output;
+  return normalizeCodexConstUnion(output);
 }
 
 export function normalizeCodexToolSchemas(value: unknown): unknown {
