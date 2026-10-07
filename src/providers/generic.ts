@@ -14,6 +14,19 @@ function objectOption(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+export function normalizeOpenAiMaxTokenField(body: Record<string, unknown>, useMaxCompletionTokens = false): void {
+  const hasMaxTokens = Object.prototype.hasOwnProperty.call(body, "max_tokens");
+  const hasMaxCompletionTokens = Object.prototype.hasOwnProperty.call(body, "max_completion_tokens");
+  if (!hasMaxTokens && !hasMaxCompletionTokens) return;
+  if (useMaxCompletionTokens) {
+    if (!hasMaxCompletionTokens && hasMaxTokens) body.max_completion_tokens = body.max_tokens;
+    delete body.max_tokens;
+    return;
+  }
+  if (!hasMaxTokens && hasMaxCompletionTokens) body.max_tokens = body.max_completion_tokens;
+  delete body.max_completion_tokens;
+}
+
 export async function buildGenericRequest(context: ProxyRequestContext): Promise<UpstreamBuildResult> {
   const baseUrl = normalizeBaseUrl(context.provider.base_url);
   const endpoint = resolveEndpoint(context);
@@ -24,7 +37,10 @@ export async function buildGenericRequest(context: ProxyRequestContext): Promise
   for (const [key, value] of Object.entries(defaults)) if (body[key] === undefined) body[key] = value;
   Object.assign(body, overrides);
   body.model = context.upstreamModel;
-  if (context.provider.kind === "openai-compatible") await applyOpenAiPromptCacheKey(body, context);
+  if (context.provider.kind === "openai-compatible") {
+    normalizeOpenAiMaxTokenField(body, context.useMaxCompletionTokens === true);
+    await applyOpenAiPromptCacheKey(body, context);
+  }
   const headers = sanitizeHeaders(context.originalRequest.headers, context.provider.headers);
 
   const authHeader = typeof context.provider.auth.header === "string" ? context.provider.auth.header : "authorization";

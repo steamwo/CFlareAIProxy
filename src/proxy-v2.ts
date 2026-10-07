@@ -309,6 +309,7 @@ export async function proxyGeneration(
           endpoint,
           publicModel,
           upstreamModel: route.upstream_model,
+          useMaxCompletionTokens: runtime.capabilities.useMaxCompletionTokens,
           body: routeBody,
           originalRequest: c.req.raw,
           provider,
