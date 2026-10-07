@@ -136,6 +136,19 @@ export function normalizeKimiToolSchemas(body: Record<string, unknown>): Record<
   return output;
 }
 
+export function normalizeKimiTemperature(body: Record<string, unknown>): Record<string, unknown> {
+  if (!Object.prototype.hasOwnProperty.call(body, "temperature")) return body;
+  const temperature = body.temperature;
+  const thinkingType = typeof record(body.thinking).type === "string"
+    ? String(record(body.thinking).type).trim().toLowerCase()
+    : "";
+  const expected = thinkingType === "disabled" ? 0.6 : 1.0;
+  if (typeof temperature === "number" && Number.isFinite(temperature) && temperature === expected) return body;
+  const output = { ...body };
+  delete output.temperature;
+  return output;
+}
+
 export function normalizeKimiMessages(messages: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(messages)) return [];
   const output: Array<Record<string, unknown>> = [];
@@ -209,6 +222,7 @@ function requestBody(context: ProxyRequestContext): Record<string, unknown> {
   for (const [key, value] of Object.entries(defaults)) if (body[key] === undefined) body[key] = value;
   Object.assign(body, overrides);
   body = normalizeKimiToolSchemas(body);
+  body = normalizeKimiTemperature(body);
   body.model = normalizeKimiUpstreamModel(context.upstreamModel);
   body.messages = normalizeKimiMessages(body.messages);
   if (body.stream === true) {

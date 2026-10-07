@@ -48,3 +48,20 @@ export function normalizeKimiUpstreamModel(model: string): string {
 
   return parsed.suffix !== undefined ? `${normalized}(${parsed.suffix})` : normalized;
 }
+
+
+export function kimiKnownModelCapabilities(model: string): Record<string, unknown> {
+  const base = parseTrailingThinkingSuffix(model).base.toLowerCase().replace(/\[1m\]$/i, "");
+  const k28 = new Set(["kimi-k2.8", "k2.8", "kimi-k2.8-code", "k2.8-code", "kimi-k2.8-preview", "k2.8-preview"]);
+  const k3 = new Set(["kimi-k3", "k3"]);
+  const k3256 = new Set(["kimi-k3-256k", "k3-256k"]);
+  if (!k28.has(base) && !k3.has(base) && !k3256.has(base)) return {};
+  return {
+    context_window: k3256.has(base) ? 262144 : 1048576,
+    max_completion_tokens: 65536,
+    reasoning_levels: ["low", "high", "max"],
+    reasoning_zero_allowed: true,
+    input_modalities: ["text", "image", "video"],
+    output_modalities: ["text"],
+  };
+}

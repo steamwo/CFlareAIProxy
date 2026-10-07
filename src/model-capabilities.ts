@@ -27,6 +27,7 @@ export interface ModelCapabilities {
   supportsSearchTool?: boolean;
   supportsPromptCacheKey?: boolean;
   supportsReasoningSummary?: boolean;
+  reasoningZeroAllowed?: boolean;
   forceResponseModelMapping?: boolean;
   multiAgentReasoningEffort?: unknown;
   requiresSandboxedReview?: boolean;
@@ -124,6 +125,12 @@ export function normalizeCapabilities(value: unknown): ModelCapabilities {
       raw.supportsReasoningSummaryParameter,
       raw.supports_reasoning_summary_parameter,
     ),
+    reasoningZeroAllowed: booleanValue(
+      raw.reasoningZeroAllowed,
+      raw.reasoning_zero_allowed,
+      record(raw.thinking).zero_allowed,
+      record(raw.thinking).zeroAllowed,
+    ),
     forceResponseModelMapping: raw.forceResponseModelMapping === true || raw.force_response_model_mapping === true ? true : undefined,
     multiAgentReasoningEffort: definedValue(raw.multiAgentReasoningEffort, raw.multi_agent_reasoning_effort),
     requiresSandboxedReview: booleanValue(raw.requiresSandboxedReview, raw.requires_sandboxed_review),
@@ -149,6 +156,7 @@ export function mergeModelCapabilities(primary: ModelCapabilities, fallback: Mod
     supportsSearchTool: primary.supportsSearchTool ?? fallback.supportsSearchTool,
     supportsPromptCacheKey: primary.supportsPromptCacheKey ?? fallback.supportsPromptCacheKey,
     supportsReasoningSummary: primary.supportsReasoningSummary ?? fallback.supportsReasoningSummary,
+    reasoningZeroAllowed: primary.reasoningZeroAllowed ?? fallback.reasoningZeroAllowed,
     forceResponseModelMapping: primary.forceResponseModelMapping ?? fallback.forceResponseModelMapping,
     multiAgentReasoningEffort: primary.multiAgentReasoningEffort !== undefined ? primary.multiAgentReasoningEffort : fallback.multiAgentReasoningEffort,
     requiresSandboxedReview: primary.requiresSandboxedReview ?? fallback.requiresSandboxedReview,
