@@ -21,6 +21,7 @@ describe("Codex client model catalog", () => {
     }], {
       multiAgentModels: new Set(["coding-pro"]),
       providerKinds: new Map([["codex", "codex"]]),
+      searchSupport: new Map([["coding-pro", true]]),
     });
 
     expect(models).toHaveLength(1);
@@ -115,20 +116,38 @@ describe("Codex client model catalog", () => {
     ]);
   });
 
-  it("disables search support when any backing provider is not Codex", () => {
-    const models = buildCodexClientModels([{
-      id: "mixed",
-      x_cflare_providers: ["codex", "openai-main"],
-      x_cflare_endpoints: ["responses"],
-      x_cflare_capabilities: { supportsSearchTool: true },
-    }], {
-      multiAgentModels: new Set(),
-      providerKinds: new Map([["codex", "codex"], ["openai-main", "openai-compatible"]]),
-    });
-    const model = models[0];
-    expect(model).toBeDefined();
-    if (!model) throw new Error("Expected mixed model entry");
-    expect(model.supports_search_tool).toBe(false);
+  it("aggregates explicit search support conservatively across Responses routes", () => {
+    const providers = [
+      {
+        id: "codex", kind: "codex" as const,
+        options_json: JSON.stringify({ model_capabilities: { upstream: { supports_search_tool: true } } }),
+      },
+      { id: "openai-main", kind: "openai-compatible" as const, options_json: "{}" },
+    ];
+    const context = resolveCodexClientCatalogContext([
+      { id: "all-true" },
+      { id: "explicit-false" },
+      { id: "unknown-mixed" },
+      { id: "provider-metadata" },
+      { id: "discovered-true" },
+    ], providers, [
+      { public_model: "all-true", provider_id: "codex", upstream_model: "upstream", route_options_json: JSON.stringify({ capabilities: { supports_search_tool: true } }) },
+      { public_model: "all-true", provider_id: "openai-main", upstream_model: "other", route_options_json: JSON.stringify({ capabilities: { supports_search_tool: true } }) },
+      { public_model: "explicit-false", provider_id: "codex", upstream_model: "upstream", route_options_json: JSON.stringify({ capabilities: { supports_search_tool: true } }) },
+      { public_model: "explicit-false", provider_id: "openai-main", upstream_model: "other", route_options_json: JSON.stringify({ capabilities: { supports_search_tool: false } }) },
+      { public_model: "unknown-mixed", provider_id: "codex", upstream_model: "upstream", route_options_json: JSON.stringify({ capabilities: { supports_search_tool: true } }) },
+      { public_model: "unknown-mixed", provider_id: "openai-main", upstream_model: "other", route_options_json: "{}" },
+      { public_model: "provider-metadata", provider_id: "codex", upstream_model: "upstream", route_options_json: "{}" },
+      { public_model: "discovered-true", provider_id: "openai-main", upstream_model: "other", route_options_json: "{}", capabilities_json: JSON.stringify({ supports_search_tool: true }) },
+    ]);
+    expect(context.searchSupport.get("all-true")).toBe(true);
+    expect(context.searchSupport.get("explicit-false")).toBe(false);
+    expect(context.searchSupport.get("unknown-mixed")).toBe(false);
+    expect(context.searchSupport.get("provider-metadata")).toBe(true);
+    expect(context.searchSupport.get("discovered-true")).toBe(true);
+
+    const [model] = buildCodexClientModels([{ id: "all-true", x_cflare_endpoints: ["responses"] }], context);
+    expect(model?.supports_search_tool).toBe(true);
   });
 
   it("advertises multi-agent v2 only when every Responses route is enabled", () => {
