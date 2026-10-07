@@ -22,7 +22,10 @@ export interface ProviderResponseContext {
 export async function prepareProviderResponse(context: ProviderResponseContext): Promise<Response> {
   let response: Response;
   if (context.providerKind === "codex") response = await prepareCodexCustomToolResponse(context);
-  else if (context.providerKind === "kimi") response = await prepareKimiResponse(context);
+  else if (context.providerKind === "kimi" && context.mode === "passthrough") {
+    response = await prepareDownstreamResponse(context.upstream, "passthrough", context.requestedStream, context.model, context.requestId);
+    if (context.forceResponseModelMapping) response = await rewriteResponseModels(response, context.model);
+  } else if (context.providerKind === "kimi") response = await prepareKimiResponse(context);
   else if (context.providerKind === "qoder") response = await prepareQoderResponse(context);
   else {
     response = await prepareDownstreamResponse(context.upstream, context.mode, context.requestedStream, context.model, context.requestId);

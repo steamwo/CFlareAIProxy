@@ -123,8 +123,15 @@ export function normalizeKimiToolSchemas(body: Record<string, unknown>): Record<
     output.tools = output.tools.map((rawTool) => {
       if (!isPlainObject(rawTool)) return rawTool;
       const fn = rawTool.function;
-      if (!isPlainObject(fn) || !isPlainObject(fn.parameters)) return rawTool;
-      return { ...rawTool, function: { ...fn, parameters: normalizeKimiParameters(fn.parameters) } };
+      if (isPlainObject(fn) && isPlainObject(fn.parameters)) {
+        return { ...rawTool, function: { ...fn, parameters: normalizeKimiParameters(fn.parameters) } };
+      }
+      // Native OpenAI Responses function tools keep name/description/parameters at
+      // the tool object level instead of nesting them under `function`.
+      if (rawTool.type === "function" && isPlainObject(rawTool.parameters)) {
+        return { ...rawTool, parameters: normalizeKimiParameters(rawTool.parameters) };
+      }
+      return rawTool;
     });
   }
   if (Array.isArray(output.functions)) {
@@ -194,10 +201,19 @@ export function normalizeKimiMessages(messages: unknown): Array<Record<string, u
   return output;
 }
 
+export function kimiNativeResponsesEnabled(context: ProxyRequestContext): boolean {
+  if (context.endpoint !== "responses") return false;
+  const options = context.provider.options;
+  return options.kimi_native_responses === true || options.kimiNativeResponses === true;
+}
+
 function requestBody(context: ProxyRequestContext): Record<string, unknown> {
   const source = context.body;
+  const nativeResponses = kimiNativeResponsesEnabled(context);
   let body: Record<string, unknown>;
-  if (context.endpoint === "responses") {
+  if (nativeResponses) {
+    body = { ...source };
+  } else if (context.endpoint === "responses") {
     body = {
       messages: responsesInputToMessages(source),
       stream: source.stream === true,
@@ -224,17 +240,26 @@ function requestBody(context: ProxyRequestContext): Record<string, unknown> {
   body = normalizeKimiToolSchemas(body);
   body = normalizeKimiTemperature(body);
   body.model = normalizeKimiUpstreamModel(context.upstreamModel);
-  body.messages = normalizeKimiMessages(body.messages);
-  if (body.stream === true) {
-    const streamOptions = record(body.stream_options);
-    body.stream_options = { ...streamOptions, include_usage: true };
+  if (!nativeResponses) {
+    body.messages = normalizeKimiMessages(body.messages);
+    if (body.stream === true) {
+      const streamOptions = record(body.stream_options);
+      body.stream_options = { ...streamOptions, include_usage: true };
+    }
   }
   return body;
 }
 
+function resolveEndpoint(baseUrl: string, endpoint: string): string {
+  return endpoint.startsWith("http") ? endpoint : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
+}
+
 export function buildKimiRequest(context: ProxyRequestContext): UpstreamBuildResult {
   const baseUrl = normalizeBaseUrl(context.provider.base_url);
-  const endpoint = context.provider.endpoints.chat ?? "/chat/completions";
+  const nativeResponses = kimiNativeResponsesEnabled(context);
+  const endpoint = nativeResponses
+    ? context.provider.endpoints.responses ?? (baseUrl.endsWith("/v1") ? "/responses" : "/v1/responses")
+    : context.provider.endpoints.chat ?? "/chat/completions";
   const headers = sanitizeHeaders(context.originalRequest.headers, context.provider.headers);
   providerAuthHeaders(context.provider, context.credential, context.originalRequest.headers).forEach((value, key) => headers.set(key, value));
   headers.set("content-type", "application/json");
@@ -245,10 +270,9 @@ export function buildKimiRequest(context: ProxyRequestContext): UpstreamBuildRes
   headers.set("x-msh-device-model", headers.get("x-msh-device-model") ?? "Cloudflare Workers");
   const deviceId = typeof context.credential.metadata.device_id === "string" ? context.credential.metadata.device_id : context.credential.id;
   headers.set("x-msh-device-id", headers.get("x-msh-device-id") ?? deviceId);
-  const url = endpoint.startsWith("http") ? endpoint : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
   return {
-    url,
+    url: resolveEndpoint(baseUrl, endpoint),
     init: { method: "POST", headers, body: JSON.stringify(requestBody(context)), redirect: "manual" },
-    responseMode: context.endpoint === "chat" ? "passthrough" : "codex-chat",
+    responseMode: nativeResponses || context.endpoint === "chat" ? "passthrough" : "codex-chat",
   };
 }
