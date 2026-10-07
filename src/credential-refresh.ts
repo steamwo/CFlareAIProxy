@@ -52,53 +52,74 @@ export async function refreshCredentialForInference(
   env: Env,
   provider: ProviderConfig,
   credential: Credential,
+  requestProxyOverride?: string,
 ): Promise<Credential> {
-  if (!credentialProxyUrl(credential)) return refreshCredential(env, provider, credential);
-  if (provider.kind !== "kimi" && provider.kind !== "codex") return refreshCredential(env, provider, credential);
+  const requestOverride = requestProxyOverride?.trim() ?? "";
+  if (!requestOverride && !credentialProxyUrl(credential)) return refreshCredential(env, provider, credential);
   if (!credential.refreshToken) return credential;
-  const tokenUrl = stringValue(provider.auth, "token_url");
-  const clientId = stringValue(provider.auth, "client_id");
-  if (!tokenUrl || !clientId) return refreshCredential(env, provider, credential);
 
-  const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    client_id: clientId,
-    refresh_token: credential.refreshToken,
-  });
-  if (provider.kind === "codex") body.set("scope", "openid profile email");
-  const headers = provider.kind === "kimi"
-    ? kimiHeaders(credential)
-    : new Headers({ accept: "application/json", "content-type": "application/x-www-form-urlencoded" });
   let response: Response;
-  if (provider.kind === "codex") {
-    try {
+  if (provider.kind === "qoder") {
+    const refreshUrl = stringValue(provider.auth, "refresh_url") ?? "https://center.qoder.sh/algo/api/v3/user/refresh_token";
+    response = await providerFetchForCredential(
+      env,
+      provider,
+      credential,
+      refreshUrl,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential.secret}`, accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ refreshToken: credential.refreshToken }),
+      },
+      { purpose: "oauth", timeoutMs: 30_000, requestProxyOverride: requestOverride || undefined },
+    );
+    if (!response.ok) return credential;
+  } else {
+    const tokenUrl = stringValue(provider.auth, "token_url");
+    const clientId = stringValue(provider.auth, "client_id");
+    if (!tokenUrl || !clientId) return credential;
+
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: clientId,
+      refresh_token: credential.refreshToken,
+    });
+    if (provider.kind === "codex") body.set("scope", "openid profile email");
+    const headers = provider.kind === "kimi"
+      ? kimiHeaders(credential)
+      : new Headers({ accept: "application/json", "content-type": "application/x-www-form-urlencoded" });
+    if (provider.kind === "codex") {
+      try {
+        response = await providerFetchForCredential(
+          env,
+          provider,
+          credential,
+          tokenUrl,
+          { method: "POST", headers, body },
+          { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS, requestProxyOverride: requestOverride || undefined },
+        );
+      } catch (error) {
+        throw oauthRefreshTransportError(provider, error);
+      }
+    } else {
       response = await providerFetchForCredential(
         env,
         provider,
         credential,
         tokenUrl,
         { method: "POST", headers, body },
-        { purpose: "oauth", timeoutMs: OAUTH_REFRESH_TIMEOUT_MS },
+        { purpose: "oauth", timeoutMs: 30_000, requestProxyOverride: requestOverride || undefined },
       );
-    } catch (error) {
-      throw oauthRefreshTransportError(provider, error);
     }
-  } else {
-    response = await providerFetchForCredential(
-      env,
-      provider,
-      credential,
-      tokenUrl,
-      { method: "POST", headers, body },
-      { purpose: "oauth", timeoutMs: 30_000 },
-    );
+    if (!response.ok) {
+      const text = await response.text();
+      throw gatewayErrorFromClassification(classifyUpstreamResponse(response.status, text, response.headers, provider.kind));
+    }
   }
+
   const text = await response.text();
   let payload: Record<string, unknown> = {};
   try { payload = text ? JSON.parse(text) as Record<string, unknown> : {}; } catch { /* classified below */ }
-  if (!response.ok) {
-    throw gatewayErrorFromClassification(classifyUpstreamResponse(response.status, text, response.headers, provider.kind));
-  }
   const accessToken = stringValue(payload, "access_token") ?? stringValue(payload, "token");
   if (!accessToken) throw new GatewayError(502, "OAUTH_REFRESH_INVALID", `${provider.name} refresh response did not include an access token`, "upstream_error");
   const refreshToken = stringValue(payload, "refresh_token") ?? credential.refreshToken;
