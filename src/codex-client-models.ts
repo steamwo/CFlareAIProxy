@@ -189,14 +189,21 @@ export async function loadCodexClientCatalogContext(env: Env, models: Array<Reco
       .all<CodexClientProviderSource>().catch(() => ({ results: [] })),
     env.DB.prepare(
       `SELECT r.public_model,r.provider_id,r.upstream_model,r.options_json AS route_options_json,
-              p.options_json AS provider_options_json,d.capabilities_json,d.raw_json
+              p.options_json AS provider_options_json,
+              (SELECT d.capabilities_json
+                 FROM discovered_models d
+                WHERE d.provider_id=r.provider_id AND d.model_id=r.upstream_model
+                  AND d.endpoint='responses' AND d.enabled=1
+                ORDER BY d.discovered_at DESC,d.credential_id ASC LIMIT 1) AS capabilities_json,
+              (SELECT d.raw_json
+                 FROM discovered_models d
+                WHERE d.provider_id=r.provider_id AND d.model_id=r.upstream_model
+                  AND d.endpoint='responses' AND d.enabled=1
+                ORDER BY d.discovered_at DESC,d.credential_id ASC LIMIT 1) AS raw_json
        FROM model_routes r
        JOIN providers p ON p.id=r.provider_id AND p.enabled=1
-       LEFT JOIN discovered_models d
-         ON d.provider_id=r.provider_id AND d.model_id=r.upstream_model
-        AND d.endpoint='responses' AND d.enabled=1
        WHERE r.enabled=1 AND r.endpoint='responses'
-       ORDER BY r.public_model,r.priority,r.created_at,d.discovered_at DESC`,
+       ORDER BY r.public_model,r.priority,r.created_at`,
     ).all<CodexClientRouteSource>().catch(() => ({ results: [] })),
   ]);
   return resolveCodexClientCatalogContext(models, providerResult.results, routeResult.results);
