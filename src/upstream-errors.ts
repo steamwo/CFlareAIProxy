@@ -9,6 +9,7 @@ export interface UpstreamErrorClassification {
   retryable: boolean;
   credentialFailure: boolean;
   providerFailure: boolean;
+  cooldownScope?: "credential" | "model";
   retryAfterMs?: number;
 }
 
@@ -53,6 +54,24 @@ function retryAfterFromHeaders(headers: Headers, now = Date.now()): number | und
   if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
   const date = Date.parse(raw);
   return Number.isFinite(date) ? Math.max(0, date - now) : undefined;
+}
+
+function codexUsageLimitRetryAfter(payload: Record<string, unknown>, now = Date.now()): number | undefined {
+  for (const path of ["error.retry_after", "error.retry_after_seconds", "retry_after", "retry_after_seconds"]) {
+    const seconds = numberAt(payload, path);
+    if (seconds !== undefined && seconds >= 0) return Math.ceil(seconds * 1000);
+  }
+  for (const path of ["error.resets_at", "resets_at"]) {
+    const value = numberAt(payload, path);
+    if (value === undefined) continue;
+    const epochMs = value > 10_000_000_000 ? value : value * 1000;
+    if (epochMs > now) return Math.ceil(epochMs - now);
+  }
+  for (const path of ["error.resets_in_seconds", "resets_in_seconds"]) {
+    const seconds = numberAt(payload, path);
+    if (seconds !== undefined && seconds > 0) return Math.ceil(seconds * 1000);
+  }
+  return undefined;
 }
 
 function retryAfterFromPayload(payload: Record<string, unknown>, now = Date.now()): number | undefined {
@@ -119,7 +138,9 @@ export function classifyUpstreamResponse(
     ?? stringAt(payload, "error_description")
     ?? (body.trim() || `Upstream returned HTTP ${status}`);
   const lower = `${upstreamCode} ${upstreamType} ${message} ${body}`.toLowerCase();
-  const retryAfterHintMs = retryAfterFromHeaders(headers) ?? retryAfterFromPayload(payload);
+  const codexUsageLimit = providerKind === "codex" && upstreamType === "usage_limit_reached";
+  const retryAfterHintMs = retryAfterFromHeaders(headers)
+    ?? (codexUsageLimit ? codexUsageLimitRetryAfter(payload) : retryAfterFromPayload(payload));
   const compactUpstreamCode = upstreamCode.replace(/[^a-z0-9]/g, "");
   const explicitTpmLimit = compactUpstreamCode.includes("tpmratelimitexceeded")
     || /(?:tokens?\s+per\s+minute|tokens?\s*\/\s*min(?:ute)?).*(?:limit|exceed)|(?:limit|exceed).*(?:tokens?\s+per\s+minute|tokens?\s*\/\s*min(?:ute)?)/i.test(message);
@@ -140,7 +161,7 @@ export function classifyUpstreamResponse(
     return { status: 400, code: "RESPONSE_ITEM_NOT_FOUND", type: "invalid_request_error", message, retryable: false, credentialFailure: false, providerFailure: false };
   }
   if (status === 402) {
-    return { status, code: "PAYMENT_REQUIRED", type: "billing_error", message, retryable: true, credentialFailure: true, providerFailure: false, retryAfterMs };
+    return { status, code: "PAYMENT_REQUIRED", type: "billing_error", message, retryable: true, credentialFailure: true, providerFailure: false, cooldownScope: "credential", retryAfterMs };
   }
 
   const explicitAuthFailure = upstreamType === "authentication_error"
@@ -154,14 +175,38 @@ export function classifyUpstreamResponse(
     return { status, code: "UPSTREAM_REQUEST_ERROR", type: "invalid_request_error", message, retryable: false, credentialFailure: false, providerFailure: false, retryAfterMs };
   }
   if (status === 401 || status === 403 || explicitAuthFailure) {
-    return { status, code: "AUTH_UNAVAILABLE", type: status === 403 ? "permission_error" : "authentication_error", message, retryable: true, credentialFailure: true, providerFailure: false, retryAfterMs };
+    return { status, code: "AUTH_UNAVAILABLE", type: status === 403 ? "permission_error" : "authentication_error", message, retryable: true, credentialFailure: true, providerFailure: false, cooldownScope: "credential", retryAfterMs };
   }
   if (status === 408 || status === 425 || status >= 500) {
-    return { status: 502, code: "UPSTREAM_UNAVAILABLE", type: "upstream_error", message, retryable: true, credentialFailure: status !== 502 || providerKind === "codex", providerFailure: true, retryAfterMs };
+    const credentialFailure = status !== 502 || providerKind === "codex";
+    return {
+      status: 502,
+      code: "UPSTREAM_UNAVAILABLE",
+      type: "upstream_error",
+      message,
+      retryable: true,
+      credentialFailure,
+      providerFailure: true,
+      cooldownScope: credentialFailure ? "credential" : undefined,
+      retryAfterMs,
+    };
   }
   if (status === 429 || upstreamType === "rate_limit_error"
     || /rate.?limit|usage.?limit|quota|capacity|overloaded|too many requests/.test(lower)) {
-    return { status: 429, code: "RATE_LIMIT_EXCEEDED", type: "rate_limit_error", message, retryable: true, credentialFailure: true, providerFailure: false, retryAfterMs };
+    if (providerKind === "codex") {
+      return {
+        status: 429,
+        code: "RATE_LIMIT_EXCEEDED",
+        type: "rate_limit_error",
+        message,
+        retryable: true,
+        credentialFailure: codexUsageLimit,
+        providerFailure: false,
+        cooldownScope: codexUsageLimit ? "credential" : "model",
+        retryAfterMs,
+      };
+    }
+    return { status: 429, code: "RATE_LIMIT_EXCEEDED", type: "rate_limit_error", message, retryable: true, credentialFailure: true, providerFailure: false, cooldownScope: "credential", retryAfterMs };
   }
   return { status, code: "UPSTREAM_ERROR", type: "upstream_error", message, retryable: false, credentialFailure: false, providerFailure: false, retryAfterMs };
 }
