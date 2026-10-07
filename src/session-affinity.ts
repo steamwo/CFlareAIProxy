@@ -236,13 +236,19 @@ export function extractSessionAffinitySignals(request: Request, body: Record<str
   // Qoder provider session identity is canonicalized separately above.
   if (claudeAliases.length) return claudeAliases;
 
-  const codex = codexSessionSignal(request);
-  if (codex) return codexSignalAliases(codex);
-
   const nested = nestedRequest(body);
   const topMetadata = record(body.metadata);
   const nestedMetadata = record(nested.metadata);
   const agentId = metadataIdentity(topMetadata) ?? metadataIdentity(nestedMetadata);
+
+  const codex = codexSessionSignal(request);
+  if (codex) {
+    const aliases = codexSignalAliases(codex);
+    return agentId
+      ? aliases.map((signal) => hierarchicalSignal(signal.source, signal.value, agentId))
+      : aliases;
+  }
+
   const promptCacheKey = normalizeExplicitId(body.prompt_cache_key) ?? normalizeExplicitId(nested.prompt_cache_key);
   const responsesConversation = conversationId(body) ?? conversationId(nested);
   const clientRequest = headerSignal(headers, "x-client-request-id", "client-request");
@@ -255,13 +261,15 @@ export function extractSessionAffinitySignals(request: Request, body: Record<str
     clientRequest,
   ].find((entry): entry is SessionSignal => entry !== undefined);
   if (explicit) {
-    if (explicit.source !== "client-request") return [explicit];
-    // Preserve x-client-request-id as the primary legacy affinity key, but add
-    // stable Responses aliases when available so changing request IDs can still
-    // find the same selected credential after a restart/turn boundary.
-    const aliases: SessionSignal[] = [explicit];
-    if (promptCacheKey) aliases.push({ source: "prompt-cache", value: promptCacheKey });
-    if (responsesConversation) aliases.push({ source: "conversation", value: responsesConversation });
+    const scopedExplicit = agentId
+      ? hierarchicalSignal(explicit.source, explicit.value, agentId)
+      : explicit;
+    if (explicit.source !== "client-request") return [scopedExplicit];
+    // Preserve x-client-request-id as the primary affinity signal, but scope all
+    // aliases by agent identity when present so a child never inherits a parent binding.
+    const aliases: SessionSignal[] = [scopedExplicit];
+    if (promptCacheKey) aliases.push(hierarchicalSignal("prompt-cache", promptCacheKey, agentId));
+    if (responsesConversation) aliases.push(hierarchicalSignal("conversation", responsesConversation, agentId));
     return aliases;
   }
 
