@@ -19,6 +19,7 @@ import { captureQuotaHeaders } from "./quota";
 import { orderHealthyRoutes, recordProviderFailure, recordProviderSuccess } from "./routing-health";
 import { buildSessionAffinityKey } from "./session-affinity";
 import { trackResponse } from "./stream";
+import { credentialAccessTokenUsable, credentialNeedsRefresh } from "./token-expiry";
 import type { CredentialRow, Env, GatewayEndpoint, GatewayKeyRow, LoggingSettings, ModelRouteRow, PoolCandidate, PoolLease, ProviderConfig, RateLease, Usage, UsageEvent } from "./types";
 import {
   classifyTransportError,
@@ -291,16 +292,37 @@ export async function proxyGeneration(
 
         let credential = await getCredential(c.env, poolLease.credentialId);
         logCredentialId = credential.id;
-        if (credential.expires_at && credential.expires_at <= Math.floor(Date.now() / 1000) + 300 && credential.refreshToken) {
-          const lock = await postDo<{ acquired: boolean; lockId?: string }>(poolStub!, "/lock", { credentialId: credential.id, ttlMs: 60_000 });
+        const refreshLeadSeconds = provider.kind === "codex" ? 24 * 60 * 60 : 300;
+        if (credential.refreshToken && credentialNeedsRefresh(credential, refreshLeadSeconds)) {
+          const lock = await postDo<{ acquired: boolean; lockId?: string }>(poolStub!, "/lock", {
+            credentialId: credential.id,
+            ttlMs: 5 * 60_000,
+          });
           if (lock.acquired && lock.lockId) {
+            let releaseRefreshLock = true;
             try {
-              credential = await refreshCredentialForInference(c.env, provider, credential);
+              try {
+                credential = await refreshCredentialForInference(c.env, provider, credential);
+              } catch (error) {
+                if (!credentialAccessTokenUsable(credential)) throw error;
+                // Keep the old still-valid access token available. Leaving the refresh lock
+                // to expire provides a request-shared backoff without overwriting pool cooldown.
+                releaseRefreshLock = false;
+                runtimeLog(logging, "warn", {
+                  event: "credential_refresh_deferred",
+                  request_id: requestId,
+                  provider_id: provider.id,
+                  credential_id: credential.id,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
             } finally {
-              await postDo(poolStub!, "/unlock", { credentialId: credential.id, lockId: lock.lockId }).catch(() => undefined);
+              if (releaseRefreshLock) {
+                await postDo(poolStub!, "/unlock", { credentialId: credential.id, lockId: lock.lockId }).catch(() => undefined);
+              }
             }
-          } else if (credential.expires_at <= Math.floor(Date.now() / 1000)) {
-            throw new GatewayError(503, "CREDENTIAL_REFRESH_BUSY", "Credential refresh is already in progress", "upstream_error");
+          } else if (!credentialAccessTokenUsable(credential)) {
+            throw new GatewayError(503, "CREDENTIAL_REFRESH_BUSY", "Credential access token is expired and refresh is already in progress", "upstream_error");
           }
         }
 

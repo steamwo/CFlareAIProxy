@@ -1,6 +1,7 @@
 import { decryptSecret, encryptSecret } from "./crypto";
 import { createCredential, getProvider, updateCredentialTokens } from "./db";
 import { GatewayError } from "./errors";
+import { credentialNeedsRefresh, jwtAccessTokenExpiry } from "./token-expiry";
 import type { Credential, Env, ProviderConfig } from "./types";
 import { decodeJwtPayload, nowSeconds, parseJson, pickString, pkceChallenge, randomToken } from "./utils";
 import { providerFetch } from "./upstream-fetch";
@@ -501,7 +502,8 @@ export async function exchangeOAuthCode(
 }
 
 export async function refreshCredential(env: Env, provider: ProviderConfig, credential: Credential): Promise<Credential> {
-  if (!credential.refreshToken || !credential.expires_at || credential.expires_at > nowSeconds() + 300) return credential;
+  const refreshLeadSeconds = provider.kind === "codex" ? 24 * 60 * 60 : 300;
+  if (!credential.refreshToken || !credentialNeedsRefresh(credential, refreshLeadSeconds, nowSeconds())) return credential;
   let payload: Record<string, unknown>;
   if (provider.kind === "qoder") {
     const refreshUrl = stringValue(provider.auth, "refresh_url") ?? "https://center.qoder.sh/algo/api/v3/user/refresh_token";
@@ -550,7 +552,7 @@ export async function refreshCredential(env: Env, provider: ProviderConfig, cred
   const access = stringValue(payload, "access_token") ?? stringValue(payload, "token");
   if (!access) return credential;
   const refreshToken = stringValue(payload, "refresh_token") ?? credential.refreshToken;
-  const expiresAt = tokenExpiry(payload) ?? credential.expires_at;
+  const expiresAt = jwtAccessTokenExpiry(access) ?? tokenExpiry(payload) ?? credential.expires_at;
   const metadata = provider.kind === "codex"
     ? codexMetadata(payload, access, credential.metadata)
     : credential.metadata;
