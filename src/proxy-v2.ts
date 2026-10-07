@@ -29,6 +29,7 @@ import {
   gatewayErrorFromClassification,
   providerFailureEligible,
 } from "./upstream-errors";
+import { validateProxyUrl } from "./upstream-fetch";
 import { asInt, parseJson, readJsonBody, truncate } from "./utils";
 
 function bearerToken(request: Request): string {
@@ -36,6 +37,16 @@ function bearerToken(request: Request): string {
   const match = authorization.match(/^Bearer\s+(.+)$/i);
   if (!match?.[1]) throw new GatewayError(401, "AUTHENTICATION_ERROR", "Missing Bearer API key", "authentication_error");
   return match[1].trim();
+}
+
+function trustedRequestProxyOverride(request: Request, trusted: boolean): string | undefined {
+  if (!trusted) return undefined;
+  const raw = request.headers.get("x-cflare-request-proxy")?.trim();
+  if (!raw) return undefined;
+  const normalized = raw.toLowerCase();
+  if (normalized === "direct" || normalized === "none") return "direct";
+  validateProxyUrl(raw);
+  return raw;
 }
 
 function estimateInputTokens(body: Record<string, unknown>): number {
@@ -127,8 +138,10 @@ export async function proxyGeneration(
   let logProviderId: string | undefined;
   let logCredentialId: string | undefined;
   let logUpstreamModel: string | undefined;
+  let requestProxyOverride: string | undefined;
 
   try {
+    requestProxyOverride = trustedRequestProxyOverride(c.req.raw, preauthenticatedGatewayKey !== undefined);
     // External /v1 calls keep the existing Bearer-key path. The admin playground can pass
     // an already-selected key row after its own session guard has authenticated the operator.
     const rawKey = preauthenticatedGatewayKey ? "" : bearerToken(c.req.raw);
@@ -314,7 +327,7 @@ export async function proxyGeneration(
             let releaseRefreshLock = true;
             try {
               try {
-                credential = await refreshCredentialForInference(c.env, provider, credential);
+                credential = await refreshCredentialForInference(c.env, provider, credential, requestProxyOverride);
               } catch (error) {
                 if (!credentialAccessTokenUsable(credential)) throw error;
                 // Keep the old still-valid access token available. Leaving the refresh lock
@@ -361,7 +374,12 @@ export async function proxyGeneration(
               target: upstreamRequest.url,
               init: upstreamRequest.init,
               fetcher: (target, requestInit) => providerFetchForCredential(
-                c.env, provider, credential, target, requestInit, { purpose: "inference", timeoutMs },
+                c.env,
+                provider,
+                credential,
+                target,
+                requestInit,
+                { purpose: "inference", timeoutMs, requestProxyOverride },
               ),
             });
             upstream = result.response;
@@ -378,7 +396,14 @@ export async function proxyGeneration(
               }
             }
           } else {
-            upstream = await providerFetchForCredential(c.env, provider, credential, upstreamRequest.url, upstreamRequest.init, { purpose: "inference", timeoutMs });
+            upstream = await providerFetchForCredential(
+              c.env,
+              provider,
+              credential,
+              upstreamRequest.url,
+              upstreamRequest.init,
+              { purpose: "inference", timeoutMs, requestProxyOverride },
+            );
           }
         } catch (error) {
           const normalized = classifyTransportError(error, provider.name, timeoutMs);
