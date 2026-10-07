@@ -65,7 +65,10 @@ async function baseProviderFetchForCredential(
   init: RequestInit = {},
   options: ProviderFetchOptions = {},
 ): Promise<Response> {
-  const override = credentialProxyUrl(credential);
+  const requestOverride = typeof options.requestProxyOverride === "string"
+    ? options.requestProxyOverride.trim()
+    : "";
+  const override = requestOverride || credentialProxyUrl(credential);
   if (!override) return providerFetch(env, provider, target, init, options);
   const timeoutMs = Math.max(1000, options.timeoutMs ?? 120_000);
   const url = new URL(target.toString());
