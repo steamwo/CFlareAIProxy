@@ -1,5 +1,11 @@
 import { GatewayError } from "./errors";
 import { readResponseText } from "./response-utils";
+import {
+  canonicalUsage,
+  emptyCanonicalUsage,
+  mergeCanonicalUsage,
+  safeNonNegativeInteger,
+} from "./usage-numbers";
 import type { UpstreamResponseMode, Usage } from "./types";
 
 const encoder = new TextEncoder();
@@ -12,40 +18,36 @@ export interface ResponseMetrics {
 }
 
 function emptyUsage(): Usage {
-  return { promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0 };
+  return emptyCanonicalUsage();
 }
 
-function numberField(object: Record<string, unknown>, ...keys: string[]): number {
+function numberField(object: Record<string, unknown>, ...keys: string[]): number | undefined {
   for (const key of keys) {
-    const value = object[key];
-    if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.floor(value));
+    const value = safeNonNegativeInteger(object[key]);
+    if (value !== undefined) return value;
   }
-  return 0;
+  return undefined;
 }
 
 export function extractUsage(value: unknown): Usage {
   if (!value || typeof value !== "object") return emptyUsage();
   const record = value as Record<string, unknown>;
   const raw = record.usage && typeof record.usage === "object" ? record.usage as Record<string, unknown> : record;
-  const promptTokens = numberField(raw, "prompt_tokens", "input_tokens", "promptTokens", "inputTokens");
-  const completionTokens = numberField(raw, "completion_tokens", "output_tokens", "completionTokens", "outputTokens");
   const promptDetails = raw.prompt_tokens_details && typeof raw.prompt_tokens_details === "object"
     ? raw.prompt_tokens_details as Record<string, unknown>
     : raw.input_tokens_details && typeof raw.input_tokens_details === "object"
       ? raw.input_tokens_details as Record<string, unknown>
       : {};
-  const cachedTokens = Math.min(promptTokens, numberField(promptDetails, "cached_tokens", "cachedTokens"));
-  const totalTokens = numberField(raw, "total_tokens", "totalTokens") || promptTokens + completionTokens;
-  return { promptTokens, completionTokens, cachedTokens, totalTokens };
+  return canonicalUsage(
+    numberField(raw, "prompt_tokens", "input_tokens", "promptTokens", "inputTokens"),
+    numberField(raw, "completion_tokens", "output_tokens", "completionTokens", "outputTokens"),
+    numberField(promptDetails, "cached_tokens", "cachedTokens"),
+    numberField(raw, "total_tokens", "totalTokens"),
+  );
 }
 
 function mergeUsage(left: Usage, right: Usage): Usage {
-  return {
-    promptTokens: Math.max(left.promptTokens, right.promptTokens),
-    completionTokens: Math.max(left.completionTokens, right.completionTokens),
-    cachedTokens: Math.max(left.cachedTokens, right.cachedTokens),
-    totalTokens: Math.max(left.totalTokens, right.totalTokens, right.promptTokens + right.completionTokens),
-  };
+  return mergeCanonicalUsage(left, right);
 }
 
 function parseUsageFromText(text: string): Usage {
@@ -606,10 +608,12 @@ function googleUsage(value: unknown): Usage {
   const raw = record.usageMetadata && typeof record.usageMetadata === "object"
     ? record.usageMetadata as Record<string, unknown>
     : record;
-  const promptTokens = numberField(raw, "promptTokenCount", "prompt_tokens", "input_tokens");
-  const completionTokens = numberField(raw, "candidatesTokenCount", "completion_tokens", "output_tokens");
-  const totalTokens = numberField(raw, "totalTokenCount", "total_tokens") || promptTokens + completionTokens;
-  return { promptTokens, completionTokens, cachedTokens: 0, totalTokens };
+  return canonicalUsage(
+    numberField(raw, "promptTokenCount", "prompt_tokens", "input_tokens"),
+    numberField(raw, "candidatesTokenCount", "completion_tokens", "output_tokens"),
+    0,
+    numberField(raw, "totalTokenCount", "total_tokens"),
+  );
 }
 
 function mapGoogleFinishReason(value: unknown): string {
