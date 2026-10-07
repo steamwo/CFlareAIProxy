@@ -213,6 +213,55 @@ export function normalizeAgentMessageInput(body: Record<string, unknown>, conver
   return output;
 }
 
+function orphanDelegationOutputText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "";
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+export function rewriteCodexOrphanDelegationInput(
+  body: Record<string, unknown>,
+  enabled: boolean,
+  subagentHeader: string | null | undefined,
+): Record<string, unknown> {
+  if (!enabled || subagentHeader?.trim().toLowerCase() !== "collab_spawn" || !Array.isArray(body.input)) return body;
+  const output = cloneBody(body);
+  if (!Array.isArray(output.input)) return body;
+
+  const availableCalls = new Map<string, number>();
+  for (const raw of output.input) {
+    const item = record(raw);
+    if (item.type !== "function_call" || typeof item.call_id !== "string" || !item.call_id.trim()) continue;
+    availableCalls.set(item.call_id, (availableCalls.get(item.call_id) ?? 0) + 1);
+  }
+
+  output.input = output.input.map((raw) => {
+    const item = record(raw);
+    if (item.type !== "function_call_output") return raw;
+    const callId = typeof item.call_id === "string" ? item.call_id.trim() : "";
+    if (callId && (availableCalls.get(callId) ?? 0) > 0) {
+      availableCalls.set(callId, (availableCalls.get(callId) ?? 0) - 1);
+      return raw;
+    }
+    if (item.namespace !== "codex_app") return raw;
+    const label = item.name === "create_thread"
+      ? "codex_app__create_thread"
+      : item.name === "send_message_to_thread"
+        ? "codex_app__send_message_to_thread"
+        : undefined;
+    if (!label) return raw;
+    return {
+      type: "message",
+      role: "user",
+      content: [{
+        type: "input_text",
+        text: `Tool output from ${label}:\n${orphanDelegationOutputText(item.output)}`,
+      }],
+    };
+  });
+  return output;
+}
+
 export function rewriteCollaborationNamespace(body: Record<string, unknown>): CodexMultiAgentOptimization {
   const output = cloneBody(body);
   if (hasCodexCollaborationConflict(output)) return { body: output, collaborationNamespaceOptimized: false };

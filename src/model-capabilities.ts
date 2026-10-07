@@ -39,6 +39,7 @@ export interface RouteRuntimeOptions {
   capabilities: ModelCapabilities;
   forceResponseModelMapping: boolean;
   codexMultiAgentV2?: boolean;
+  codexOrphanDelegationCompatibility?: boolean;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -278,7 +279,9 @@ export async function routeRuntimeOptions(env: Env, route: ModelRouteRow, endpoi
     || capabilities.forceResponseModelMapping === true;
   const routeMultiAgentFlag = options.codex_multi_agent_v2 ?? options.codexMultiAgentV2;
   const codexMultiAgentV2 = typeof routeMultiAgentFlag === "boolean" ? routeMultiAgentFlag : undefined;
-  return { capabilities, forceResponseModelMapping, codexMultiAgentV2 };
+  const routeOrphanFlag = options.codex_orphan_delegation_compatibility ?? options.codexOrphanDelegationCompatibility;
+  const codexOrphanDelegationCompatibility = typeof routeOrphanFlag === "boolean" ? routeOrphanFlag : undefined;
+  return { capabilities, forceResponseModelMapping, codexMultiAgentV2, codexOrphanDelegationCompatibility };
 }
 
 function containsImage(value: unknown, depth = 0): boolean {

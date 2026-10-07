@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import {
   isCodexMultiAgentClient, loadCodexMultiAgentModelProfiles, optimizeCodexMultiAgentV2Body,
+  rewriteCodexOrphanDelegationInput,
 } from "./codex-multi-agent-v2";
 import { providerFetchForCredential } from "./credential-fetch";
 import { authenticateGatewayKey, gatewayKeyAllowsModel, getCredential, getProvider, listCredentialAvailabilityForModel, listRoutesForModel, setCredentialError } from "./db";
@@ -241,6 +242,17 @@ export async function proxyGeneration(
         availabilityPromise.catch(() => undefined);
         const [provider, runtime] = await Promise.all([providerPromise, runtimePromise]);
         validateModelCapabilities(body, runtime.capabilities);
+        const providerOrphanDelegation = provider.options.codex_orphan_delegation_compatibility === true
+          || provider.options.codexOrphanDelegationCompatibility === true;
+        const orphanDelegationEnabled = runtime.codexOrphanDelegationCompatibility ?? providerOrphanDelegation;
+        const orphanBody = endpoint === "responses"
+          ? rewriteCodexOrphanDelegationInput(
+            body,
+            orphanDelegationEnabled,
+            c.req.raw.headers.get("x-openai-subagent"),
+          )
+          : body;
+
         const providerMultiAgentV2 = provider.options.codex_multi_agent_v2 === true || provider.options.codexMultiAgentV2 === true;
         const multiAgentEnabled = runtime.codexMultiAgentV2 ?? providerMultiAgentV2;
         const multiAgentEligible = multiAgentEnabled
@@ -250,14 +262,14 @@ export async function proxyGeneration(
           codexMultiAgentModels = loadCodexMultiAgentModelProfiles(c.env, allowedModels).catch(() => []);
         }
         const multiAgent = multiAgentEligible
-          ? optimizeCodexMultiAgentV2Body(body, {
+          ? optimizeCodexMultiAgentV2Body(orphanBody, {
             enabled: true,
             endpoint,
             providerKind: provider.kind,
             userAgent: c.req.raw.headers.get("user-agent"),
             models: await codexMultiAgentModels!,
           })
-          : { body, collaborationNamespaceOptimized: false };
+          : { body: orphanBody, collaborationNamespaceOptimized: false };
         const routeBody = multiAgent.body;
 
         const availability = await availabilityPromise;
