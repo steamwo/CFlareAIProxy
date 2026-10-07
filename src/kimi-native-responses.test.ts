@@ -71,6 +71,16 @@ function bodyOf(request: ReturnType<typeof buildKimiRequest>): Record<string, un
   return JSON.parse(String(request.init.body)) as Record<string, unknown>;
 }
 
+function sseResponse(frames: string): Response {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(frames));
+      controller.close();
+    },
+  }), { headers: { "content-type": "text/event-stream" } });
+}
+
 describe("Kimi native Responses", () => {
   it("keeps the existing Responses-to-Chat bridge as the default", () => {
     const request = buildKimiRequest(context());
@@ -151,5 +161,22 @@ describe("Kimi native Responses", () => {
     expect(payload.output).toEqual([
       { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
     ]);
+  });
+
+  it("rejects a native Responses stream that closes before [DONE]", async () => {
+    const response = await prepareProviderResponse({
+      upstream: sseResponse('data: {"type":"response.completed","response":{"status":"completed"}}\n\n'),
+      mode: "passthrough",
+      requestedStream: true,
+      model: "public-kimi",
+      requestId: "request-native-kimi-stream",
+      providerKind: "kimi",
+      endpoint: "responses",
+    });
+
+    await expect(response.text()).rejects.toMatchObject({
+      status: 502,
+      code: "UPSTREAM_STREAM_INCOMPLETE",
+    });
   });
 });
